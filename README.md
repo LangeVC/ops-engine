@@ -32,7 +32,7 @@ When managing multiple organizations and repositories, relying purely on GitHub 
 ## 🏗️ Architecture Philosophy: The "Layover" Model
 `ops-engine` contains **zero** business logic. It provides the generic queue, the API adapters, and the abstract handlers.
 
-You consume it by building a thin **"Layover"** application for your organization (e.g., `fusionaize-ops`), which imports this engine and defines rules via a Pydantic/YAML Configuration.
+You consume it by building a thin **"Layover"** application for your organization (e.g., `xyz-ops`), which imports this engine and defines rules via a Pydantic/YAML Configuration.
 
 ---
 
