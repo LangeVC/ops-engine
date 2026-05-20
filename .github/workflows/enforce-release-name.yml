@@ -1,0 +1,21 @@
+name: Enforce Release Naming Convention
+
+on:
+  release:
+    types: [published, edited]
+
+jobs:
+  check-naming-convention:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check release name pattern
+        env:
+          RELEASE_NAME: ${{ github.event.release.name }}
+        run: |
+          echo "Checking release name: $RELEASE_NAME"
+          # Regular expression to match "Ops Engine vX.Y.Z"
+          if [[ ! "$RELEASE_NAME" =~ ^Ops\ Engine\ v[0-9]+\.[0-9]+\.[0-9]+.*$ ]]; then
+            echo "::error::Release name '$RELEASE_NAME' does not match the required convention 'Ops Engine vX.Y.Z'"
+            exit 1
+          fi
+          echo "Release name matches convention."
