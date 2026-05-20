@@ -31,3 +31,13 @@ class ForgejoAdapter(ForgeAdapter):
             "sender": data.get("sender", {}).get("username"),
             "raw": data
         }
+
+    async def list_issues(self, repo_full_name: str, state: str = "open") -> list[Dict[str, Any]]:
+        logger.info(f"Forgejo: Listing {state} issues for {repo_full_name}")
+        return []
+
+    async def update_issue(self, repo_full_name: str, issue_number: int, state: str = None, labels: list[str] = None) -> None:
+        logger.info(f"Forgejo: Updating issue {repo_full_name}#{issue_number} (state={state}, labels={labels})")
+
+    async def dispatch_workflow(self, repo_full_name: str, event_type: str, client_payload: Dict[str, Any] = None) -> None:
+        logger.info(f"Forgejo: Dispatching workflow '{event_type}' on {repo_full_name} with payload {client_payload}")
