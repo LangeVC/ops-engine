@@ -90,3 +90,19 @@ class ForgeAdapter(ABC):
     async def release_exists(self, repo_full_name: str, tag_name: str) -> bool:
         """Check if a release for the given tag already exists."""
         pass
+
+    @abstractmethod
+    async def create_pull_request(
+        self, repo_full_name: str, title: str, body: str,
+        head: str, base: str, labels: Optional[list[str]] = None,
+    ) -> dict[str, Any]:
+        """Create a pull request. Returns dict with at least 'number' and 'html_url'."""
+        pass
+
+    @abstractmethod
+    async def list_pull_requests(
+        self, repo_full_name: str, state: str = "open",
+        head: Optional[str] = None, base: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        """List pull requests, optionally filtered by head/base branch."""
+        pass

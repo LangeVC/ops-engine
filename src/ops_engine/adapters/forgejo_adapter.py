@@ -213,3 +213,40 @@ class ForgejoAdapter(ForgeAdapter):
             if e.response.status_code == 404:
                 return False
             raise
+
+    async def create_pull_request(
+        self, repo_full_name: str, title: str, body: str,
+        head: str, base: str, labels: list[str] | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "title": title,
+            "body": body,
+            "head": head,
+            "base": base,
+        }
+        # Forgejo supports label IDs on PR creation — resolve names to IDs
+        if labels:
+            resp = await self._request("GET", f"/repos/{repo_full_name}/labels")
+            all_labels = resp.json()
+            label_map = {lbl["name"]: lbl["id"] for lbl in all_labels}
+            label_ids = [label_map[name] for name in labels if name in label_map]
+            if label_ids:
+                payload["labels"] = label_ids
+        resp = await self._request(
+            "POST", f"/repos/{repo_full_name}/pulls", json=payload,
+        )
+        return resp.json()
+
+    async def list_pull_requests(
+        self, repo_full_name: str, state: str = "open",
+        head: str | None = None, base: str | None = None,
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"state": state, "limit": 50}
+        # Forgejo doesn't support head/base query params natively — filter client-side
+        resp = await self._request("GET", f"/repos/{repo_full_name}/pulls", params=params)
+        pulls = resp.json()
+        if head:
+            pulls = [p for p in pulls if p.get("head", {}).get("ref") == head]
+        if base:
+            pulls = [p for p in pulls if p.get("base", {}).get("ref") == base]
+        return pulls

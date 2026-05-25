@@ -229,3 +229,33 @@ class GithubAdapter(ForgeAdapter):
             if e.response.status_code == 404:
                 return False
             raise
+
+    async def create_pull_request(
+        self, repo_full_name: str, title: str, body: str,
+        head: str, base: str, labels: list[str] | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "title": title,
+            "body": body,
+            "head": head,
+            "base": base,
+        }
+        if labels:
+            payload["labels"] = labels
+        resp = await self._request(
+            "POST", f"/repos/{repo_full_name}/pulls", json=payload,
+        )
+        return resp.json()
+
+    async def list_pull_requests(
+        self, repo_full_name: str, state: str = "open",
+        head: str | None = None, base: str | None = None,
+    ) -> list[dict[str, Any]]:
+        params: dict[str, str] = {"state": state, "per_page": "100"}
+        if head:
+            # GitHub expects owner:branch format for cross-repo, or just branch for same-repo
+            params["head"] = head if ":" in head else f"{repo_full_name.split('/')[0]}:{head}"
+        if base:
+            params["base"] = base
+        resp = await self._request("GET", f"/repos/{repo_full_name}/pulls", params=params)
+        return resp.json()
