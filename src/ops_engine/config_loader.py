@@ -14,6 +14,60 @@ class StaleManagementConfig(BaseModel):
     exempt_labels: list[str] = Field(default_factory=list)
 
 
+# ── Health monitor (scheduled probes; CORE-006) ───────────────────────────────
+
+class HealthCheck(BaseModel):
+    """A single probe definition."""
+    name: str
+    url: str
+    method: str = Field(default="GET")
+    timeout_seconds: int = Field(default=10)
+    expect_status: int = Field(default=200)
+    # Optional JSON-path check: response[field] == value (top-level fields only).
+    expect_json_field: Optional[str] = None
+    expect_json_value: Optional[str] = None
+    # Extra request headers. The probe always sets a sensible default
+    # User-Agent so Cloudflare-fronted endpoints don't 403 the python-urllib
+    # default; override per-check here if needed.
+    headers: dict[str, str] = Field(default_factory=dict)
+
+
+class HealthSink(BaseModel):
+    """Where to write health-check results.
+
+    Sink types:
+      - "stdout"        — one-line JSON summary to STDOUT (default, always safe).
+      - "file"          — append JSONL to ``path`` (SHOULD NOT be inside the
+                          source repo; use a CI runner tmp path or external volume).
+      - "webhook"       — POST the JSON result to ``url``.
+      - "github_issue"  — only on failure, create/update a labeled issue via the
+                          configured GitHub adapter (avoids repo pollution).
+    """
+    type: str = Field(default="stdout")
+    # file
+    path: Optional[str] = None
+    # webhook
+    url: Optional[str] = None
+    headers: dict[str, str] = Field(default_factory=dict)
+    # github_issue
+    issue_label: str = Field(default="health-alert")
+    issue_title: str = Field(default="Health Check Failed")
+    only_on_failure: bool = Field(default=True)
+
+
+class HealthMonitorConfig(BaseModel):
+    """Configuration for scheduled health probes (HealthMonitor module).
+
+    Drop this section into your org-layover config.yml to enable health monitoring
+    without writing handler code. Repo-layover does NOT override this (org-only).
+    """
+    enabled: bool = Field(default=False)
+    checks: list[HealthCheck] = Field(default_factory=list)
+    sinks: list[HealthSink] = Field(default_factory=lambda: [HealthSink(type="stdout")])
+    # On any failed check, exit the runner with non-zero status (CI signal).
+    fail_run_on_error: bool = Field(default=True)
+
+
 class AutoTriageConfig(BaseModel):
     add_needs_triage_label: bool = Field(default=True)
     assign_author: bool = Field(default=False)
