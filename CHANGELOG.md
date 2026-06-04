@@ -2,6 +2,16 @@
 
 All notable changes to ops-engine are documented in this file.
 
+## [2.1.2] — 2026-06-04
+
+### Fixed
+
+- **HealthMonitor**: actually declare `pyyaml>=6.0` as a runtime dependency.
+  v2.1.1 claimed to fix this in the CHANGELOG but the corresponding edit to
+  `pyproject.toml` never landed (silent Edit-call failure during release).
+  This release is the real fix. Symptom on consumers without transitive
+  pyyaml: `ModuleNotFoundError: No module named 'yaml'` at first module run.
+
 ## [2.1.1] — 2026-06-04
 
 ### Fixed
@@ -11,6 +21,9 @@ All notable changes to ops-engine are documented in this file.
   package only listed `pydantic` + `httpx` in `dependencies`. Triggered
   `ModuleNotFoundError: No module named 'yaml'` on first run for any
   consumer that didn't already have pyyaml installed transitively.
+
+  (Note: the CHANGELOG entry above was correct but the corresponding
+  `pyproject.toml` edit did not land — see 2.1.2.)
 
 ## [2.1.0] — 2026-06-04
 
