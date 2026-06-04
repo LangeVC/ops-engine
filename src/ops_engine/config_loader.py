@@ -1,6 +1,7 @@
 """Config models — Pydantic schemas for ops-engine configuration.
 
 v2: Added ReleaseConfig, MergeConfig, MirrorConfig, NotificationConfig.
+v2.1: Added MigrationSourceConfig and MigrationTargetConfig (CORE-007).
 """
 
 from typing import Optional
@@ -130,6 +131,51 @@ class NotificationConfig(BaseModel):
     channels: list[NotificationChannel] = Field(default_factory=list)
 
 
+# ── Migration runner (forward-only SQL migrations; CORE-007) ─────────────────
+
+
+class MigrationSourceConfig(BaseModel):
+    """Where the runner gets its ``.sql`` files from.
+
+    Two source types are supported:
+
+      - ``local`` — point ``path`` at a directory of ``[0-9]{4}_*.sql`` files.
+        Used for dev and tests.
+      - ``git``   — shallow clone ``url`` at ``ref`` and read ``subpath`` from
+        the resulting tree. ``token_env_var`` names the env var holding a token
+        used to authenticate the clone (GitHub form:
+        ``https://x-access-token:<token>@github.com/...``).
+    """
+    type: str = Field(default="git")  # "git" | "local"
+    # git
+    url: Optional[str] = None
+    ref: str = Field(default="main")
+    subpath: str = Field(default="migrations")
+    token_env_var: Optional[str] = None
+    # local
+    path: Optional[str] = None
+
+
+class MigrationTargetConfig(BaseModel):
+    """One database the runner can manage.
+
+    The layover supplies one of these per service it owns a database for.
+    Lives under ``<Org>.migrations.<service_name>`` in config.yml.
+    """
+    db_url_env: str
+    source: MigrationSourceConfig
+    table_name: str = Field(default="schema_migrations")
+    lock_timeout: str = Field(default="5s")
+    max_retries: int = Field(default=5)
+    # Cron drift-check cadence in seconds (the cron loop's sleep interval).
+    check_interval_seconds: int = Field(default=900)
+    # ``manual_apply`` — cron only emits drift events; applies go through the
+    #                    admin endpoint. Safe default; what capacium-ops uses.
+    # ``auto_apply``   — cron applies pending migrations automatically. Only
+    #                    suitable for ephemeral envs (CI, throwaway dev).
+    mode: str = Field(default="manual_apply")
+
+
 # --- Aggregate Configs ---
 
 
@@ -153,6 +199,9 @@ class OrgConfig(BaseModel):
     auto_merge: Optional[MergeConfig] = None
     notifications: Optional[NotificationConfig] = None
     repositories: dict[str, RepoConfig] = Field(default_factory=dict)
+    # v2.1: schema-migration targets, keyed by service name. Org-only (a service
+    # owns exactly one DB layout — there is no per-repo override.)
+    migrations: dict[str, MigrationTargetConfig] = Field(default_factory=dict)
 
 
 class OpsEngineConfig(BaseModel):

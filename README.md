@@ -36,6 +36,7 @@ When managing multiple organizations and repositories, relying purely on GitHub 
 | **Notifications** | Multi-channel alerts (webhook, Slack, Discord) with event filtering | Event |
 | **Event Deduplication** | In-memory webhook dedup for GitHub, Forgejo, and Gitea delivery IDs | Always |
 | **Health Monitor** | Scheduled HTTP probes with pluggable sinks (stdout / file / webhook / GitHub Issue). Replaces the anti-pattern of committing health logs back to the source repo. | Cron |
+| **Migration Runner** | Forward-only SQL migration tracker with `schema_migrations` table, drift checks, lock-timeout backoff, and `CREATE INDEX CONCURRENTLY` handling. Optional `[postgres]` extra. | Cron + Manual |
 
 ---
 
@@ -159,6 +160,37 @@ notifications:
       url: "${SLACK_WEBHOOK_URL}"
       events: ["release", "mirror_drift"]
 ```
+
+### Migration Runner
+
+Forward-only SQL migration tracker. Install the optional Postgres driver
+(`pip install 'ops-engine[postgres]'`) on layovers that use this module. One
+target per service; the layover wires `check_pending()` to its cron loop and
+`apply_pending()` to an admin endpoint.
+
+```yaml
+migrations:
+  <service-name>:
+    db_url_env: SERVICE_DB_URL
+    source:
+      type: git              # git | local
+      url: https://github.com/Org/service.git
+      ref: main
+      subpath: migrations
+      token_env_var: GITHUB_APP_TOKEN
+    table_name: schema_migrations
+    lock_timeout: 5s
+    max_retries: 5
+    check_interval_seconds: 900
+    mode: manual_apply       # manual_apply (safe) | auto_apply (ephemeral only)
+```
+
+The runner stores `(version, applied_at, checksum, applied_by)` in the
+configured table, detects file drift via sha256 checksums, retries on
+`lock_timeout` with backoff `[2, 5, 10, 20, 30]s`, and automatically pulls
+`CREATE INDEX CONCURRENTLY` out of the per-file transaction (Postgres
+requirement). The siblings `lvc-ops` and `fusionaize-ops` layovers can opt in
+by adding the same `migrations:` block — only `capacium-ops` wires it today.
 
 ### Config Inheritance
 
