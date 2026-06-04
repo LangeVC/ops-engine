@@ -35,6 +35,7 @@ When managing multiple organizations and repositories, relying purely on GitHub 
 | **Mirror Verification** | Verifies cross-forge mirror sync (Forgejo ↔ GitHub) | Webhook |
 | **Notifications** | Multi-channel alerts (webhook, Slack, Discord) with event filtering | Event |
 | **Event Deduplication** | In-memory webhook dedup for GitHub, Forgejo, and Gitea delivery IDs | Always |
+| **Health Monitor** | Scheduled HTTP probes with pluggable sinks (stdout / file / webhook / GitHub Issue). Replaces the anti-pattern of committing health logs back to the source repo. | Cron |
 
 ---
 
