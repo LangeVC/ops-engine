@@ -2,6 +2,30 @@
 
 All notable changes to ops-engine are documented in this file.
 
+## [2.1.0] — 2026-06-04
+
+### Added
+
+- **HealthMonitor** (CORE-006): Scheduled HTTP probes with pluggable sinks
+  - Probe targets defined in consumer's `config.yml` (URL, expected status, optional JSON-field assertion)
+  - Sinks: `stdout` (CI log), `file` (per-run log file), `webhook` (POST JSON), `github_issue` (label-targeted)
+  - Replaces the anti-pattern of writing health-check log entries back to the source repo via auto-commit
+  - Module entry point: `python -m ops_engine.modules.health_monitor --config <cfg> --org <name>`
+  - Consumer: `Capacium/capacium-ops` (PR #4 — replaces inline shell + commit-back)
+- **MigrationRunner** (CORE-007): Forward-only SQL migration runner
+  - Discovers `*.sql` files in a directory, ordered lexicographically
+  - Tracks applied migrations + checksums in `schema_migrations` table
+  - Detects checksum drift (file edited after apply) → hard fail
+  - Safely handles `CREATE INDEX CONCURRENTLY` (each statement outside the migration transaction)
+  - Pluggable adapter (`[postgres]` extra ships psycopg2 fakeable adapter; SQLite trivially addable)
+  - Test suite: apply-pending, checksum-mismatch, concurrent-index, idempotent, lock-timeout
+  - Consumer: `Capacium/capacium-ops` PR #5 wires this for `capacium-exchange`
+- **Module-side config loader** (`ops_engine.config_loader`): validates per-module section in consumer's `config.yml`
+
+### Changed
+
+- `README.md`: lists both new modules in the Modules table
+
 ## [2.0.0] — 2026-05-25
 
 ### Added
