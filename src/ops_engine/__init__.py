@@ -15,6 +15,8 @@ from .config_loader import (
     MirrorConfig,
     NotificationConfig,
     NotificationChannel,
+    MigrationSourceConfig,
+    MigrationTargetConfig,
 )
 from .modules.triage import TriageHandler
 from .modules.dependency_trigger import DependencyTriggerHandler
@@ -24,6 +26,16 @@ from .modules.release import ReleaseHandler
 from .modules.merge import MergeHandler
 from .modules.mirror import MirrorHandler
 from .modules.notification import NotificationHandler
+from .modules.migration_runner import (
+    MigrationRunner,
+    MigrationSource,
+    LocalDirSource,
+    GitRepoSource,
+    MigrationFile,
+    CheckResult,
+    ApplyResult,
+    runner_from_config,
+)
 from .utils.changelog_parser import ChangelogParser
 
 __all__ = [
@@ -44,6 +56,8 @@ __all__ = [
     "MirrorConfig",
     "NotificationConfig",
     "NotificationChannel",
+    "MigrationSourceConfig",
+    "MigrationTargetConfig",
     # Handlers (v1)
     "TriageHandler",
     "DependencyTriggerHandler",
@@ -54,6 +68,15 @@ __all__ = [
     "MergeHandler",
     "MirrorHandler",
     "NotificationHandler",
+    # Migration runner (CORE-007)
+    "MigrationRunner",
+    "MigrationSource",
+    "LocalDirSource",
+    "GitRepoSource",
+    "MigrationFile",
+    "CheckResult",
+    "ApplyResult",
+    "runner_from_config",
     # Utils
     "ChangelogParser",
 ]
