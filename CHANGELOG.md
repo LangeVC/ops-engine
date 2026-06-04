@@ -2,6 +2,16 @@
 
 All notable changes to ops-engine are documented in this file.
 
+## [2.1.1] — 2026-06-04
+
+### Fixed
+
+- **HealthMonitor**: declare `pyyaml>=6.0` as a runtime dependency. The
+  module imports `yaml` to parse the consumer's `config.yml` but the
+  package only listed `pydantic` + `httpx` in `dependencies`. Triggered
+  `ModuleNotFoundError: No module named 'yaml'` on first run for any
+  consumer that didn't already have pyyaml installed transitively.
+
 ## [2.1.0] — 2026-06-04
 
 ### Added
