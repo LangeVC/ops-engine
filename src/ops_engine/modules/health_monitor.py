@@ -53,6 +53,7 @@ from ops_engine.config_loader import (
     HealthMonitorConfig,
     HealthSink,
 )
+from ops_engine.utils.rate_limit_tracker import track_rate_limit
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +156,7 @@ def _emit_webhook(results: list[dict[str, Any]], sink: HealthSink) -> None:
         logger.warning("webhook sink %s failed: %s", sink.url, e)
 
 
+@track_rate_limit(namespace="capacium-ops")
 def _emit_github_issue(
     results: list[dict[str, Any]],
     sink: HealthSink,

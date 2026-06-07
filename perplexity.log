@@ -1,0 +1,12 @@
+2026-06-04 15:00:37,584 - mcp - INFO - Authenticated — all 4 tools available.
+2026-06-04 15:00:37,601 - mcp.server.lowlevel.server - INFO - Processing request of type ListToolsRequest
+2026-06-04 15:00:37,603 - mcp.server.lowlevel.server - INFO - Processing request of type ListPromptsRequest
+2026-06-04 15:00:37,604 - mcp.server.lowlevel.server - INFO - Processing request of type ListResourcesRequest
+2026-06-04 18:17:01,322 - mcp - INFO - Authenticated — all 4 tools available.
+2026-06-04 18:17:01,335 - mcp.server.lowlevel.server - INFO - Processing request of type ListToolsRequest
+2026-06-04 18:17:01,336 - mcp.server.lowlevel.server - INFO - Processing request of type ListPromptsRequest
+2026-06-04 18:17:01,337 - mcp.server.lowlevel.server - INFO - Processing request of type ListResourcesRequest
+2026-06-05 01:18:15,659 - mcp - INFO - Authenticated — all 4 tools available.
+2026-06-05 01:18:15,674 - mcp.server.lowlevel.server - INFO - Processing request of type ListToolsRequest
+2026-06-05 01:18:15,676 - mcp.server.lowlevel.server - INFO - Processing request of type ListPromptsRequest
+2026-06-05 01:18:15,677 - mcp.server.lowlevel.server - INFO - Processing request of type ListResourcesRequest
