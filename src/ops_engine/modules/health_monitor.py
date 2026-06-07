@@ -95,7 +95,12 @@ def _probe(check: HealthCheck) -> dict[str, Any]:
                     result["error"] = f"json decode failed: {e}"
                     return result
                 got = j.get(check.expect_json_field)
-                if got != check.expect_json_value:
+                if got is None and check.expect_json_value is not None:
+                    result["error"] = (
+                        f"json[{check.expect_json_field}] is missing (field not found)"
+                    )
+                    return result
+                if check.expect_json_value is not None and got != check.expect_json_value:
                     result["error"] = (
                         f"json[{check.expect_json_field}]={got!r} "
                         f"!= expected {check.expect_json_value!r}"
