@@ -13,6 +13,9 @@
 
 ---
 
+> **Repository provenance.** The canonical home of this repository is Forgejo
+> at `git.langevc.com/langevc/ops-engine`. The GitHub repository is a mirror.
+
 ## The Problem
 
 When managing multiple organizations and repositories, relying purely on GitHub Actions for organizational hygiene quickly drains runner capacity and exhausts API rate limits. Beyond that, release automation, auto-merge, and cross-forge mirror verification require custom glue code scattered across repos.
