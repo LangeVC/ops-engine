@@ -6,6 +6,8 @@ on:
 
 jobs:
   check-naming-convention:
+    # GitHub-only: never runs on the Forgejo mirror side.
+    if: github.server_url == 'https://github.com'
     runs-on: ubuntu-latest
     steps:
       - name: Check release name pattern
