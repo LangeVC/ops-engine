@@ -1,5 +1,42 @@
 # Changelog
 
+## 2.2.0
+
+### `version-sync.py` — declare where a repo keeps its version
+
+Generic tooling, moved here from `langevc/lvc-ops` because it belongs to the
+open base rather than behind one org's privacy boundary. It carries no
+organisation, host or product name — 266 lines, zero references to any of
+them — and anyone can use it unchanged.
+
+A repository declares its version locations in `.version.yaml`:
+
+```yaml
+schema: 1
+source_of_truth: pyproject.toml
+locations:
+  - path: pyproject.toml
+    pattern: '^version\s*=\s*"(\d+\.\d+\.\d+)"'
+    required: true
+```
+
+- `check` — every required location agrees with the source of truth
+- `check-tag TAG` — the same, plus the tag equals the source of truth
+- `bump VERSION` — write the new version to every declared location
+
+The declaration stays in the consuming repository: the tool is generic, the
+version locations are not. That split is the point.
+
+### Why it moved
+
+It lived in a private ops repository and was fetched at runtime by release
+gates in other organisations. Those fetches got an HTML login page with HTTP
+200 and reported success — a release gate then died on
+`SyntaxError: <!DOCTYPE html>` three steps later. Here it is reachable from
+the public mirror without a credential, which removes the cross-organisation
+dependency instead of papering over it.
+
+
 All notable changes to ops-engine are documented in this file.
 
 ## [2.1.2] — 2026-06-04
