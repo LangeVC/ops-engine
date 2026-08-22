@@ -51,3 +51,30 @@ def test_declaration_uses_supported_schema():
     assert declaration.get("schema") == 1
     assert declaration.get("package") == "ops_engine"
     assert declaration.get("semver") == "SemVer 2.0.0"
+
+
+def _reachable_submodules():
+    tree = ast.parse(SRC_INIT.read_text(encoding="utf-8"))
+    submodules = set()
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom) and node.level and node.module:
+            submodules.add(node.module.split(".")[0])
+    return submodules
+
+
+def test_name_absent_from_declaration_is_unpromised():
+    declaration = _load_declaration()
+    declared_names = {e["name"] for e in declaration["exports"]}
+    actual_names = set(_actual_all())
+
+    unpromised = actual_names - declared_names
+    assert not unpromised, (
+        "a name absent from the declaration is unpromised and must not be "
+        f"promised via __all__: {sorted(unpromised)}"
+    )
+
+    reachable = _reachable_submodules()
+    assert reachable.isdisjoint(actual_names), (
+        "submodule names are absent from the declaration, hence unpromised, "
+        f"and must not appear in __all__: {sorted(reachable & actual_names)}"
+    )

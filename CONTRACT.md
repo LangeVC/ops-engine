@@ -75,6 +75,22 @@ contract. In particular:
 - The module-side loader `ops_engine.config_loader` is **internal** to this
   dispatch and may not be modified or promised by it.
 
+## Unpromised names
+
+A name is **promised** only if it appears in the machine-readable declaration
+above. A name **absent** from that declaration is **unpromised**: it carries no
+guarantee, however it happens to be reachable. For example, importing a
+submodule as a bare name (`from ops_engine import config_loader`) succeeds at
+runtime because Python resolves the submodule, but `config_loader` is absent
+from the declaration and is therefore unpromised. The same holds for the other
+submodule names reachable as bare names — `adapters`, `core`, `modules`, and
+`utils` — and for the adapter classes `ForgeAdapter`, `GithubAdapter`, and
+`ForgejoAdapter`.
+
+A consumer may rely on a name only when it is both listed in
+`ops_engine.__all__` and classified `contract` here. Anything else is
+unpromised and may change or vanish in a minor bump.
+
 ## What a version bump may change
 
 Versioning follows [Semantic Versioning 2.0.0](https://semver.org/). Applied
