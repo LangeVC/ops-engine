@@ -32,3 +32,11 @@ jobs:
             exit 1
           fi
           echo "Release name matches convention."
+      # FFR-300-1 criterion 3: no org/host/product name leaks into a consumer's
+      # runtime gate surface, and no gate fetches generic tooling from a private
+      # layover. The check runs on every release so drift fails here rather than
+      # after it is published.
+      - name: Scan template for org/host/product leaks
+        run: |
+          set -euo pipefail
+          bash tests/test_template_has_no_business_names.sh
