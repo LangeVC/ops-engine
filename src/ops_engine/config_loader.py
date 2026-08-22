@@ -8,6 +8,32 @@ from typing import Any, Optional
 from pydantic import BaseModel, Field, ValidationError
 
 
+def canonical_org_key(repository: dict[str, Any]) -> str:
+    """Derive the canonical org key from a Forgejo webhook ``repository`` mapping.
+
+    Forgejo canonicalizes every org name to a lowercase ``lower_name``. That value
+    — and only that value — is the canonical org key used by every internal lookup
+    (see :meth:`OpsEngineConfig.get_repo_config`).
+
+    ``full_name`` (on the owner or the repository), ``login``, and ``username`` are
+    display or account identifiers and are NEVER used here. They can carry display
+    case (``fusionAIze`` vs ``fusionaize``) or a free-form display name
+    (``"Lange Ventures & Consulting"``), so deriving the key from them would key on
+    the wrong string and miss the config entry. If ``lower_name`` is absent, this
+    refuses rather than guessing from those fields.
+    """
+    owner = repository.get("owner") if isinstance(repository, dict) else None
+    if not isinstance(owner, dict):
+        raise ValueError("cannot derive canonical org key: repository has no 'owner' object")
+    lower_name = owner.get("lower_name")
+    if not lower_name:
+        raise ValueError(
+            "cannot derive canonical org key: owner has no 'lower_name'; "
+            "refusing to fall back to full_name/login/username"
+        )
+    return lower_name
+
+
 class ConfigSectionError(TypeError):
     """A config section failed to resolve to a typed model.
 
@@ -331,11 +357,22 @@ class OpsEngineConfig(BaseModel):
     def get_repo_config(self, org_name: str, repo_name: str) -> RepoConfig:
         """Returns a resolved RepoConfig merging Org defaults with Repo specifics.
 
+        ``org_name`` is expected to be the canonical org key — the Forgejo
+        ``lower_name``, always lowercase (see :func:`canonical_org_key`). Lookup
+        is resolved against the stored org keys on that lowercase basis, so a
+        caller that still holds a display-cased name resolves to the same config
+        instead of missing it.
+
         Every declared section resolves to a typed model (never a raw dict).
         A missing org, or a section holding an untyped value, raises
         ``ConfigSectionError`` naming the offending section.
         """
         org_config = self.orgs.get(org_name)
+        if org_config is None:
+            org_config = next(
+                (v for k, v in self.orgs.items() if k.lower() == org_name.lower()),
+                None,
+            )
         if org_config is None:
             raise ConfigSectionError(
                 "orgs",
