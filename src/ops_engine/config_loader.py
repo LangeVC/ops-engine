@@ -4,8 +4,41 @@ v2: Added ReleaseConfig, MergeConfig, MirrorConfig, NotificationConfig.
 v2.1: Added MigrationSourceConfig and MigrationTargetConfig (CORE-007).
 """
 
-from typing import Optional
-from pydantic import BaseModel, Field
+from typing import Any, Optional
+from pydantic import BaseModel, Field, ValidationError
+
+
+class ConfigSectionError(TypeError):
+    """A config section failed to resolve to a typed model.
+
+    Identifies the exact section (and org/repo scope) that is missing, malformed,
+    or holds a raw value instead of a typed config model. Raised instead of
+    silently falling back to a default so a raw dict can never reach an
+    ``.enabled`` access downstream.
+    """
+
+    def __init__(
+        self,
+        section: str,
+        *,
+        org_name: Optional[str] = None,
+        repo_name: Optional[str] = None,
+        detail: str = "",
+    ) -> None:
+        self.section = section
+        self.org_name = org_name
+        self.repo_name = repo_name
+        self.detail = detail
+        scope: list[str] = []
+        if org_name is not None:
+            scope.append(f"org {org_name!r}")
+        if repo_name is not None:
+            scope.append(f"repo {repo_name!r}")
+        scope.append(f"section {section!r}")
+        message = " -> ".join(scope) + " is not a valid typed config section"
+        if detail:
+            message += f": {detail}"
+        super().__init__(message)
 
 
 class StaleManagementConfig(BaseModel):
@@ -204,15 +237,115 @@ class OrgConfig(BaseModel):
     migrations: dict[str, MigrationTargetConfig] = Field(default_factory=dict)
 
 
+# The declared config sections and the model they must resolve to. Used to
+# guarantee ``get_repo_config`` returns a typed model (never a raw dict) for
+# every declared section, or raises ``ConfigSectionError`` naming the section.
+_DECLARED_SECTIONS: dict[str, type[BaseModel]] = {
+    "stale_management": StaleManagementConfig,
+    "auto_triage": AutoTriageConfig,
+    "workflow_dispatches": WorkflowDispatchConfig,
+    "dependency_triggers": DependencyTriggerConfig,
+    "release": ReleaseConfig,
+    "auto_merge": MergeConfig,
+    "mirror": MirrorConfig,
+    "notifications": NotificationConfig,
+}
+
+
+def _section_error_from_validation(exc: ValidationError) -> ConfigSectionError:
+    """Map a Pydantic ValidationError to a ConfigSectionError naming the section."""
+    errors = exc.errors()
+    if not errors:
+        return ConfigSectionError("config", detail=str(exc))
+    loc = list(errors[0].get("loc", ()))
+    section = "config"
+    org_name: Optional[str] = None
+    repo_name: Optional[str] = None
+    for i, part in enumerate(loc):
+        if part == "orgs" and i + 1 < len(loc):
+            org_name = str(loc[i + 1])
+        elif part == "repositories" and i + 1 < len(loc):
+            repo_name = str(loc[i + 1])
+    for part in loc:
+        if part in _DECLARED_SECTIONS:
+            section = str(part)
+            break
+    return ConfigSectionError(
+        section,
+        org_name=org_name,
+        repo_name=repo_name,
+        detail=str(errors[0].get("msg")),
+    )
+
+
+def _assert_typed_sections(
+    repo_config: RepoConfig,
+    org_name: str,
+    repo_name: str,
+) -> None:
+    """Ensure every non-null declared section is a typed model, not a raw dict."""
+    for section, model_type in _DECLARED_SECTIONS.items():
+        value = getattr(repo_config, section)
+        if value is None:
+            continue
+        if isinstance(value, list):
+            for item in value:
+                if not isinstance(item, model_type):
+                    raise ConfigSectionError(
+                        section,
+                        org_name=org_name,
+                        repo_name=repo_name,
+                        detail=(
+                            f"expected {model_type.__name__}, "
+                            f"got {type(item).__name__}"
+                        ),
+                    )
+            continue
+        if not isinstance(value, model_type):
+            raise ConfigSectionError(
+                section,
+                org_name=org_name,
+                repo_name=repo_name,
+                detail=f"expected {model_type.__name__}, got {type(value).__name__}",
+            )
+
+
 class OpsEngineConfig(BaseModel):
     orgs: dict[str, OrgConfig] = Field(default_factory=dict)
 
+    @classmethod
+    def load(cls, data: dict[str, Any]) -> "OpsEngineConfig":
+        """Build a typed config from a raw mapping (e.g. ``yaml.safe_load``).
+
+        A raw dict is coerced into typed section models here; a malformed
+        section raises ``ConfigSectionError`` naming the section rather than a
+        bare ``ValidationError``.
+        """
+        try:
+            return cls.model_validate(data)
+        except ConfigSectionError:
+            raise
+        except ValidationError as exc:
+            raise _section_error_from_validation(exc) from exc
+
     def get_repo_config(self, org_name: str, repo_name: str) -> RepoConfig:
-        """Returns a resolved RepoConfig merging Org defaults with Repo specifics."""
-        org_config = self.orgs.get(org_name, OrgConfig())
+        """Returns a resolved RepoConfig merging Org defaults with Repo specifics.
+
+        Every declared section resolves to a typed model (never a raw dict).
+        A missing org, or a section holding an untyped value, raises
+        ``ConfigSectionError`` naming the offending section.
+        """
+        org_config = self.orgs.get(org_name)
+        if org_config is None:
+            raise ConfigSectionError(
+                "orgs",
+                org_name=org_name,
+                repo_name=repo_name,
+                detail=f"no org named {org_name!r}",
+            )
         repo_specific = org_config.repositories.get(repo_name, RepoConfig())
 
-        return RepoConfig(
+        resolved = RepoConfig(
             stale_management=repo_specific.stale_management or org_config.stale_management,
             auto_triage=repo_specific.auto_triage or org_config.auto_triage,
             workflow_dispatches=repo_specific.workflow_dispatches,
@@ -223,3 +356,5 @@ class OpsEngineConfig(BaseModel):
             mirror=repo_specific.mirror,  # no org default (repo-specific only)
             notifications=repo_specific.notifications or org_config.notifications,
         )
+        _assert_typed_sections(resolved, org_name, repo_name)
+        return resolved
