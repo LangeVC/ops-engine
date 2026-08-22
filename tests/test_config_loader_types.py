@@ -116,3 +116,69 @@ def test_no_raw_dict_reaches_enabled_access():
     for dispatch in resolved.workflow_dispatches:
         assert type(dispatch).__name__ == "WorkflowDispatchConfig"
         assert dispatch.enabled is True
+
+
+def test_replay_dict_enabled_failure_is_never_attribute_error():
+    """Red proof (LVC-229): the v2.0.0 input that raised
+    ``'dict' object has no attribute 'enabled'`` on mirror/notifications is
+    replayed and yields a typed config or a named error — never AttributeError.
+
+    On the deployed engine the layover config loaded mirror/notifications as
+    raw dicts, so MirrorHandler/NotificationHandler hit ``config.enabled`` on a
+    plain dict and blew up on every push. This replays that same raw-mapping
+    shape end to end and asserts the ``.enabled`` access used by those handlers
+    either works on a typed model or no AttributeError escapes.
+    """
+    raw = {
+        "orgs": {
+            "TestOrg": {
+                "repositories": {
+                    "repo-a": {
+                        "mirror": {"enabled": True, "mirror_url": "github.com/org/a"},
+                        "notifications": {
+                            "enabled": True,
+                            "channels": [
+                                {"type": "slack", "url": "https://hooks.slack.com/x"}
+                            ],
+                        },
+                    }
+                }
+            }
+        }
+    }
+
+    config = OpsEngineConfig.load(raw)
+    resolved = config.get_repo_config("TestOrg", "repo-a")
+
+    def read_enabled():
+        return resolved.mirror.enabled, resolved.notifications.enabled
+
+    try:
+        mirror_enabled, notifications_enabled = read_enabled()
+    except AttributeError as exc:  # pragma: no cover - the defect this guards
+        pytest.fail(f"AttributeError surfaced from a replayed config: {exc}")
+    except ConfigSectionError:
+        # A named error is an acceptable outcome; the section is identified.
+        return
+
+    assert isinstance(resolved.mirror, MirrorConfig)
+    assert isinstance(resolved.notifications, NotificationConfig)
+    assert mirror_enabled is True
+    assert notifications_enabled is True
+
+
+def test_replay_malformed_notifications_is_named_error_not_attribute_error():
+    """Replay a shape where notifications cannot coerce: expect a named error,
+    never an AttributeError, when the downstream handler touches .enabled."""
+    raw = {
+        "orgs": {
+            "TestOrg": {
+                "repositories": {
+                    "repo-a": {"notifications": "not-a-mapping"},
+                }
+            }
+        }
+    }
+    with pytest.raises(ConfigSectionError) as excinfo:
+        OpsEngineConfig.load(raw)
+    assert excinfo.value.section == "notifications"
