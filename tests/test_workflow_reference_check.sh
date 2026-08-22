@@ -75,5 +75,61 @@ else
     bad "script does not set -euo pipefail"
 fi
 
+# 4 — red proof: removing a referenced script turns the next push red before
+# any release. The reference check is the push-time gate; a release step runs
+# only after the gate passes, mirroring push -> gate -> release. The red must
+# appear at the gate, so the release step is never reached.
+mkdir -p "$TMP/redproof"
+printf '#!/usr/bin/env bash\necho deploy\n' > "$TMP/redproof/deploy.sh"
+cat > "$TMP/redproof/workflow.yml" <<'EOF'
+name: red-proof
+on: push
+jobs:
+  job1:
+    runs-on: ubuntu-latest
+    steps:
+      - run: bash ./deploy.sh
+EOF
+
+push_gate_then_release() {
+    if run bash "$SCRIPT" workflow.yml; then
+        touch release-reached.marker
+        return 0
+    fi
+    return 1
+}
+
+# 4a — green first: the referenced script exists, so the first push passes and
+# the release step is reached.
+if (cd "$TMP/redproof" && push_gate_then_release); then
+    ok "red proof — referenced script present -> push green"
+    if [[ -e "$TMP/redproof/release-reached.marker" ]]; then
+        ok "red proof — green gate reaches release"
+    else
+        bad "red proof — green gate did not reach release"
+    fi
+else
+    bad "red proof — referenced script present -> expected push green"
+fi
+
+# 4b — red: remove the referenced script; the next push turns red and the
+# release step is never reached.
+rm "$TMP/redproof/deploy.sh"
+rm -f "$TMP/redproof/release-reached.marker"
+if (cd "$TMP/redproof" && push_gate_then_release); then
+    bad "red proof — removed script -> expected next push red"
+else
+    if grep -q "deploy.sh" "$TMP/err"; then
+        ok "red proof — removed script -> next push red, names the missing script"
+    else
+        bad "red proof — red gate does not name the removed script"
+    fi
+fi
+if [[ -e "$TMP/redproof/release-reached.marker" ]]; then
+    bad "red proof — release step ran despite the red gate"
+else
+    ok "red proof — red gate fired before any release step"
+fi
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [[ "$fail" -eq 0 ]]
