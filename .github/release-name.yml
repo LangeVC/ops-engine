@@ -1,0 +1,11 @@
+# Release-naming gate configuration for the generic template.
+#
+# The expected release name is declared data here, not string-interpolated
+# into the workflow below, so a consumer of this OSS template can override the
+# prefix to its own product name without editing the gate itself. The gate in
+# .github/workflows/enforce-release-name.yml reads this file at run time.
+#
+# For this repository the product name is "Ops Engine" — the engine's own name
+# as this repo's config value. The gate matches release names of the form
+# "<prefix> vX.Y.Z".
+release_name_prefix: "Ops Engine"

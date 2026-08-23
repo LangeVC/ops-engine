@@ -10,7 +10,7 @@ Stdlib only, no external deps, so it runs on an empty `ubuntu-latest` runner.
 
 Usage:
     version-sync.py check [--warnings-as-errors] [--repo PATH]
-    version-sync.py check-tag TAG [--warnings-as-errors] [--repo PATH]
+    version-sync.py check-tag TAG [--warnings-as-errors] [--allow-prereleases] [--repo PATH]
     version-sync.py bump NEW_VERSION [--include-informational] [--repo PATH]
 """
 
@@ -25,6 +25,15 @@ from typing import NoReturn
 SCHEMA = 1
 
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
+PRERELEASE_RE = re.compile(r"^\d+\.\d+\.\d+-[0-9A-Za-z.-]+$")
+
+
+class PrereleaseNotAllowedError(Exception):
+    """A prerelease tag or version was gated off by policy."""
+
+
+def _is_prerelease(version: str) -> bool:
+    return PRERELEASE_RE.match(version) is not None
 
 
 def _die(msg: str) -> "NoReturn":
@@ -127,14 +136,22 @@ def load(repo: Path) -> tuple[dict, list[dict]]:
     return decl, decl["locations"]
 
 
-def check(repo: Path, warnings_as_errors: bool) -> int:
+def check(
+    repo: Path, warnings_as_errors: bool, allow_prereleases: bool = False
+) -> int:
     decl, locs = load(repo)
     sot = decl["source_of_truth"]
     sot_val = read_version(repo / sot, _pattern_for(locs, sot))
     if sot_val is None:
         _die(f"source_of_truth {sot!r} unreadable or pattern did not match")
     if not SEMVER_RE.match(sot_val):
-        _die(f"source_of_truth {sot!r} value {sot_val!r} is not semver")
+        if not (_is_prerelease(sot_val) and allow_prereleases):
+            if _is_prerelease(sot_val):
+                raise PrereleaseNotAllowedError(
+                    f"source_of_truth {sot!r} value {sot_val!r} is a "
+                    f"prerelease; pass --allow-prereleases to permit it"
+                )
+            _die(f"source_of_truth {sot!r} value {sot_val!r} is not semver")
 
     print(f"source of truth: {sot} = {sot_val}")
     failed = False
@@ -214,26 +231,52 @@ def bump(repo: Path, new_version: str, include_informational: bool) -> int:
     return check(repo, warnings_as_errors=False)
 
 
-def check_tag(repo: Path, tag: str, warnings_as_errors: bool) -> int:
+def check_tag(
+    repo: Path,
+    tag: str,
+    warnings_as_errors: bool,
+    allow_prereleases: bool = False,
+) -> int:
     """Gate: run `check`, then verify source_of_truth == TAG (v-prefix stripped).
 
     The tag compare is the CAP-CI-001 case: a `v0.17.0` tag pointing at a
     commit whose source_of_truth still said 0.16.0. `check` only compares
     locations against each other, so a tag-vs-location drift passes it. This
     mode closes that gap.
+
+    A tag is compared against the source of truth without its `v` prefix:
+    `check-tag v2.4.3` against source of truth `2.4.3` is the same version.
+
+    When `allow_prereleases` is False (default), a prerelease tag such as
+    `v2.4.3-rc.1` is rejected with a named :class:`PrereleaseNotAllowedError`
+    rather than blamed on an incomparable semver string.
     """
-    rc = check(repo, warnings_as_errors)
+    rc = check(repo, warnings_as_errors, allow_prereleases)
     if rc != 0:
         return rc
     decl, _ = load(repo)
     sot = decl["source_of_truth"]
     val = read_version(repo / sot, _pattern_for(decl["locations"], sot))
-    if val != tag:
+    if val is None:
+        _die(f"source_of_truth {sot!r} unreadable or pattern did not match")
+
+    if tag.startswith("v"):
+        normalized_tag = tag[1:]
+    else:
+        normalized_tag = tag
+
+    if _is_prerelease(normalized_tag) and not allow_prereleases:
+        raise PrereleaseNotAllowedError(
+            f"tag {tag!r} is a prerelease; pass --allow-prereleases to permit it"
+        )
+
+    if val != normalized_tag:
         print(
-            f"version-sync: FAIL — tag {tag!r} != source_of_truth {sot} {val!r}"
+            f"version-sync: FAIL — tag {normalized_tag!r} != source_of_truth "
+            f"{sot} {val!r}"
         )
         return 1
-    print(f"version-sync: OK — tag {tag!r} == {sot} {val!r}")
+    print(f"version-sync: OK — tag {normalized_tag!r} == {sot} {val!r}")
     return 0
 
 
@@ -248,6 +291,11 @@ def main() -> int:
     )
     ct.add_argument("tag")
     ct.add_argument("--warnings-as-errors", action="store_true")
+    ct.add_argument(
+        "--allow-prereleases",
+        action="store_true",
+        help="permit semver prerelease tags/versions (e.g. v2.4.3-rc.1)",
+    )
     ct.add_argument("--repo", type=Path, default=Path("."))
     b = sub.add_parser("bump", help="bump: write new version then self-check")
     b.add_argument("new_version")
@@ -258,9 +306,14 @@ def main() -> int:
     if args.cmd == "check":
         return check(args.repo, args.warnings_as_errors)
     if args.cmd == "check-tag":
-        return check_tag(args.repo, args.tag, args.warnings_as_errors)
+        return check_tag(
+            args.repo, args.tag, args.warnings_as_errors, args.allow_prereleases
+        )
     return bump(args.repo, args.new_version, args.include_informational)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except PrereleaseNotAllowedError as exc:
+        _die(str(exc))
