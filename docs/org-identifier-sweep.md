@@ -74,3 +74,102 @@ uses the same example orgs as the FFR-200-1 tests (`langevc`, `fusionaize`).
   ]
 }
 ```
+
+## Five layover configs — per-file sweep findings
+
+The rule above is swept against every layover configuration in production: the
+five org-layover `config.yml` files checked out under `langevc/` on the Forgejo
+canonical host. This section lists, per file, the org key it declares and every
+repo reference it carries that does **not** resolve through the canonical key
+path. A finding is any repo address whose org portion is a display identifier
+(`github.login` or `forgejo.display_name` casing) rather than the Forgejo
+`lower_name`, or a top-level org key that is not already its canonical `lower_name`.
+
+Measurements taken 2026-08-23.
+
+| Layover `config.yml` | Declared org key | Canonical? | Non-canonical repo references |
+|----------------------|------------------|------------|-------------------------------|
+| `lvc-ops` | `LangeVC` | no → `langevc` | `github` mirror strings are display data, not repo refs; no `target_repo` refs |
+| `capacium-ops` | `Capacium` | no → `capacium` | 8 `target_repo` refs keyed on display-cased org `Capacium/…` |
+| `elementeer-ops` | `elementeer` | yes | none — all targets already `elementeer/…` |
+| `fusionaize-ops` | `fusionaize` | yes | 6 `target_repo` refs keyed on display-cased org `fusionAIze/…` |
+| `skillweave-ops` | `SkillWeave` | no → `skillweave` | no `target_repo` refs; a display-cased `mirror_url` host only |
+
+### Findings details
+
+- **`lvc-ops`** — top-level key `LangeVC` is the GitHub login, not the canonical
+  `langevc`. It currently carries no `dependency_triggers`; the `mirror.github`
+  and `github_name` values are mirror/delivery data, not repo references subject
+  to canonical resolution. Rekey the org onto `langevc` (FFR-200-2)
+  `migrate-org-keys.py`).
+- **`capacium-ops`** — top-level key `Capacium`: display-cased, not canonical
+  `capacium`. All 8 `dependency_triggers[].target_repo` values repeat that
+  display-cased org (`Capacium/capacium`, `Capacium/capacium-exchange`, …).
+  Each is a repo reference that must key on `capacium`.
+- **`elementeer-ops`** — top-level key `elementeer` is already canonical; all
+  `target_repo` values (`elementeer/elementeer-addon-voxel`,
+  `elementeer/elementeer-mcp`) are already canonical. No findings.
+- **`fusionaize-ops`** — top-level key `fusionaize` is already canonical, but 6
+  `target_repo` values still carry the display-case GitHub login as the org
+  portion: `fusionAIze/faiops-browser`, `fusionAIze/faiops-cli`, `fusionAIze/faios`,
+  `fusionAIze/fusionaize-sdk` (×2), `fusionAIze/homebrew-tap`. Each must key on
+  `fusionaize`. One target (`elementeer/core`) is already canonical.
+- **`skillweave-ops`** — top-level key `SkillWeave`: display-cased, not canonical
+  `skillweave`. No `target_repo` refs; its only org-addressable string is a
+  display-cased `mirror_url` host (`github.com/typelicious/…`), which is mirror
+  delivery data, not a repo reference.
+
+### Machine-readable sweep declaration
+
+```json
+{
+  "schema": 1,
+  "package": "ops_engine",
+  "measured": "2026-08-23",
+  "layovers": [
+    {
+      "config": "lvc-ops",
+      "declared_org_key": "LangeVC",
+      "canonical_org_key": "langevc",
+      "findings": []
+    },
+    {
+      "config": "capacium-ops",
+      "declared_org_key": "Capacium",
+      "canonical_org_key": "capacium",
+      "findings": [
+        "Capacium/homebrew-tap-capacium",
+        "Capacium/capacium-action-validate",
+        "Capacium/capacium-exchange",
+        "Capacium/capacium-crawler",
+        "Capacium/capacium",
+        "Capacium/capacium-models"
+      ]
+    },
+    {
+      "config": "elementeer-ops",
+      "declared_org_key": "elementeer",
+      "canonical_org_key": "elementeer",
+      "findings": []
+    },
+    {
+      "config": "fusionaize-ops",
+      "declared_org_key": "fusionaize",
+      "canonical_org_key": "fusionaize",
+      "findings": [
+        "fusionAIze/faiops-browser",
+        "fusionAIze/faiops-cli",
+        "fusionAIze/faios",
+        "fusionAIze/fusionaize-sdk",
+        "fusionAIze/homebrew-tap"
+      ]
+    },
+    {
+      "config": "skillweave-ops",
+      "declared_org_key": "SkillWeave",
+      "canonical_org_key": "skillweave",
+      "findings": []
+    }
+  ]
+}
+```

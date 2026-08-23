@@ -208,3 +208,107 @@ def test_unknown_org_failure_is_named_config_error_not_adapter_error():
     assert excinfo.value.section == "orgs"
     assert excinfo.value.org_name == "ghostorg"
     assert excinfo.value.repo_name == "legacy-service"
+
+
+# ── Criterion 3: all five layover configs are swept, findings listed per file ──
+
+# The five production org-layover ``config.yml`` files (checked out under
+# ``langevc/`` on the Forgejo canonical host). The sweep must enumerate all of
+# them so the per-file findings can never silently leave one config out.
+EXPECTED_LAYOVERS = [
+    "lvc-ops",
+    "capacium-ops",
+    "elementeer-ops",
+    "fusionaize-ops",
+    "skillweave-ops",
+]
+
+# Findings recorded for each config after the 2026-08-23 sweep. A canonical-org
+# top-level key is fine by itself; a non-canonical key or a display-cased
+# ``target_repo`` org portion is a finding. ``canonical_org_key`` asserts the
+# declared key is exactly its Forgejo ``lower_name``.
+EXPECTED_SWEEP = {
+    "lvc-ops": {
+        "declared_org_key": "LangeVC",
+        "canonical_org_key": "langevc",
+        "findings": [],
+    },
+    "capacium-ops": {
+        "declared_org_key": "Capacium",
+        "canonical_org_key": "capacium",
+        "findings": [
+            "Capacium/homebrew-tap-capacium",
+            "Capacium/capacium-action-validate",
+            "Capacium/capacium-exchange",
+            "Capacium/capacium-crawler",
+            "Capacium/capacium",
+            "Capacium/capacium-models",
+        ],
+    },
+    "elementeer-ops": {
+        "declared_org_key": "elementeer",
+        "canonical_org_key": "elementeer",
+        "findings": [],
+    },
+    "fusionaize-ops": {
+        "declared_org_key": "fusionaize",
+        "canonical_org_key": "fusionaize",
+        "findings": [
+            "fusionAIze/faiops-browser",
+            "fusionAIze/faiops-cli",
+            "fusionAIze/faios",
+            "fusionAIze/fusionaize-sdk",
+            "fusionAIze/homebrew-tap",
+        ],
+    },
+    "skillweave-ops": {
+        "declared_org_key": "SkillWeave",
+        "canonical_org_key": "skillweave",
+        "findings": [],
+    },
+}
+
+
+def _load_sweep():
+    text = SWEEP_PATH.read_text(encoding="utf-8")
+    blocks = re.findall(r"```json\n(.*?)\n```", text, re.DOTALL)
+    assert len(blocks) >= 2, (
+        "docs/org-identifier-sweep.md must contain the reference declaration and "
+        "the five-layover sweep declaration"
+    )
+    return json.loads(blocks[1])
+
+
+def test_sweep_covers_all_five_layover_configs():
+    declaration = _load_sweep()
+    layovers = [entry["config"] for entry in declaration["layovers"]]
+    assert sorted(layovers) == sorted(EXPECTED_LAYOVERS)
+
+
+def test_sweep_lists_per_file_findings():
+    declaration = _load_sweep()
+    for entry in declaration["layovers"]:
+        name = entry["config"]
+        expected = EXPECTED_SWEEP[name]
+        assert entry["declared_org_key"] == expected["declared_org_key"]
+        assert entry["canonical_org_key"] == expected["canonical_org_key"]
+        assert entry["findings"] == expected["findings"]
+
+
+def test_sweep_findings_are_repo_references_not_display_data():
+    declaration = _load_sweep()
+    for entry in declaration["layovers"]:
+        canonical = entry["canonical_org_key"]
+        assert canonical == canonical.lower(), f"{canonical!r} is not lowercase"
+        for finding in entry["findings"]:
+            org, separator, repo = finding.partition("/")
+            assert separator and org and repo, f"{finding!r} is not an 'org/repo' reference"
+            assert org != canonical, (
+                f"{finding!r} already references the canonical org; it is not a finding"
+            )
+            assert org.lower() == canonical, (
+                f"{org!r} does not lower to the canonical org {canonical!r}"
+            )
+        assert entry["declared_org_key"].lower() == canonical, (
+            f"{entry['config']} declared key does not lower to its canonical key"
+        )
