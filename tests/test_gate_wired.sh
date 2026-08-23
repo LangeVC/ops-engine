@@ -137,5 +137,54 @@ else
     bad "rc gate — prerelease tag with --allow-prereleases -> expected green"
 fi
 
+# --- 5. real case: this repo's own version home and its real tag --------------
+# The synthetic proofs above fabricate a version.txt. Here the gate runs against
+# the repository's actual canonical version location (pyproject.toml) and its
+# real tag v3.0.0: a deliberately mismatched declared version is caught, and the
+# same tag passes once the declaration is corrected back to the real value.
+realrepo="$TMP/realrepo"
+mkdir -p "$realrepo"
+cp "$REPO_ROOT/pyproject.toml" "$realrepo/pyproject.toml"
+cat > "$realrepo/.version.yaml" <<'EOF'
+schema: 1
+source_of_truth: pyproject.toml
+locations:
+  - path: pyproject.toml
+    pattern: '^version\s*=\s*"(\d+\.\d+\.\d+)"'
+    required: true
+EOF
+
+real_tag="v3.0.0"
+real_version="$(git -C "$REPO_ROOT" show "$real_tag:pyproject.toml" | sed -n 's/^version[[:space:]]*=[[:space:]]*"\([0-9.]*\)"/\1/p')"
+
+if [[ "$real_version" == "3.0.0" ]]; then
+    # Real tag, real content: gate green once, as shipped.
+    if gate "$realrepo" "$real_tag"; then
+        ok "real case — real tag v3.0.0 against real pyproject.toml -> green"
+    else
+        bad "real case — real tag v3.0.0 against real pyproject.toml -> expected green"
+    fi
+
+    # Deliberately mismatch the declared version; same real tag must turn red.
+    # BSD sed has no \s; match the literal bytes of the shipped pyproject header.
+    sed -i'.bak' 's/^version = "[0-9.]*"/version = "2.0.0"/' "$realrepo/pyproject.toml"
+    if gate "$realrepo" "$real_tag"; then
+        bad "real case — mismatched declared version -> expected gate red"
+    else
+        ok "real case — mismatched declared version (2.0.0 vs v3.0.0) -> gate red"
+    fi
+
+    # Correct it back; the same tag passes again.
+    sed -i'.bak' 's/^version = "[0-9.]*"/version = "3.0.0"/' "$realrepo/pyproject.toml"
+    if gate "$realrepo" "$real_tag"; then
+        ok "real case — same tag v3.0.0 after correction -> green"
+    else
+        bad "real case — same tag v3.0.0 after correction -> expected green"
+    fi
+else
+    bad "real case — expected pyproject.toml at v3.0.0 to declare 3.0.0, got ${real_version:-none}"
+fi
+rm -f "$realrepo/pyproject.toml.bak"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [[ "$fail" -eq 0 ]]
