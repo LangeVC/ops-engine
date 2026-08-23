@@ -25,6 +25,7 @@ def _load_migrate_module():
 
 migrate = _load_migrate_module()
 migrate_orgs = migrate.migrate_orgs
+migrate_config = migrate.migrate_config
 OrgKeyCollisionError = migrate.OrgKeyCollisionError
 
 
@@ -98,3 +99,27 @@ def test_non_mapping_org_value_is_rekeyed_without_inspection():
     migrated = migrate_orgs(orgs)
     assert list(migrated) == ["fusionaize"]
     assert migrated["fusionaize"] == "not-a-mapping"
+
+
+def test_migrate_config_without_orgs_ships_empty_orgs():
+    migrated = migrate_config({})
+    assert migrated == {"orgs": {}}
+
+
+def test_migrate_config_preserves_other_sections_and_ships_empty_orgs():
+    migrated = migrate_config({"repositories": {"a": 1}})
+    assert migrated == {"repositories": {"a": 1}, "orgs": {}}
+
+
+def test_migrate_config_never_emits_a_hard_coded_org_name():
+    migrated = migrate_config({})
+    assert list(migrated["orgs"]) == []
+    assert migrated["orgs"] == {}
+
+
+def test_migrated_dump_of_empty_template_is_just_orgs_empty():
+    data = migrate_config({})
+    dumped = migrate._yaml_dump(data)
+    assert "orgs: {}" in dumped
+    assert "fusionAIze" not in dumped
+    assert "Capacium" not in dumped
