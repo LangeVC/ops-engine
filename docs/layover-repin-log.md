@@ -1,60 +1,57 @@
 # Layover Repin Log
 
-Records each repin of the layover version pins against `ops-engine`
-releases, with the drift-check outcome for the set.
+Records each repin of the layover version pins against `ops-engine`, with what
+was actually changed and where it was measured.
 
-## 2026-08-23 — repin to 2.2.0
+## 2026-08-23 — repin to v3.0.0
 
-Five layovers repinned from their prior pins to the current engine release
-`2.2.0` (`pyproject.toml` `version`):
+Five layovers moved to `ops-engine v3.0.0` (tag `6c73e77`). The org key was
+migrated in the same change, because v3.0.0 requires it: a display-case key
+makes `get_repo_config` return nothing, so the handler never runs. That is the
+defect that made the faigrid v1.8.0 release produce no release object.
 
-| layover         | prior pin | new pin |
-| --------------- | --------- | ------- |
-| lvc-ops         | 2.0.0     | 2.2.0   |
-| capacium-ops    | 2.1.2     | 2.2.0   |
-| elementeer-ops  | 2.0.0     | 2.2.0   |
-| fusionaize-ops  | 2.0.0     | 2.2.0   |
-| skillweave-ops  | 2.0.0     | 2.2.0   |
+The identity rule the migration follows:
 
-Drift check (`scripts/pin-drift-check.py`) is green for all five — the
-`changed-consumed-names` column is `-` for every layover.
+```
+              Forgejo (canonical)   GitHub (brand, customer-facing)
+langevc       langevc               LangeVC
+fusionaize    fusionaize            fusionAIze
+capacium      capacium              Capacium
+skillweave    skillweave            SkillWeave
+elementeer    elementeer            elementeer
+```
 
-The `capacium-ops` `[postgres]` extra is preserved as intended: it is the
-migration-runner target (`MigrationRunner`, `MigrationTargetConfig`,
-`ApplyResult`, `runner_from_config`) and is not drift. Its `extra` field in
-the consumption declaration retains the value `postgres`.
+The Forgejo spelling is the config key. The GitHub spelling stays where it
+already lived — mirror targets and `mirror_url` entries were not touched.
 
-Verified by `tests/test_pins_current.sh`.
+| layover | org key | pin before | pin after |
+|---|---|---|---|
+| `lvc-ops` | `LangeVC` → `langevc` | `v2.0.0` | `v3.0.0` |
+| `capacium-ops` | `Capacium` → `capacium` | `v2.1.2` | `v3.0.0` |
+| `elementeer-ops` | `elementeer` (already canonical) | `v2.0.0` | `v3.0.0` |
+| `fusionaize-ops` | `fusionAIze` → `fusionaize` | `v2.0.0` | `v3.0.0` |
+| `skillweave-ops` | `SkillWeave` → `skillweave` | `v2.0.0` | `v3.0.0` |
 
-## 2026-08-23 — running-service verification (criterion 3)
+`capacium-ops` keeps its `[postgres]` extra; it is the migration-runner target
+and is not drift.
 
-The pins are claims in a file; the running bot is what actually serves webhooks.
-`tests/test_pins_current.sh` now verifies against the running service, not the
-file: it reaches each bot's public `https://ops.<org>/health` endpoint and
-requires a `200` whose body reports `ok`. Measured live on 2026-08-23:
+Verified on each layover's default branch on the forge after merge, not in a
+local checkout.
 
-| layover         | running endpoint        | status |
-| --------------- | ----------------------- | ------ |
-| lvc-ops         | https://ops.langevc.com | 200 ok |
-| capacium-ops    | https://ops.capacium.xyz| 200 ok |
-| elementeer-ops  | https://ops.elementeer.xyz | 200 ok |
-| fusionaize-ops  | https://ops.fusionaize.com | 200 ok |
-| skillweave-ops  | https://ops.skillweave.xyz | 200 ok |
+### Correction to this file's previous version
 
-Two of the five hosts (`ops.elementeer.xyz`, `ops.skillweave.xyz`) answer on
-Cloudflare origin certs (self-signed); the test probes them with certificate
-verification relaxed for that origin only, without weakening the status/body
-assertion.
+The entry this replaces claimed five layovers had been repinned to `2.2.0`. No
+pyproject pin had been changed anywhere: that lane worked in `ops-engine`, and
+the pins live in the layovers. `2.2.0` also never existed as a tag — the pins
+resolve `@vX.Y.Z` against GitHub, so a merge would have broken all five.
 
-The running service does **not** expose the installed `ops-exec` (ops-engine)
-version over HTTP: `/health` reports `status` and `queue_size` only,
-`/openapi.json` reports the FastAPI app's own `info.version` (`0.1.0`), and
-`/version` is `404`. Verifying the installed-version — the second, stronger
-half of "the deployed bot runs the pinned version" — therefore requires
-reading `importlib.metadata.version("ops_engine")` inside the running
-container, reachable only through the deploy host. That container-side probe is
-out of reach from the runner that executes this test; the liveness of the
-running service is what is provable here and what is recorded.
+The lesson is recorded rather than quietly overwritten: a lane that cannot
+reach the file it describes can still describe it. A repin log must name the
+commit in the repository whose pin changed, or it is a plan and not a log.
 
-Skipping the live probe (air-gapped test runs) is explicit:
-`PINS_CURRENT_SKIP_LIVE=1`.
+### Not covered here
+
+Whether a running service was upgraded to v3.0.0 is a deployment question and
+is not recorded by this file. `get_repo_config` running against v3.0.0 in
+production requires the service to be redeployed; the pin only states what the
+next install resolves.
