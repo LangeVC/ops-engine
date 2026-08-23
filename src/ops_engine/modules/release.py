@@ -10,6 +10,37 @@ from ops_engine.utils.changelog_parser import ChangelogParser
 
 logger = logging.getLogger(__name__)
 
+# Generic default. It names the repo and the tag, never a product, organisation,
+# or host — the product prefix is layover data and reaches the name only through
+# a configured ``name_template``.
+DEFAULT_NAME_TEMPLATE = "{repo_name} {tag_name}"
+
+
+class _TemplateDict(dict[str, str]):
+    """Mapping that leaves unknown placeholders visible instead of dropping them."""
+
+    def __missing__(self, key: str) -> str:
+        return f"{{{key}}}"
+
+
+def render_release_name(template: str, repo: str, tag_name: str) -> str:
+    """Render a release name from a template string.
+
+    Supported placeholders:
+      ``{repo}``        full repo slug (``Org/repo``)
+      ``{repo_name}``   repo short name (``repo``)
+      ``{tag_name}``    tag name (``v1.2.3``)
+
+    Unknown placeholders stay as ``{key}`` so a mistyped placeholder is visible
+    in the rendered name rather than silently swallowed.
+    """
+    values = {
+        "repo": repo,
+        "repo_name": repo.split("/")[-1],
+        "tag_name": tag_name,
+    }
+    return template.format_map(_TemplateDict(values))
+
 
 class ReleaseHandler:
     """Creates releases when tags are pushed or labeled PRs are merged."""
@@ -71,7 +102,8 @@ async def _create_release_for_tag(
     if not release_notes:
         release_notes = f"Release {tag_name}"
 
-    release_name = f"{repo.split('/')[-1]} {tag_name}"
+    name_template = getattr(config, "name_template", None) or DEFAULT_NAME_TEMPLATE
+    release_name = render_release_name(name_template, repo, tag_name)
 
     logger.info(f"Creating release {tag_name} on {repo}")
     await adapter.create_release(
