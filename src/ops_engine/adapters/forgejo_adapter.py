@@ -9,6 +9,7 @@ from typing import Any, Optional
 import httpx
 
 from .base import ForgeAdapter
+from ops_engine.config_loader import canonical_org_key
 
 logger = logging.getLogger(__name__)
 
@@ -68,11 +69,15 @@ class ForgejoAdapter(ForgeAdapter):
         self._verify_signature(headers, payload)
         event_type = headers.get("x-forgejo-event") or headers.get("x-gitea-event", "unknown")
         data = json.loads(payload)
+        repository = data.get("repository", {}) or {}
+        org_key = canonical_org_key(repository)
+        repo_name = repository.get("name") or data.get("repository", {}).get("full_name", "").split("/")[-1]
         return {
             "source": "forgejo",
             "event_type": event_type,
             "action": data.get("action"),
-            "repo": data.get("repository", {}).get("full_name"),
+            "org": org_key,
+            "repo": f"{org_key}/{repo_name}",
             "sender": data.get("sender", {}).get("username"),
             "delivery_id": headers.get("x-forgejo-delivery") or headers.get("x-gitea-delivery"),
             "raw": data,
