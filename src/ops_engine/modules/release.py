@@ -23,19 +23,40 @@ class _TemplateDict(dict[str, str]):
         return f"{{{key}}}"
 
 
+def _canonical_slug(repo: str) -> str:
+    """Return the repo slug with the org segment lowercased.
+
+    GitHub ``full_name`` carries display case (``LangeVC/ops-engine``) while
+    Forgejo always yields the lowercased ``lower_name`` (``langevc/ops-engine``).
+    A release name rendered from the slug must not change with the forge that
+    delivered the event, so the org segment is normalised to lowercase here —
+    the same canonical form the org key already holds (``lower_name``).
+    """
+    if "/" in repo:
+        org, name = repo.split("/", 1)
+        return f"{org.lower()}/{name}"
+    return repo
+
+
 def render_release_name(template: str, repo: str, tag_name: str) -> str:
     """Render a release name from a template string.
 
     Supported placeholders:
-      ``{repo}``        full repo slug (``Org/repo``)
+      ``{repo}``        full repo slug, forge-independent (``org/repo``,
+                        org lowercased to the canonical key)
       ``{repo_name}``   repo short name (``repo``)
       ``{tag_name}``    tag name (``v1.2.3``)
+
+    A single configured ``name_template`` therefore renders the identical name
+    whether the event came from Forgejo or from GitHub: the org segment is
+    normalised to the canonical lowercase key, and the product prefix (e.g.
+    ``"fusionAIze Grid"``) is layover data carried verbatim by the template.
 
     Unknown placeholders stay as ``{key}`` so a mistyped placeholder is visible
     in the rendered name rather than silently swallowed.
     """
     values = {
-        "repo": repo,
+        "repo": _canonical_slug(repo),
         "repo_name": repo.split("/")[-1],
         "tag_name": tag_name,
     }
