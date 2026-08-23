@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from ops_engine.modules.reconcile import ReconcileHandler
+from ops_engine.modules.reconcile import MirrorState, ReconcileHandler, ReconcileRecord
 
 
 class _ReleaseConfig:
@@ -145,3 +145,99 @@ class TestReconcileCreatesMissingRelease:
             adapter, REPO, ["v1.0.0"], config
         ) == []
         adapter.create_release.assert_not_called()
+
+
+class TestStateIsQueryableRecord:
+    """Criterion 3: release and mirror state are queryable as records, not only
+    visible in a log."""
+
+    @pytest.mark.asyncio
+    async def test_query_state_returns_record_with_missing_releases(self, adapter):
+        async def release_exists(repo, tag_name):
+            return tag_name != "v1.0.0"
+
+        adapter.release_exists.side_effect = release_exists
+        adapter.get_latest_commit_sha = AsyncMock(return_value="abc123")
+
+        record = await ReconcileHandler.query_state(
+            adapter, REPO, ["v1.0.0", "v1.1.0"],
+            mirror_url="github.com/LangeVC/ops-engine",
+        )
+
+        assert isinstance(record, ReconcileRecord)
+        assert record.repo == REPO
+        assert record.missing == ["v1.0.0"]
+        assert record.created == []
+
+    def test_record_serializes_to_dict(self):
+        record = ReconcileRecord(
+            repo=REPO,
+            missing=["v1.0.0"],
+            created=["v1.0.0"],
+            mirror=MirrorState(
+                repo=REPO, primary_sha="abc", mirror_sha="abc", in_sync=True
+            ),
+        )
+
+        assert record.to_dict() == {
+            "repo": REPO,
+            "missing_releases": ["v1.0.0"],
+            "created_releases": ["v1.0.0"],
+            "mirror": {
+                "repo": REPO,
+                "primary_sha": "abc",
+                "mirror_sha": "abc",
+                "in_sync": True,
+            },
+        }
+
+    @pytest.mark.asyncio
+    async def test_query_mirror_state_in_sync(self, adapter):
+        adapter.get_latest_commit_sha = AsyncMock(return_value="abc123")
+
+        state = await ReconcileHandler.query_mirror_state(
+            adapter, REPO, "github.com/LangeVC/ops-engine", primary_sha="abc123"
+        )
+
+        assert state.in_sync is True
+        assert state.primary_sha == "abc123"
+        assert state.mirror_sha == "abc123"
+
+    @pytest.mark.asyncio
+    async def test_query_mirror_state_detects_drift(self, adapter):
+        async def latest(repo, branch="main"):
+            return "abc123" if repo == REPO else "def456"
+
+        adapter.get_latest_commit_sha = AsyncMock(side_effect=latest)
+
+        state = await ReconcileHandler.query_mirror_state(
+            adapter, REPO, "github.com/LangeVC/ops-engine"
+        )
+
+        assert state.in_sync is False
+        assert state.primary_sha == "abc123"
+        assert state.mirror_sha == "def456"
+
+    @pytest.mark.asyncio
+    async def test_query_mirror_state_no_url_is_not_synced(self, adapter):
+        state = await ReconcileHandler.query_mirror_state(adapter, REPO, "")
+
+        assert state.in_sync is False
+        assert not adapter.get_latest_commit_sha.called
+
+    @pytest.mark.asyncio
+    async def test_query_mirror_state_unreachable_mirror_records_not_synced(self, adapter):
+        async def latest(repo, branch="main"):
+            if repo == REPO:
+                return "abc123"
+            raise RuntimeError("unreachable")
+
+        adapter.get_latest_commit_sha = AsyncMock(side_effect=latest)
+
+        state = await ReconcileHandler.query_mirror_state(
+            adapter, REPO, "github.com/LangeVC/ops-engine"
+        )
+
+        assert state.in_sync is False
+        assert state.primary_sha == "abc123"
+        assert state.mirror_sha == ""
