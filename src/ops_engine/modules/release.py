@@ -10,6 +10,58 @@ from ops_engine.utils.changelog_parser import ChangelogParser
 
 logger = logging.getLogger(__name__)
 
+# Generic default. It names the repo and the tag, never a product, organisation,
+# or host — the product prefix is layover data and reaches the name only through
+# a configured ``name_template``.
+DEFAULT_NAME_TEMPLATE = "{repo_name} {tag_name}"
+
+
+class _TemplateDict(dict[str, str]):
+    """Mapping that leaves unknown placeholders visible instead of dropping them."""
+
+    def __missing__(self, key: str) -> str:
+        return f"{{{key}}}"
+
+
+def _canonical_slug(repo: str) -> str:
+    """Return the repo slug with the org segment lowercased.
+
+    GitHub ``full_name`` carries display case (``LangeVC/ops-engine``) while
+    Forgejo always yields the lowercased ``lower_name`` (``langevc/ops-engine``).
+    A release name rendered from the slug must not change with the forge that
+    delivered the event, so the org segment is normalised to lowercase here —
+    the same canonical form the org key already holds (``lower_name``).
+    """
+    if "/" in repo:
+        org, name = repo.split("/", 1)
+        return f"{org.lower()}/{name}"
+    return repo
+
+
+def render_release_name(template: str, repo: str, tag_name: str) -> str:
+    """Render a release name from a template string.
+
+    Supported placeholders:
+      ``{repo}``        full repo slug, forge-independent (``org/repo``,
+                        org lowercased to the canonical key)
+      ``{repo_name}``   repo short name (``repo``)
+      ``{tag_name}``    tag name (``v1.2.3``)
+
+    A single configured ``name_template`` therefore renders the identical name
+    whether the event came from Forgejo or from GitHub: the org segment is
+    normalised to the canonical lowercase key, and the product prefix (e.g.
+    ``"fusionAIze Grid"``) is layover data carried verbatim by the template.
+
+    Unknown placeholders stay as ``{key}`` so a mistyped placeholder is visible
+    in the rendered name rather than silently swallowed.
+    """
+    values = {
+        "repo": _canonical_slug(repo),
+        "repo_name": repo.split("/")[-1],
+        "tag_name": tag_name,
+    }
+    return template.format_map(_TemplateDict(values))
+
 
 class ReleaseHandler:
     """Creates releases when tags are pushed or labeled PRs are merged."""
@@ -71,7 +123,8 @@ async def _create_release_for_tag(
     if not release_notes:
         release_notes = f"Release {tag_name}"
 
-    release_name = f"{repo.split('/')[-1]} {tag_name}"
+    name_template = getattr(config, "name_template", None) or DEFAULT_NAME_TEMPLATE
+    release_name = render_release_name(name_template, repo, tag_name)
 
     logger.info(f"Creating release {tag_name} on {repo}")
     await adapter.create_release(
