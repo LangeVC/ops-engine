@@ -10,14 +10,33 @@ jobs:
     if: github.server_url == 'https://github.com'
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - name: Check release name pattern
         env:
           RELEASE_NAME: ${{ github.event.release.name }}
         run: |
-          echo "Checking release name: $RELEASE_NAME"
-          # Regular expression to match "Ops Engine vX.Y.Z"
-          if [[ ! "$RELEASE_NAME" =~ ^Ops\ Engine\ v[0-9]+\.[0-9]+\.[0-9]+.*$ ]]; then
-            echo "::error::Release name '$RELEASE_NAME' does not match the required convention 'Ops Engine vX.Y.Z'"
+          set -euo pipefail
+          # The expected prefix is declared data in .github/release-name.yml,
+          # not hard-coded here, so a consumer of this template overrides it
+          # without editing the gate.
+          config=".github/release-name.yml"
+          prefix=$(sed -n 's/^release_name_prefix:[[:space:]]*"\{0,1\}\([^"]*\)"\{0,1\}[[:space:]]*$/\1/p' "$config")
+          if [ -z "$prefix" ]; then
+            echo "::error::missing release_name_prefix in $config"
+            exit 1
+          fi
+          echo "Checking release name: $RELEASE_NAME (expected prefix: '$prefix')"
+          # Match "<prefix> vX.Y.Z"
+          if [[ ! "$RELEASE_NAME" =~ ^${prefix}[[:space:]]v[0-9]+\.[0-9]+\.[0-9]+.*$ ]]; then
+            echo "::error::Release name '$RELEASE_NAME' does not match the required convention '<prefix> vX.Y.Z'"
             exit 1
           fi
           echo "Release name matches convention."
+      # FFR-300-1 criterion 3: no org/host/product name leaks into a consumer's
+      # runtime gate surface, and no gate fetches generic tooling from a private
+      # layover. The check runs on every release so drift fails here rather than
+      # after it is published.
+      - name: Scan template for org/host/product leaks
+        run: |
+          set -euo pipefail
+          bash tests/test_template_has_no_business_names.sh
