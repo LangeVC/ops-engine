@@ -113,6 +113,122 @@ def test_changed_consumed_names_empty_when_pin_is_current():
     assert mod.changed_consumed_names(layover, timeline, "2.2.0") == []
 
 
+def test_removed_declared_report_diffs_all_names_between_tags():
+    previous = {
+        "QueueManager",
+        "OpsEngineConfig",
+        "ReleaseHandler",
+        "MergeHandler",
+        "NotificationHandler",
+    }
+    current_now = {
+        "QueueManager",
+        "OpsEngineConfig",
+        "ReleaseHandler",
+        "MirrorHandler",
+        "NotificationHandler",
+    }
+    removed = mod.removed_declared_names(previous, current_now)
+    assert removed == ["MergeHandler"]
+
+
+def test_layovers_consuming_removed_maps_each_consumer_to_its_removed_names():
+    layovers = [
+        {
+            "name": "lvc-ops",
+            "pin": "2.0.0",
+            "consumes": [
+                "MergeHandler",
+                "MirrorHandler",
+                "NotificationHandler",
+            ],
+        },
+        {
+            "name": "capacium-ops",
+            "pin": "2.1.2",
+            "consumes": ["MigrationRunner", "ApplyResult"],
+        },
+        {
+            "name": "elementeer-ops",
+            "pin": "2.0.0",
+            "consumes": ["MergeHandler", "NotificationHandler"],
+        },
+    ]
+    removed = {"MergeHandler"}
+    consumers = mod.layovers_consuming_removed(layovers, removed)
+    assert consumers == [
+        ("elementeer-ops", ["MergeHandler"]),
+        ("lvc-ops", ["MergeHandler"]),
+    ]
+
+
+def test_removed_consumption_lines_reports_only_when_something_removed():
+    previous = {
+        "QueueManager",
+        "OpsEngineConfig",
+        "ReleaseHandler",
+        "MergeHandler",
+    }
+    current_now = {"QueueManager", "OpsEngineConfig", "ReleaseHandler"}
+    layovers = [
+        {
+            "name": "lvc-ops",
+            "pin": "2.0.0",
+            "consumes": ["QueueManager", "MergeHandler"],
+        },
+        {"name": "capacium-ops", "pin": "2.1.2", "consumes": ["ReleaseHandler"]},
+    ]
+    removed = {"MergeHandler"}
+    lines = mod.removed_consumption_lines(layovers, previous, current_now)
+    assert lines
+    assert not set(previous) - set(current_now) - removed  # MergeHandler is the only removed
+    # lvc-ops consumes the removed name, so its line flags it
+    lvc = next(ln for ln in lines if ln.startswith("lvc-ops"))
+    assert "MergeHandler" in lvc
+
+
+def test_removed_consumption_lines_stay_quiet_when_internal_only_changed():
+    previous = {
+        "QueueManager",
+        "OpsEngineConfig",
+        "ReleaseHandler",
+        "MergeHandler",
+    }
+    current_now = previous  # no declared name changed
+    layovers = [
+        {
+            "name": "lvc-ops",
+            "pin": "2.0.0",
+            "consumes": ["QueueManager", "MergeHandler"],
+        }
+    ]
+    assert mod.removed_consumption_lines(layovers, previous, current_now) == []
+
+
+def test_removed_consumption_lines_quiet_when_last_tag_is_current():
+    # previous == current: nothing removed, so no lines even if consumers exist
+    previous = {
+        "QueueManager",
+        "OpsEngineConfig",
+        "ReleaseHandler",
+        "MergeHandler",
+    }
+    current_now = {
+        "QueueManager",
+        "OpsEngineConfig",
+        "ReleaseHandler",
+        "MergeHandler",
+    }
+    layovers = [
+        {
+            "name": "lvc-ops",
+            "pin": "2.0.0",
+            "consumes": ["QueueManager", "MergeHandler"],
+        }
+    ]
+    assert mod.removed_consumption_lines(layovers, previous, current_now) == []
+
+
 def test_check_runs_unattended_and_reports_pin_latest_changed():
     r = subprocess.run(
         [sys.executable, str(SCRIPT), "--repo", str(REPO)],

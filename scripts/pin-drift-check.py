@@ -171,6 +171,66 @@ def changed_consumed_names(
     return sorted(changed)
 
 
+def removed_declared_names(
+    previous_names: set[str], current_names: set[str]
+) -> list[str]:
+    """Return declared names present before a bump but absent after, sorted.
+
+    A declared name that vanishes in a bump (renamed or removed) is drift for
+    every layover that still consumes it.
+    """
+    return sorted(previous_names - current_names)
+
+
+def layovers_consuming_removed(
+    layovers: list[dict], removed: set[str]
+) -> list[tuple[str, list[str]]]:
+    """Return ``(layover_name, consumed_removed_names)`` for every layover that
+    consumes at least one removed declared name, sorted by layover name."""
+    consumers = []
+    for layover in layovers:
+        consumed = sorted(set(layover.get("consumes", [])) & removed)
+        if consumed:
+            consumers.append((layover["name"], consumed))
+    return sorted(consumers, key=lambda pair: pair[0])
+
+
+def removed_consumption_lines(
+    layovers: list[dict], previous_names: set[str], current_names: set[str]
+) -> list[str]:
+    """Report lines for layovers consuming a removed declared name.
+
+    Empty when no declared name changed, so the check stays quiet.
+    """
+    removed = set(removed_declared_names(previous_names, current_names))
+    consumers = layovers_consuming_removed(layovers, removed)
+    if not consumers:
+        return []
+    name_w = max(len(name) for name, _ in consumers)
+    lines = [
+        "",
+        "pin-drift-check: removed declared names (layovers consuming a removed contract name)",
+    ]
+    for name, consumed in consumers:
+        lines.append(f"{name:<{name_w}}  {','.join(consumed)}")
+    return lines
+
+
+def report_removed(
+    layovers: list[dict], previous_names: set[str], current_names: set[str]
+) -> None:
+    for line in removed_consumption_lines(layovers, previous_names, current_names):
+        print(line)
+
+
+def previous_declared_names(repo: Path) -> set[str]:
+    """Declared names at the most recent release tag, or empty when untagged."""
+    tags = git_tags(repo)
+    if not tags:
+        return set()
+    return parse_all_from_source(git_init_at(repo, tags[-1]))
+
+
 def report(layovers: list[dict], timeline: dict[str, str], latest: str) -> None:
     name_w = max(len(l["name"]) for l in layovers)
     print("pin-drift-check: per-layover pin vs latest contract drift")
@@ -205,6 +265,7 @@ def main() -> int:
     timeline = build_timeline(repo, current_names, latest)
 
     report(layovers, timeline, latest)
+    report_removed(layovers, previous_declared_names(repo), current_names)
     return 0
 
 
