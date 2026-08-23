@@ -1,5 +1,69 @@
 # Changelog
 
+## 3.0.0
+
+**Breaking.** Organisation keys in `config.yml` are now canonical Forgejo
+`lower_name` values. A layover keyed `fusionAIze` no longer resolves; it must be
+`fusionaize`, with the display spelling kept as an attribute. Run
+`scripts/migrate-org-keys.py` before upgrading: it lowercases existing keys,
+preserves the old spelling as `github.login`, and fails loudly on a collision
+rather than letting one key silently win.
+
+Why a major bump: the Python contract surface changed additively only, but
+`config.yml` is the contract the five layovers actually consume, and they have
+to act. A migration script is the admission that consumers must act, so the
+version says so.
+
+### Organisation identity is data, not string interpolation (LVC-229)
+
+- The webhook ingress derives the canonical org key from `lower_name` and never
+  from `full_name` or a display name. Previously a case mismatch made
+  `get_repo_config` return nothing, so the `ReleaseHandler` never ran — measured
+  on the faigrid v1.8.0 release, which produced no release object at all.
+- `forgejo.display_name` and `github.login` are attributes under the canonical
+  key, never lookup keys.
+- Release names come from a configured `name_template`, not from
+  `repo.split('/')[-1]`. The convention renders identically on Forgejo and
+  GitHub. The generic template ships `orgs: {}` and carries no product name.
+- Every repo reference resolves through the canonical key path; a configured
+  target that does not resolve fails the config load rather than the dispatch.
+
+### Configuration is typed at the boundary (LVC-224)
+
+- `mirror` and `notifications` are returned as `MirrorConfig` and
+  `NotificationConfig`, never as raw dicts. The previous behaviour raised
+  `'dict' object has no attribute 'enabled'` on every push and sent the event to
+  the dead-letter queue.
+- A section that cannot be typed fails with a named `ConfigSectionError`
+  identifying the section, instead of surfacing as an `AttributeError` later.
+
+### Release reconciliation
+
+- A tag that exists without a release is detectable and repairable without
+  deleting or recreating the tag.
+- Release and mirror state are queryable as records.
+
+### Release gate
+
+- `check-tag` strips the `v` prefix, as its docstring always claimed and its code
+  did not: `check-tag v2.4.3` against source of truth `2.4.3` now passes.
+- A prerelease tag can be gated when the caller allows it, and is refused with a
+  named error when it does not — previously any `-rc.N` was rejected as "not
+  semver" before the tag was ever compared.
+
+### Public surface
+
+- `CONTRACT.md` declares which exported names are contract and which are
+  internal, and what a minor versus a major bump may change. A name absent from
+  the declaration is not promised. `tests/test_public_surface.py` asserts the
+  declaration and `__all__` agree at CI time.
+
+### Template purity
+
+- The release-name gate reads its expected pattern from configuration; the
+  product name no longer sits hard-coded in the generic template.
+
+
 ## 2.2.0
 
 ### `version-sync.py` — declare where a repo keeps its version
