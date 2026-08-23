@@ -2,8 +2,9 @@
 
 Every layover resolves `ops-engine` from its Forgejo canonical, not from the
 GitHub mirror. This document names the canonical, records why the mirror must
-not be the install source, and states how reachability is proven per consuming
-environment.
+not be the install source, states how reachability is proven per consuming
+environment, and names the exception per environment where one genuinely
+cannot reach the canonical.
 
 ## The rule
 
@@ -67,6 +68,26 @@ repository under its own org key on the canonical host
 (`langevc/lvc-ops`, `capacium/capacium-ops`, `elementeer/elementeer-ops`,
 `fusionaize/fusionaize-ops`, `skillweave/skillweave-ops`), each with its own
 `pyproject.toml` pin and its own runner and deploy host.
+
+## Exceptions — environments that cannot reach canonical
+
+None. Every consuming environment reaches the canonical host, so the rule
+"every layover consumes `ops-engine` from canonical" has no exception today.
+Each environment is named here with its reachability, so an exception cannot
+hide as a silent omission:
+
+| environment | reaches canonical? | reason |
+|---|---|---|
+| runner — each of the five layovers | yes | `git.langevc.com` is a public host (Cloudflare-proxied, no credential); `git ls-remote` over HTTPS and over SSH both resolve the pinned tag (test check B) |
+| deploy host — each of the five layovers | yes | the same public host; an anonymous `git clone --branch v3.0.0` completes, which is the exact path the layover `Dockerfile` uses to resolve the dependency (test check B) |
+
+There is no exception because the canonical repository is public, not a
+private boundary. The anonymous clone in `tests/test_canonical_source.sh`
+proves no credential is required, so no consumer is barred from the canonical
+for lack of access. If a consuming environment is ever moved behind a boundary
+that cannot reach `git.langevc.com`, its exception is named here per
+environment with its reason — and that environment, not the others, stays on
+the mirror.
 
 ## Machine-readable declaration
 
