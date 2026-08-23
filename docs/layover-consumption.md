@@ -25,7 +25,7 @@ layover entry carries its own `pin` (the version it resolves in
   "layovers": [
     {
       "name": "lvc-ops",
-      "pin": "2.0.0",
+      "pin": "2.2.0",
       "extra": null,
       "consumes": [
         "OpsEngineConfig",
@@ -43,7 +43,7 @@ layover entry carries its own `pin` (the version it resolves in
     },
     {
       "name": "capacium-ops",
-      "pin": "2.1.2",
+      "pin": "2.2.0",
       "extra": "postgres",
       "consumes": [
         "OpsEngineConfig",
@@ -64,7 +64,7 @@ layover entry carries its own `pin` (the version it resolves in
     },
     {
       "name": "elementeer-ops",
-      "pin": "2.0.0",
+      "pin": "2.2.0",
       "extra": null,
       "consumes": [
         "OpsEngineConfig",
@@ -82,7 +82,7 @@ layover entry carries its own `pin` (the version it resolves in
     },
     {
       "name": "fusionaize-ops",
-      "pin": "2.0.0",
+      "pin": "2.2.0",
       "extra": null,
       "consumes": [
         "OpsEngineConfig",
@@ -100,7 +100,7 @@ layover entry carries its own `pin` (the version it resolves in
     },
     {
       "name": "skillweave-ops",
-      "pin": "2.0.0",
+      "pin": "2.2.0",
       "extra": null,
       "consumes": [
         "OpsEngineConfig",
