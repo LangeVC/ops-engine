@@ -1,0 +1,26 @@
+name: Release gate
+
+# One gate, one code path. A stable release tag and an rc (prerelease) tag
+# traverse this same workflow and the same gate invocation. The only
+# difference is one derived flag: a prerelease tag is permitted, a stable tag
+# is not. A mismatched version turns the run red here, before any release
+# object exists.
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: https://github.com/actions/checkout@v4
+      - name: Check tag against the declared version
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF##refs/tags/}"
+          args=(check-tag "$tag")
+          version="${tag#v}"
+          if [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z.-]+$ ]]; then
+            args+=(--allow-prereleases)
+          fi
+          python3 scripts/version-sync.py "${args[@]}"
