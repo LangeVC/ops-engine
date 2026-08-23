@@ -250,7 +250,34 @@ class RepoConfig(BaseModel):
     notifications: Optional[NotificationConfig] = None
 
 
+class ForgejoIdentity(BaseModel):
+    """Forgejo-specific identity attributes for an org, stored under its key.
+
+    ``display_name`` is the human-facing display name (free-form, can carry
+    display case or a company name like ``"Lange Ventures & Consulting"``). It
+    is a stored attribute — NEVER a lookup key. The canonical lookup key is the
+    org's ``lower_name`` (see :func:`canonical_org_key`).
+    """
+
+    display_name: Optional[str] = None
+
+
+class GithubIdentity(BaseModel):
+    """GitHub-specific identity attributes for an org, stored under its key.
+
+    ``login`` is the GitHub account/login handle (can carry display case, e.g.
+    ``LangeVC``). It is a stored attribute — NEVER a lookup key. The canonical
+    lookup key is the org's ``lower_name`` (see :func:`canonical_org_key`).
+    """
+
+    login: Optional[str] = None
+
+
 class OrgConfig(BaseModel):
+    # Forge identity attributes, stored under the canonical ``lower_name`` key.
+    # These are data (attributes), never the key used to look a config up.
+    forgejo: Optional[ForgejoIdentity] = None
+    github: Optional[GithubIdentity] = None
     stale_management: StaleManagementConfig = Field(default_factory=StaleManagementConfig)
     auto_triage: AutoTriageConfig = Field(default_factory=AutoTriageConfig)
     # v2: org-level defaults for new configs

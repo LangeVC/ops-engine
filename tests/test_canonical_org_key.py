@@ -9,6 +9,8 @@ display name and would key on the wrong string (see LVC-229).
 import pytest
 
 from ops_engine.config_loader import (
+    ForgejoIdentity,
+    GithubIdentity,
     OpsEngineConfig,
     OrgConfig,
     RepoConfig,
@@ -93,3 +95,54 @@ def test_get_repo_config_repo_name_is_not_case_folded():
     )
     resolved = config.get_repo_config("fusionaize", "Faigrid")
     assert resolved.release is None
+
+
+def test_display_name_and_github_login_are_attributes_not_keys():
+    """forgejo.display_name and github.login are stored attributes under the
+    canonical lower_name key; they are never the lookup key themselves."""
+    config = OpsEngineConfig(
+        orgs={
+            "fusionaize": OrgConfig(
+                forgejo=ForgejoIdentity(display_name="fusionAIze"),
+                github=GithubIdentity(login="fusionAIze"),
+                repositories={"faigrid": RepoConfig()},
+            )
+        }
+    )
+    org = config.orgs["fusionaize"]
+    assert org.forgejo.display_name == "fusionAIze"
+    assert org.github.login == "fusionAIze"
+
+
+def test_display_name_and_github_login_load_from_raw_mapping():
+    """A raw config.yml carries forgejo.display_name and github.login as data."""
+    raw = {
+        "orgs": {
+            "fusionaize": {
+                "forgejo": {"display_name": "fusionAIze"},
+                "github": {"login": "fusionAIze"},
+                "repositories": {"faigrid": {"release": {"enabled": True}}},
+            }
+        }
+    }
+    config = OpsEngineConfig.load(raw)
+    org = config.orgs["fusionaize"]
+    assert org.forgejo.display_name == "fusionAIze"
+    assert org.github.login == "fusionAIze"
+    assert config.get_repo_config("fusionaize", "faigrid").release.enabled is True
+
+
+def test_identity_attributes_do_not_affect_lookup_key():
+    """A display-cased github.login or forgejo.display_name is never a key:
+    every lookup still resolves through the canonical lower_name only."""
+    config = OpsEngineConfig(
+        orgs={
+            "fusionaize": OrgConfig(
+                forgejo=ForgejoIdentity(display_name="Lange Ventures & Consulting"),
+                github=GithubIdentity(login="LangeVC"),
+                repositories={"faigrid": RepoConfig(release=ReleaseConfig(enabled=True))},
+            )
+        }
+    )
+    assert "fusionAIze" not in config.orgs
+    assert config.get_repo_config("fusionaize", "faigrid").release.enabled is True
