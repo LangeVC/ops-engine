@@ -64,7 +64,21 @@ def render_release_name(template: str, repo: str, tag_name: str) -> str:
 
 
 class ReleaseHandler:
-    """Creates releases when tags are pushed or labeled PRs are merged."""
+    """Creates releases when tags are pushed or labeled PRs are merged.
+
+    Relation to the release gate: the gate (``.forgejo/workflows/release-gate.yml``
+    calling ``scripts/version-sync.py check-tag``) runs in CI at push time, before
+    any release object exists, and it runs first. It compares the pushed tag against
+    the repository's declared source of truth and turns the run red on any mismatch,
+    so a tag whose version lags its content is refused at the gate. This handler is
+    the runtime engine that later turns an accepted tag into a release object; it
+    does not re-run the gate itself.
+
+    If the gate is absent (no release-gate workflow wired, or the workflow removed),
+    nothing in this handler substitutes for it: a mismatched tag would pass through
+    and a release object would be created for a version that does not match the
+    source of truth. The gate is the only place that refuse happens.
+    """
 
     @staticmethod
     async def process_event(
