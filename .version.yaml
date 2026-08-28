@@ -1,0 +1,6 @@
+schema: 1
+source_of_truth: pyproject.toml
+locations:
+  - path: pyproject.toml
+    pattern: '^version\s*=\s*"(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)"$'
+    required: true
