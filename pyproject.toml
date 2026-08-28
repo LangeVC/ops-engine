@@ -34,3 +34,6 @@ postgres = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ops_engine"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

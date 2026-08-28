@@ -19,6 +19,11 @@ RETRY_DELAYS = [1.0, 2.0, 4.0]
 
 class GithubAdapter(ForgeAdapter):
     def __init__(self, token: str, webhook_secret: str):
+        if not webhook_secret:
+            raise ValueError(
+                "refusing to start: no webhook_secret configured; an unsigned "
+                "ingress accepts every payload"
+            )
         self.token = token
         self.webhook_secret = webhook_secret
         self._client: httpx.AsyncClient | None = None
@@ -82,8 +87,8 @@ class GithubAdapter(ForgeAdapter):
 
     def _verify_signature(self, headers: dict[str, str], payload: bytes) -> None:
         sig_header = headers.get("x-hub-signature-256", "")
-        if not sig_header or not self.webhook_secret:
-            return
+        if not sig_header:
+            raise ValueError("missing webhook signature header")
         expected = "sha256=" + hmac.new(
             self.webhook_secret.encode(), payload, hashlib.sha256
         ).hexdigest()

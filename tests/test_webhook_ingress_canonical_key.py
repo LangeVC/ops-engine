@@ -7,11 +7,20 @@ display-case org name. This is the red proof that the ingress, and not just
 ``get_repo_config``, canonicalizes the key.
 """
 
+import hashlib
+import hmac
 import json
 
 import pytest
 
 from ops_engine.adapters.forgejo_adapter import ForgejoAdapter
+
+
+SECRET = "test-secret"
+
+
+def _sign(payload: bytes) -> str:
+    return hmac.new(SECRET.encode(), payload, hashlib.sha256).hexdigest()
 
 
 def _forgejo_payload(owner: dict, repo_name: str = "faigrid") -> bytes:
@@ -23,8 +32,12 @@ def _forgejo_payload(owner: dict, repo_name: str = "faigrid") -> bytes:
 @pytest.fixture
 def adapter():
     return ForgejoAdapter(
-        base_url="https://git.example.com", token="test-token", webhook_secret="",
+        base_url="https://git.example.com", token="test-token", webhook_secret=SECRET,
     )
+
+
+def _signed_headers(payload: bytes) -> dict[str, str]:
+    return {"x-forgejo-signature": _sign(payload)}
 
 
 @pytest.mark.asyncio
@@ -34,7 +47,7 @@ async def test_ingress_derives_canonical_org_key_from_lower_name(adapter):
     owner = {"id": 1, "login": "fusionAIze", "full_name": "fusionAIze", "username": "fusionAIze", "lower_name": "fusionaize"}
     payload = _forgejo_payload(owner)
 
-    event = await adapter.parse_webhook({}, payload)
+    event = await adapter.parse_webhook(_signed_headers(payload), payload)
 
     assert event["org"] == "fusionaize"
 
@@ -51,7 +64,7 @@ async def test_ingress_repo_is_canonical_full_name(adapter):
     }
     payload = _forgejo_payload(owner)
 
-    event = await adapter.parse_webhook({}, payload)
+    event = await adapter.parse_webhook(_signed_headers(payload), payload)
 
     assert event["repo"] == "fusionaize/faigrid"
 
@@ -63,4 +76,4 @@ async def test_ingress_refuses_without_lower_name(adapter):
     payload = _forgejo_payload(owner)
 
     with pytest.raises(ValueError):
-        await adapter.parse_webhook({}, payload)
+        await adapter.parse_webhook(_signed_headers(payload), payload)

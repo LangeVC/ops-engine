@@ -18,6 +18,11 @@ RETRY_DELAYS = [1.0, 2.0, 4.0]
 
 class ForgejoAdapter(ForgeAdapter):
     def __init__(self, base_url: str, token: str, webhook_secret: str):
+        if not webhook_secret:
+            raise ValueError(
+                "refusing to start: no webhook_secret configured; an unsigned "
+                "ingress accepts every payload"
+            )
         self.base_url = base_url.rstrip("/")
         self.token = token
         self.webhook_secret = webhook_secret
@@ -85,8 +90,8 @@ class ForgejoAdapter(ForgeAdapter):
 
     def _verify_signature(self, headers: dict[str, str], payload: bytes) -> None:
         sig_header = headers.get("x-forgejo-signature") or headers.get("x-gitea-signature", "")
-        if not sig_header or not self.webhook_secret:
-            return
+        if not sig_header:
+            raise ValueError("missing webhook signature header")
         expected = hmac.new(
             self.webhook_secret.encode(), payload, hashlib.sha256
         ).hexdigest()
@@ -212,7 +217,7 @@ class ForgejoAdapter(ForgeAdapter):
 
     async def release_exists(self, repo_full_name: str, tag_name: str) -> bool:
         try:
-            resp = await self._request("GET", f"/repos/{repo_full_name}/releases/tags/{tag_name}")
+            await self._request("GET", f"/repos/{repo_full_name}/releases/tags/{tag_name}")
             return True
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:

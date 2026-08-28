@@ -1,11 +1,16 @@
 version: '3.8'
 
+# The webhook endpoints are reachable only from the Docker network. Publishing a
+# host port mapping like "8081:8000" exposes the ingress on 0.0.0.0 and lets
+# scanners reach an endpoint that must refuse what it cannot verify. Reverse
+# proxies that share this network reach the service by name (ops-bot:8000);
+# nothing here binds to the host.
 services:
   ops-bot:
     build: .
     container_name: example-ops-bot
     restart: unless-stopped
-    ports:
-      - "8081:8000"
+    expose:
+      - "8000"
     env_file:
       - .env
