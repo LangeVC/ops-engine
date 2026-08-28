@@ -12,6 +12,13 @@ Two org keys that lower to the same canonical key (e.g. ``fusionAIze`` and
 hazard, so the load fails with a named ``OrgKeyCollisionError`` naming both
 keys instead of letting one silently win.
 
+The org keys are read from either of two layouts: the top-level org keys as
+every production layover carries them, or an explicit ``orgs:`` mapping. A
+config that is in neither layout — no org keys at all — is a **read failure**,
+reported by ``check`` and ``migrate`` with a non-zero exit and the file name,
+never as "0 org keys". LNF-100-1: the tool must not report success on a file it
+cannot read.
+
 Stdlib only, no external deps.
 
 Usage:
@@ -20,7 +27,7 @@ Usage:
 
 ``migrate`` prints the migrated YAML to stdout (or rewrites FILE with
 ``--in-place``). ``check`` verifies the file is already canonical and exits
-non-zero on any display-case key or collision.
+non-zero on any display-case key, collision, or unreadable org layout.
 """
 
 from __future__ import annotations
@@ -114,16 +121,98 @@ def migrate_orgs(orgs: dict[str, Any]) -> dict[str, Any]:
     return migrated
 
 
-def migrate_config(config: dict[str, Any]) -> dict[str, Any]:
-    """Migrate a full config mapping's ``orgs`` section and return a new mapping."""
+# Top-level keys that belong to the config as a whole rather than to a single
+# org. None of these names is a valid org key, so a config that carries one of
+# them at the top level is not reporting "no orgs" — these are the config's own
+# sections, not orgs.
+_NON_ORG_TOP_LEVEL_KEYS = frozenset(
+    {
+        "repositories",
+        "mirror",
+        "notifications",
+        # v1 op-level defaults that a config may hoist to the top.
+        "auto_triage",
+        "stale_management",
+        "workflow_dispatches",
+        "dependency_triggers",
+        "release",
+        "auto_merge",
+    }
+)
+
+
+class OrgLayoutError(ValueError):
+    """A config could not be read for org keys — it is not a known org layout.
+
+    ``check`` and ``migrate`` raise this instead of reporting "no org keys" so a
+    file the tool did not actually read is never reported as canonical. The
+    message names the file and the expected layout.
+    """
+
+    def __init__(self, path: str, found: list[str]) -> None:
+        self.path = path
+        self.found = found
+        shown = ", ".join(repr(k) for k in found)
+        super().__init__(
+            f"no org keys in {path!r} — expected a top-level org key for each org "
+            f"or an 'orgs:' mapping; top-level keys found: {shown}"
+        )
+
+
+def extract_orgs(config: dict[str, Any], path: str = "") -> tuple[dict[str, Any], str]:
+    """Return the org mapping a config uses and the layout it is in.
+
+    Two layouts are recognized:
+
+      - ``top-level``: the orgs are the top-level keys, as every production
+        layover carries them. ``repositories`` and the config metadata keys are
+        not orgs.
+      - ``orgs-mapping``: the orgs sit under an ``orgs:`` section.
+
+    A config that is not in either recognized layout (no org keys at all, or a
+    ``repositories:`` mapping with no surrounding org) raises
+    :class:`OrgLayoutError` naming the misread keys — "no org keys against a
+    config that has one" is a read failure, never a clean result.
+    """
+    if not isinstance(config, dict):
+        raise OrgLayoutError(path, [])
+
+    if isinstance(config.get("orgs"), dict):
+        return config["orgs"], "orgs-mapping"
+
+    org_keys: dict[str, Any] = {}
+    found_keys: list[str] = []
+    for key, value in config.items():
+        if key in _NON_ORG_TOP_LEVEL_KEYS:
+            continue
+        found_keys.append(key)
+        org_keys[key] = value
+    if org_keys:
+        return org_keys, "top-level"
+
+    raise OrgLayoutError(path, found_keys)
+
+
+def migrate_config(config: dict[str, Any], path: str = "") -> dict[str, Any]:
+    """Migrate a full config mapping and return a new mapping.
+
+    The org keys are read via :func:`extract_orgs`, so both a top-level org key
+    layout and an explicit ``orgs:`` mapping are migrated; a config with no
+    recognized org layout raises :class:`OrgLayoutError`. The migrated orgs are
+    placed under the ``orgs:`` section of the returned mapping, and the
+    original top-level org keys (in a top-level layout) are replaced so no
+    display-cased key survives.
+    """
     if not isinstance(config, dict):
         raise ValueError("config must be a mapping")
+    orgs, layout = extract_orgs(config, path)
     result = dict(config)
-    orgs = config.get("orgs")
-    if orgs is None:
-        orgs = {}
+    if layout == "top-level":
+        for key in list(result):
+            if key not in _NON_ORG_TOP_LEVEL_KEYS:
+                del result[key]
     if not isinstance(orgs, dict):
-        raise ValueError("config['orgs'] must be a mapping")
+        raise ValueError("orgs must be a mapping")
     result["orgs"] = migrate_orgs(orgs)
     return result
 
@@ -146,9 +235,12 @@ def _read_config(path: Path) -> tuple[dict[str, Any], str]:
 def _run_migrate(path: Path, in_place: bool) -> int:
     data, _ = _read_config(path)
     try:
-        migrated = migrate_config(data)
+        migrated = migrate_config(data, str(path))
     except OrgKeyCollisionError as exc:
         print(f"migrate-org-keys: collision: {exc}", file=sys.stderr)
+        return 1
+    except OrgLayoutError as exc:
+        print(f"migrate-org-keys: read failure: {exc}", file=sys.stderr)
         return 1
     out = _yaml_dump(migrated)
     if in_place:
@@ -161,11 +253,13 @@ def _run_migrate(path: Path, in_place: bool) -> int:
 
 def _run_check(path: Path) -> int:
     data, _ = _read_config(path)
-    orgs = data.get("orgs")
-    if orgs is None:
-        orgs = {}
+    try:
+        orgs, _layout = extract_orgs(data, str(path))
+    except OrgLayoutError as exc:
+        print(f"migrate-org-keys: read failure: {exc}", file=sys.stderr)
+        return 1
     if not isinstance(orgs, dict):
-        _die("config['orgs'] must be a mapping")
+        _die(f"{path}: orgs must be a mapping")
 
     failed = False
     try:

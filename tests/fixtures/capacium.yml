@@ -1,0 +1,14 @@
+# Pre-migration layover config for capacium (capacium-ops).
+# The org key sits at the top level, display-cased. Dependency triggers repeat
+# the display-cased org as the repo-reference org portion.
+# LNF-100-1: check must fail on this file.
+Capacium:
+  repositories:
+    capacium:
+      dependency_triggers:
+        - target_repo: "Capacium/capacium"
+          target_event_type: "dependency-update"
+    capacium-exchange:
+      dependency_triggers:
+        - target_repo: "Capacium/capacium-exchange"
+          target_event_type: "dependency-update"

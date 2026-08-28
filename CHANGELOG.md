@@ -7,7 +7,11 @@
 `fusionaize`, with the display spelling kept as an attribute. Run
 `scripts/migrate-org-keys.py` before upgrading: it lowercases existing keys,
 preserves the old spelling as `github.login`, and fails loudly on a collision
-rather than letting one key silently win.
+rather than letting one key silently win. It reads the org keys from the
+top-level layout every production layover uses (as well as an explicit `orgs:`
+mapping), so `check` reports the real key count instead of `0`, and a config
+from which no org keys can be read is a named, non-zero read failure — never a
+"canonical" result the operator is meant to trust (LNF-100-1, LVC-230).
 
 Why a major bump: the Python contract surface changed additively only, but
 `config.yml` is the contract the five layovers actually consume, and they have
