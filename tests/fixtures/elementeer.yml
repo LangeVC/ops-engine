@@ -1,0 +1,11 @@
+# Pre-migration layover config for elementeer (elementeer-ops).
+# The org key sits at the top level and is already canonical.
+# LNF-100-1: check must pass on this file.
+elementeer:
+  repositories:
+    elementeer-addon-voxel:
+      release:
+        enabled: true
+    elementeer-mcp:
+      release:
+        enabled: true

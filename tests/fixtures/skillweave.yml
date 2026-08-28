@@ -1,0 +1,8 @@
+# Pre-migration layover config for skillweave (skillweave-ops).
+# The org key sits at the top level, display-cased.
+# LNF-100-1: check must fail on this file.
+SkillWeave:
+  repositories:
+    skillweave:
+      mirror:
+        enabled: true

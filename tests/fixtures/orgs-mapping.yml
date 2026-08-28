@@ -1,0 +1,8 @@
+# Explicit orgs: mapping layout. Still supported: a config that keys orgs
+# under an orgs: section must be checked and migrated the same way.
+orgs:
+  fusionAIze:
+    repositories:
+      faigrid:
+        release:
+          enabled: true

@@ -101,25 +101,33 @@ def test_non_mapping_org_value_is_rekeyed_without_inspection():
     assert migrated["fusionaize"] == "not-a-mapping"
 
 
-def test_migrate_config_without_orgs_ships_empty_orgs():
-    migrated = migrate_config({})
-    assert migrated == {"orgs": {}}
+def test_migrate_config_without_orgs_is_a_read_failure():
+    """LNF-100-1: a config with no org keys is a read failure, not '0 orgs'.
+
+    Previously ``migrate_config({})`` shipped ``{"orgs": {}}`` — reporting
+    success on a file from which no org keys were read. Criterion 2 of LNF-100-1
+    supersedes that: zero org keys names the file and the expected layout.
+    """
+    with pytest.raises(migrate.OrgLayoutError):
+        migrate_config({})
 
 
-def test_migrate_config_preserves_other_sections_and_ships_empty_orgs():
-    migrated = migrate_config({"repositories": {"a": 1}})
-    assert migrated == {"repositories": {"a": 1}, "orgs": {}}
+def test_migrate_config_without_orgs_still_a_read_failure():
+    """A config with only metadata (no org keys) is still a read failure."""
+    with pytest.raises(migrate.OrgLayoutError):
+        migrate_config({"repositories": {"a": 1}})
 
 
 def test_migrate_config_never_emits_a_hard_coded_org_name():
-    migrated = migrate_config({})
-    assert list(migrated["orgs"]) == []
-    assert migrated["orgs"] == {}
+    migrated = migrate_config(
+        {"langevc": {"repositories": {"a": 1}}, "repositories": {"keep": {}}}
+    )
+    assert "langevc" in migrated["orgs"]
+    assert "Capacium" not in migrated
+    assert "fusionAIze" not in migrated
 
 
-def test_migrated_dump_of_empty_template_is_just_orgs_empty():
-    data = migrate_config({})
-    dumped = migrate._yaml_dump(data)
-    assert "orgs: {}" in dumped
-    assert "fusionAIze" not in dumped
-    assert "Capacium" not in dumped
+def test_migrated_dump_of_empty_template_is_a_read_failure():
+    """LNF-100-1: a template with no org keys must fail, not emit empty orgs."""
+    with pytest.raises(migrate.OrgLayoutError):
+        migrate_config({})

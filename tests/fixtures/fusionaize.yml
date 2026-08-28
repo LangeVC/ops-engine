@@ -1,0 +1,12 @@
+# Pre-migration layover config for fusionaize (fusionaize-ops).
+# The org key sits at the top level, display-cased.
+# LNF-100-1: check must fail on this file.
+fusionAIze:
+  repositories:
+    faigrid:
+      release:
+        enabled: true
+    faiops-browser:
+      dependency_triggers:
+        - target_repo: "fusionAIze/faiops-browser"
+          target_event_type: "dependency-update"

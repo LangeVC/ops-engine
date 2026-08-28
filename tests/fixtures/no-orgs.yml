@@ -1,0 +1,3 @@
+# A config with no org keys at all, in either supported layout.
+# LNF-100-1: check and migrate must refuse this as a read failure.
+{}
