@@ -155,17 +155,18 @@ def test_display_cased_repo_reference_resolves_to_canonical_key():
     assert _resolve_repo_reference(config, f"LangeVC/{repo}") == f"{org['canonical_key']}/{repo}"
 
 
-def test_repo_reference_resolves_from_forgejo_lower_name_not_full_name():
+def test_repo_reference_resolves_from_forgejo_full_name_handle():
+    """LVC-238: the key derives from ``repository.full_name`` (the handle Forgejo
+    actually sends), not from a database ``lower_name`` column the API lacks."""
     repository = {
         "owner": {
             "id": 1,
             "login": "LangeVC",
             "full_name": "Lange Ventures & Consulting",
             "username": "langevc",
-            "lower_name": "langevc",
         },
         "name": "ops-engine",
-        "full_name": "Lange Ventures & Consulting/ops-engine",
+        "full_name": "langevc/ops-engine",
     }
     assert canonical_org_key(repository) == "langevc"
     config = _config_from_declaration(_load_declaration())

@@ -1,26 +1,33 @@
 # Org Identifier Sweep — Repo Reference Resolution
 
 Every repo reference in a layover `config.yml` must resolve through the
-**canonical org key** — the Forgejo `lower_name`, always lowercase. This sweep
+**canonical org key** — the lowercase org handle (see
+`src/ops_engine/config_loader.py` — `canonical_org_key`). This sweep
 enumerates every surface in a layover config that names a repository and
 declares how each reference resolves. A repo reference whose org portion is
 not a known canonical org fails the **config resolution** with a named error,
 never a dispatch against the forge API.
 
+> **LVC-238 correction.** The canonical key is derived from the webhook payload
+> (`repository.full_name`, the `org/repo` handle Forgejo actually sends),
+> not from `owner.lower_name` — that is a column of Forgejo's database schema
+> (`user.lower_name`), not a field of the API. The config keys declared below
+> are still lowercase by construction; the derivation no longer keys on a
+> schema-only field.
+
 ## Background
 
-FFR-200-1 established that the canonical org key equals the Forgejo
-`lower_name` (`src/ops_engine/config_loader.py` — `canonical_org_key`,
-`OpsEngineConfig.get_repo_config`). Display identifiers — `full_name`,
-`login`, `username`, `forgejo.display_name`, `github.login` — are data stored
-under the key, never the key itself. This sweep applies that rule to every
-repo reference a layover config can carry.
+FFR-200-1 established the canonical org key and how every internal org lookup
+keys on it (`canonical_org_key`, `OpsEngineConfig.get_repo_config`). Display
+identifiers — `full_name`, `login`, `username`, `forgejo.display_name`,
+`github.login` — are data stored under the key, never the key itself. This
+sweep applies that rule to every repo reference a layover config can carry.
 
 ## What a repo reference is
 
 | Surface | Shape | Resolution |
 |---------|-------|------------|
-| `orgs.<key>` | canonical org key | the key is canonical by construction (`lower_name`) |
+| `orgs.<key>` | canonical org key | the key is canonical by construction (lowercase org handle) |
 | `orgs.<key>.repositories.<name>` | repo name | repo name stays exact; the org part is the canonical key |
 | `orgs.<key>.repositories.<name>.dependency_triggers[].target_repo` | `org/repo` | org portion resolved against the canonical keys; repo portion passed through |
 
@@ -50,7 +57,7 @@ uses the same example orgs as the FFR-200-1 tests (`langevc`, `fusionaize`).
 {
   "schema": 1,
   "package": "ops_engine",
-  "rule": "every repo reference resolves through the canonical org key (Forgejo lower_name); a target that does not resolve to a known canonical org fails the config resolution, not the dispatch",
+  "rule": "every repo reference resolves through the canonical org key (Forgejo lowercase org handle); a target that does not resolve to a known canonical org fails the config resolution, not the dispatch",
   "reference_surfaces": [
     {"field": "orgs", "kind": "canonical-key"},
     {"field": "repositories", "kind": "repo-name"},
@@ -82,8 +89,9 @@ five org-layover `config.yml` files checked out under `langevc/` on the Forgejo
 canonical host. This section lists, per file, the org key it declares and every
 repo reference it carries that does **not** resolve through the canonical key
 path. A finding is any repo address whose org portion is a display identifier
-(`github.login` or `forgejo.display_name` casing) rather than the Forgejo
-`lower_name`, or a top-level org key that is not already its canonical `lower_name`.
+(`github.login` or `forgejo.display_name` casing) rather than the canonical
+lowercase org handle, or a top-level org key that is not already lowercase
+canonical form.
 
 Measurements taken 2026-08-23.
 

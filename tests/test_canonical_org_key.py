@@ -1,9 +1,14 @@
-"""FFR-200-1: the canonical org key is the Forgejo lower_name.
+"""FFR-200-1 + LVC-238: the canonical org key derives from the webhook payload.
 
-Every internal org lookup keys on the Forgejo ``lower_name`` (always lowercase).
-The webhook ingress derives that key from ``owner.lower_name`` only — never from
-``full_name``, ``login``, or ``username``, which carry display case or a free-form
-display name and would key on the wrong string (see LVC-229).
+Every internal org lookup keys on a canonical org key (always lowercase). The
+webhook ingress derives it from ``repository.full_name`` (the ``org/repo`` form
+Forgejo actually sends, already lowercase) and falls back to
+``owner.username``. ``owner.login``, ``owner.full_name`` and free-form display
+names are display or account identifiers and are never used as a key.
+
+LVC-238 correction: ``owner.lower_name`` is a column of Forgejo's database
+schema (``user.lower_name``), not a field of the webhook payload. Deriving the
+key from it made the ingress raise on every real payload.
 """
 
 import pytest
@@ -19,37 +24,39 @@ from ops_engine.config_loader import (
 )
 
 
-def _forgejo_repository(*, lower_name=None, owner_full_name="Display Case", login="DisplayCase", username="display-case"):
-    owner = {"id": 1, "login": login, "full_name": owner_full_name, "username": username}
-    if lower_name is not None:
-        owner["lower_name"] = lower_name
+def _forgejo_repository(*, org_handle="fusionaize", owner_full_name="fusionAIze", login="fusionAIze"):
+    """A repository mapping shaped like a real Forgejo webhook payload.
+
+    ``repository.full_name`` is ``"org_handle/repo"`` — the org portion is the
+    always-lowercase handle. The owner carries display attributes (``login``,
+    ``full_name``) that are never the key.
+    """
+    owner = {"id": 1, "login": login, "full_name": owner_full_name, "username": org_handle}
     return {
         "owner": owner,
         "name": "faigrid",
-        "full_name": f"{owner['full_name']}/faigrid",
+        "full_name": f"{org_handle}/faigrid",
     }
 
 
-def test_canonical_org_key_is_lower_name():
-    repo = _forgejo_repository(lower_name="fusionaize", owner_full_name="fusionAIze", login="fusionAIze")
+def test_canonical_org_key_derives_from_repo_full_name():
+    repo = _forgejo_repository(org_handle="fusionaize", owner_full_name="fusionAIze", login="fusionAIze")
     assert canonical_org_key(repo) == "fusionaize"
 
 
-def test_canonical_org_key_ignores_display_full_name_and_login():
-    """lower_name wins even when full_name is a free-form display name and login is cased."""
-    repo = _forgejo_repository(
-        lower_name="langevc",
-        owner_full_name="Lange Ventures & Consulting",
-        login="LangeVC",
-    )
+def test_canonical_org_key_ignores_owner_display_name_and_login():
+    """Owner full_name (a free-form display name) and login (display case) are
+    never the key: the key comes from the repository full_name handle."""
+    repo = _forgejo_repository(org_handle="langevc", owner_full_name="Lange Ventures & Consulting", login="LangeVC")
     assert canonical_org_key(repo) == "langevc"
 
 
-def test_canonical_org_key_refuses_without_lower_name():
-    """>The ingress must never fall back to full_name/login/username when lower_name is absent."""
-    repo = _forgejo_repository(lower_name=None, owner_full_name="fusionAIze", login="fusionAIze")
-    with pytest.raises(ValueError):
-        canonical_org_key(repo)
+def test_canonical_org_key_derives_without_any_lower_name():
+    """The API sends no ``owner.lower_name`` at all (LVC-238): the function must
+    derive the key from the payload fields, not refuse on the absent schema column."""
+    repo = _forgejo_repository(org_handle="fusionaize", owner_full_name="fusionAIze", login="fusionAIze")
+    assert "lower_name" not in repo["owner"]
+    assert canonical_org_key(repo) == "fusionaize"
 
 
 def test_canonical_org_key_refuses_without_owner():

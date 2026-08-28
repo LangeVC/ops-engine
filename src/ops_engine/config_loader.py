@@ -11,27 +11,43 @@ from pydantic import BaseModel, Field, ValidationError
 def canonical_org_key(repository: dict[str, Any]) -> str:
     """Derive the canonical org key from a Forgejo webhook ``repository`` mapping.
 
-    Forgejo canonicalizes every org name to a lowercase ``lower_name``. That value
-    — and only that value — is the canonical org key used by every internal lookup
-    (see :meth:`OpsEngineConfig.get_repo_config`).
+    The canonical org key is used by every internal lookup (see
+    :meth:`OpsEngineConfig.get_repo_config`). It must be derived from a field the
+    Forgejo API actually sends — not from the database schema. Measured 2026-08-26
+    against git.langevc.com's live API, the webhook ``owner`` object carries no
+    ``lower_name``; that is a column of the ``user`` table, not a payload field
+    (see LVC-238).
 
-    ``full_name`` (on the owner or the repository), ``login``, and ``username`` are
-    display or account identifiers and are NEVER used here. They can carry display
-    case (``fusionAIze`` vs ``fusionaize``) or a free-form display name
-    (``"Lange Ventures & Consulting"``), so deriving the key from them would key on
-    the wrong string and miss the config entry. If ``lower_name`` is absent, this
-    refuses rather than guessing from those fields.
+    The source of truth is ``repository.full_name`` (``"org/repo"``): LVC-229's
+    evidence recorded the webhook delivering ``full_name = "fusionaize/faigrid"``
+    — already lowercase. The org portion is lowercased in case a consumer sends
+    display case. ``owner.username`` is the fallback: it is the always-lowercase
+    unique handle the API sends. If neither yields an org, this refuses with a
+    named error rather than keying on a display-only field (``owner.login``,
+    ``owner.full_name``) or a free-form display name.
     """
-    owner = repository.get("owner") if isinstance(repository, dict) else None
-    if not isinstance(owner, dict):
-        raise ValueError("cannot derive canonical org key: repository has no 'owner' object")
-    lower_name = owner.get("lower_name")
-    if not lower_name:
+    if not isinstance(repository, dict):
         raise ValueError(
-            "cannot derive canonical org key: owner has no 'lower_name'; "
-            "refusing to fall back to full_name/login/username"
+            "cannot derive canonical org key: repository is not a mapping"
         )
-    return lower_name
+
+    full_name = repository.get("full_name")
+    if isinstance(full_name, str) and "/" in full_name:
+        org, _sep, _rest = full_name.partition("/")
+        if org:
+            return org.lower()
+
+    owner = repository.get("owner")
+    if isinstance(owner, dict):
+        username = owner.get("username")
+        if isinstance(username, str) and username:
+            return username.lower()
+
+    raise ValueError(
+        "cannot derive canonical org key: repository carries no 'full_name' "
+        "with an 'org/repo' form and no owner with a 'username'; "
+        "refusing to key on a display-only field"
+    )
 
 
 class ConfigSectionError(TypeError):
@@ -256,7 +272,7 @@ class ForgejoIdentity(BaseModel):
     ``display_name`` is the human-facing display name (free-form, can carry
     display case or a company name like ``"Lange Ventures & Consulting"``). It
     is a stored attribute — NEVER a lookup key. The canonical lookup key is the
-    org's ``lower_name`` (see :func:`canonical_org_key`).
+    lowercase org handle (see :func:`canonical_org_key`).
     """
 
     display_name: Optional[str] = None
@@ -267,7 +283,7 @@ class GithubIdentity(BaseModel):
 
     ``login`` is the GitHub account/login handle (can carry display case, e.g.
     ``LangeVC``). It is a stored attribute — NEVER a lookup key. The canonical
-    lookup key is the org's ``lower_name`` (see :func:`canonical_org_key`).
+    lookup key is the lowercase org handle (see :func:`canonical_org_key`).
     """
 
     login: Optional[str] = None
@@ -384,8 +400,8 @@ class OpsEngineConfig(BaseModel):
     def get_repo_config(self, org_name: str, repo_name: str) -> RepoConfig:
         """Returns a resolved RepoConfig merging Org defaults with Repo specifics.
 
-        ``org_name`` is expected to be the canonical org key — the Forgejo
-        ``lower_name``, always lowercase (see :func:`canonical_org_key`). Lookup
+        ``org_name`` is expected to be the canonical org key — the lowercase
+        org handle (see :func:`canonical_org_key`). Lookup
         is resolved against the stored org keys on that lowercase basis, so a
         caller that still holds a display-cased name resolves to the same config
         instead of missing it.

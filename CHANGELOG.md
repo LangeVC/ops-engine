@@ -16,10 +16,17 @@ version says so.
 
 ### Organisation identity is data, not string interpolation (LVC-229)
 
-- The webhook ingress derives the canonical org key from `lower_name` and never
-  from `full_name` or a display name. Previously a case mismatch made
-  `get_repo_config` return nothing, so the `ReleaseHandler` never ran — measured
-  on the faigrid v1.8.0 release, which produced no release object at all.
+- The webhook ingress derives the canonical org key from `repository.full_name`
+  (the `org/repo` form Forgejo actually sends, already lowercase) and falls back
+  to `owner.username`. Previously a case mismatch made `get_repo_config` return
+  nothing, so the `ReleaseHandler` never ran.
+- **Correction (LVC-238, 2026-08-26):** the original 3.0.0 entry claimed the
+  key was derived from `lower_name` and "measured on the faigrid v1.8.0
+  release". That measurement did not take place — `lower_name` is a column of
+  Forgejo's database schema (`user.lower_name`), not a field of the webhook
+  payload, and the claim was written against the schema, not against a captured
+  payload. The corrected derivation is verified against the captured payload
+  committed at `tests/fixtures/forgejo_push_payload.json`.
 - `forgejo.display_name` and `github.login` are attributes under the canonical
   key, never lookup keys.
 - Release names come from a configured `name_template`, not from

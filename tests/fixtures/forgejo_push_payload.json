@@ -1,0 +1,64 @@
+{
+  "ref": "refs/heads/main",
+  "before": "0000000000000000000000000000000000000000",
+  "after": "6e04c8715b6c8c9d3e2d1f0a4b5c6d7e8f90a1b2",
+  "repository": {
+    "id": 42,
+    "name": "faigrid",
+    "full_name": "fusionaize/faigrid",
+    "owner": {
+      "active": true,
+      "avatar_url": "https://git.langevc.com/a/fusionaize/avatar",
+      "created": "2025-01-02T00:00:00+01:00",
+      "description": "",
+      "email": "oss@fusionaize.com",
+      "followers_count": 3,
+      "following_count": 5,
+      "full_name": "fusionAIze",
+      "html_url": "https://git.langevc.com/fusionaize",
+      "id": 42,
+      "is_admin": false,
+      "language": "en-US",
+      "last_login": "2026-08-26T10:00:00+02:00",
+      "location": "",
+      "login": "fusionAIze",
+      "login_name": "fusionAIze",
+      "prohibit_login": false,
+      "pronouns": "",
+      "restricted": false,
+      "source_id": 0,
+      "starred_repos_count": 0,
+      "username": "fusionaize",
+      "visibility": "public",
+      "website": ""
+    },
+    "private": false,
+    "html_url": "https://git.langevc.com/fusionaize/faigrid",
+    "clone_url": "https://git.langevc.com/fusionaize/faigrid.git",
+    "ssh_url": "git@git.langevc.com:fusionaize/faigrid.git"
+  },
+  "pusher": {
+    "id": 7,
+    "login": "someone",
+    "full_name": "",
+    "email": "someone@fusionaize.com",
+    "avatar_url": "https://git.langevc.com/a/someone/avatar",
+    "username": "someone"
+  },
+  "sender": {
+    "id": 7,
+    "login": "someone",
+    "full_name": "",
+    "email": "someone@fusionaize.com",
+    "avatar_url": "https://git.langevc.com/a/someone/avatar",
+    "username": "someone"
+  },
+  "commits": [
+    {
+      "id": "6e04c8715b6c8c9d3e2d1f0a4b5c6d7e8f90a1b2",
+      "message": "chore: bump fixture",
+      "timestamp": "2026-08-26T10:01:00+02:00",
+      "url": "https://git.langevc.com/fusionaize/faigrid/commit/6e04c8715b6c8c9d3e2d1f0a4b5c6d7e8f90a1b2"
+    }
+  ]
+}
