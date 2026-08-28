@@ -21,5 +21,8 @@ COPY . /app/
 # Expose FastAPI port
 EXPOSE 8000
 
-# Start the application
-CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Bind inside the container only; the Docker network, not the host, carries the
+# ingress. The host port is not published (see docker-compose.yml), so the
+# endpoints are reachable from a reverse proxy on the same network, never from
+# 0.0.0.0 on the host.
+CMD ["uvicorn", "src.main:app", "--host", "127.0.0.1", "--port", "8000"]

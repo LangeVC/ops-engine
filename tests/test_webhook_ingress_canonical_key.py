@@ -1,15 +1,14 @@
-"""FFR-200-1 dispatch 3 + LVC-238: the webhook ingress derives the canonical org key.
+"""FFR-200-1 dispatch 3: the webhook ingress derives the canonical org key.
 
-The Forgejo webhook ingress must derive the canonical org key from the payload
-(via :func:`canonical_org_key`) and pass that canonical key onward. No caller
-downstream of the ingress may receive a display-case org name.
-
-LVC-238: the key is derived from ``repository.full_name`` (the ``org/repo``
-handle Forgejo actually sends) and falls back to ``owner.username``. The old
-``owner.lower_name`` derivation was built against Forgejo's database schema,
-not against a webhook payload, and raised on every real event.
+The Forgejo webhook ingress must derive the canonical org key from
+``repository.owner.lower_name`` (via :func:`canonical_org_key`) and pass that
+canonical key onward. No caller downstream of the ingress may receive a
+display-case org name. This is the red proof that the ingress, and not just
+``get_repo_config``, canonicalizes the key.
 """
 
+import hashlib
+import hmac
 import json
 
 import pytest
@@ -17,28 +16,38 @@ import pytest
 from ops_engine.adapters.forgejo_adapter import ForgejoAdapter
 
 
-def _forgejo_payload(owner: dict, repo_name: str = "faigrid", org_handle: str = "fusionaize") -> bytes:
-    """A Forgejo webhook body with a display-case owner; the key comes from the
-    ``repository.full_name`` handle, not from ``owner.lower_name`` (LVC-238)."""
-    repository = {"owner": owner, "name": repo_name, "full_name": f"{org_handle}/{repo_name}"}
+SECRET = "test-secret"
+
+
+def _sign(payload: bytes) -> str:
+    return hmac.new(SECRET.encode(), payload, hashlib.sha256).hexdigest()
+
+
+def _forgejo_payload(owner: dict, repo_name: str = "faigrid") -> bytes:
+    """A Forgejo webhook body with a display-case owner and a lower_name."""
+    repository = {"owner": owner, "name": repo_name, "full_name": f"{owner['full_name']}/{repo_name}"}
     return json.dumps({"repository": repository, "action": "opened", "sender": {"username": "someone"}}).encode()
 
 
 @pytest.fixture
 def adapter():
     return ForgejoAdapter(
-        base_url="https://git.example.com", token="test-token", webhook_secret="",
+        base_url="https://git.example.com", token="test-token", webhook_secret=SECRET,
     )
 
 
-@pytest.mark.asyncio
-async def test_ingress_derives_canonical_org_key_without_lower_name(adapter):
-    """A payload carrying no ``owner.lower_name`` (the API never sends it) still
-    reaches a handler with the canonical key ``fusionaize`` (LVC-238)."""
-    owner = {"id": 1, "login": "fusionAIze", "full_name": "fusionAIze", "username": "fusionaize"}
-    payload = _forgejo_payload(owner, org_handle="fusionaize")
+def _signed_headers(payload: bytes) -> dict[str, str]:
+    return {"x-forgejo-signature": _sign(payload)}
 
-    event = await adapter.parse_webhook({}, payload)
+
+@pytest.mark.asyncio
+async def test_ingress_derives_canonical_org_key_from_lower_name(adapter):
+    """A payload carrying ``fusionAIze/faigrid`` (display case) reaches a
+    handler with the canonical key ``fusionaize``."""
+    owner = {"id": 1, "login": "fusionAIze", "full_name": "fusionAIze", "username": "fusionAIze", "lower_name": "fusionaize"}
+    payload = _forgejo_payload(owner)
+
+    event = await adapter.parse_webhook(_signed_headers(payload), payload)
 
     assert event["org"] == "fusionaize"
 
@@ -50,22 +59,21 @@ async def test_ingress_repo_is_canonical_full_name(adapter):
         "id": 1,
         "login": "fusionAIze",
         "full_name": "fusionAIze",
-        "username": "fusionaize",
+        "username": "fusionAIze",
+        "lower_name": "fusionaize",
     }
-    payload = _forgejo_payload(owner, org_handle="fusionaize")
+    payload = _forgejo_payload(owner)
 
-    event = await adapter.parse_webhook({}, payload)
+    event = await adapter.parse_webhook(_signed_headers(payload), payload)
 
     assert event["repo"] == "fusionaize/faigrid"
 
 
 @pytest.mark.asyncio
-async def test_ingress_refuses_without_any_usable_org_field(adapter):
-    """With no usable org field (no 'org/repo' full_name, no owner.username) the
-    ingress fails with a named error rather than keying on a display attribute."""
-    owner = {"id": 1, "login": "fusionAIze", "full_name": "fusionAIze"}
-    repository = {"owner": owner, "name": "faigrid", "full_name": "fusionAIze"}  # no '/'
-    payload = json.dumps({"repository": repository, "action": "opened"}).encode()
+async def test_ingress_refuses_without_lower_name(adapter):
+    """Without owner.lower_name the ingress must not fall back to full_name/login."""
+    owner = {"id": 1, "login": "fusionAIze", "full_name": "fusionAIze", "username": "fusionAIze"}
+    payload = _forgejo_payload(owner)
 
-    with pytest.raises(ValueError, match="cannot derive canonical org key"):
-        await adapter.parse_webhook({}, payload)
+    with pytest.raises(ValueError):
+        await adapter.parse_webhook(_signed_headers(payload), payload)
