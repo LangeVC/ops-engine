@@ -3,6 +3,43 @@
 Records each repin of the layover version pins against `ops-engine`, with what
 was actually changed and where it was measured.
 
+## What a consumer needs to know which release carries a contract
+
+A version pin (`@v3.0.0`) says which tag a layover resolves. It does **not**
+say what that tag's public surface is. To know whether a given contract name or
+method is available on a pin, a consumer needs three records, in this order:
+
+1. **Which release introduced the contract.** `CONTRACT.md` documents the
+   current surface but not the release boundary; the release boundary lives in
+   `CHANGELOG.md`, one entry per release. A consumer reads the entry for the
+   release it is pinned to and confirms the contract name is listed there.
+2. **Whether that release is the one its pin points at.** `pyproject.toml`
+   (`version`) is the source of truth in `.version.yaml`; a `git tag
+   --contains <contract-commit>` answers "is this contract commit inside any
+   tag yet". If the answer is empty, the contract exists on a branch only and
+   no released version carries it.
+3. **When an unreleased contract will be pinnable.** An "Unreleased" section at
+   the top of `CHANGELOG.md` is the operational record: it names what is
+   committed to master but not stamped in a tag. A consumer that needs it waits
+   for the release that folds that section into a numbered heading; until then
+   there is no pinnable version and the requirement must not be dispatched.
+
+## 2026-09-03 — contract on master, not yet pinnable (OME-002)
+
+The mirror-destination resolution contract (`MirrorHandler.resolve_destination`
+and `MirrorHandler.prove_destination`, commit `824bbf1`) landed on
+`feature/OME-002-resolution-contract`, three commits past the `v3.0.0` tag
+(`21d003a`). `git tag --contains 824bbf1` is empty: **no released version
+carries these methods yet.** A layover that needs destination resolution cannot
+pin any tag to get it, and must not follow `master` to reach it (see the stable
+ref in `docs/version-sync.md`). The record of when it becomes pinnable is the
+"Unreleased" section of `CHANGELOG.md`; the release that folds that section
+into a numbered heading is the first pinnable version.
+
+Do not repin to `master` in response. Pinning master is the runtime-dependency
+defect this record exists to prevent: it would make a release gate execute a
+moving branch.
+
 ## 2026-08-23 — repin to v3.0.0
 
 Five layovers moved to `ops-engine v3.0.0` (tag `6c73e77`). The org key was

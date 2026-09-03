@@ -63,8 +63,12 @@ Layer 3: .ops.yaml (per-repo overrides — optional)
 ## Quickstart
 
 ```bash
-pip install git+https://github.com/LangeVC/ops-engine.git
+pip install git+https://github.com/LangeVC/ops-engine.git@v3.0.0
 ```
+
+Pin a tag, never the default branch: an unpinned `git+https://…ops-engine.git`
+resolves against the moving branch, so a bad edit to master would change what
+every layover's next install pulls with no version to roll back to.
 
 ### Layover Example
 
@@ -222,6 +226,7 @@ MyOrg:
 ```bash
 git clone https://github.com/LangeVC/ops-engine.git
 cd ops-engine
+git checkout v3.0.0
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 pytest tests/ -v

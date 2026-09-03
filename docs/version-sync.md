@@ -118,6 +118,55 @@ items, `schema:` integer, `source_of_truth:` and `path:` scalars, a quoted
 `pattern:`, and a `required:` boolean. Anything else raises. A declaration
 that cannot be stated in this subset should not exist silently.
 
+## Stable ref for runtime consumers
+
+A release gate that fetches this tool at runtime must not follow a moving
+branch. A bad edit to `master` would change what every organisation's release
+gate executes, at once, with no version to roll back to. Fetch the pinned tag,
+never the branch:
+
+```
+https://raw.githubusercontent.com/LangeVC/ops-engine/v3.0.0/scripts/version-sync.py
+```
+
+Replace `v3.0.0` with the tag of the release whose behaviour you have verified.
+The tag is the version of the gate, exactly as the pyproject pin is the version
+of the package.
+
+### Prove the artifact before you run it
+
+A fetch that completes is not proof of what arrived. The historical failure was
+an HTML login page served with HTTP 200 — `curl -fsSL` reported success and the
+gate died a syntax error later. The recipe below is what every runtime consumer
+must run between the fetch and the first execution; it is stated here so each
+consumer does not rediscover it. It proves two independent things, which answer
+different questions:
+
+1. **It is Python** — parse it as Python before running it, so the step fails
+   on a login page or a 404 body instead of dying three steps later.
+
+   ```bash
+   python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" \
+     "$RUNNER_TEMP/version-sync.py" \
+     || { echo "fetched file is not Python — first three lines:"; \
+          head -3 "$RUNNER_TEMP/version-sync.py"; exit 1; }
+   ```
+
+2. **It is the version you think it is** — prove the pinned tag actually
+   carries the subcommand the release path depends on. A tag whose
+   `version-sync.py` lost `bump` silently removes the ability to write every
+   declared location before the tag gate runs.
+
+   ```bash
+   python3 "$RUNNER_TEMP/version-sync.py" bump --help >/dev/null \
+     || { echo "pinned version-sync.py has no 'bump' subcommand"; exit 1; }
+   ```
+
+ops-engine ships this recipe in `tests/test_fetch_proves_content.sh` (the
+guard parses the download as Python and asserts a shebang before use). Consumers
+that cannot read that file reuse the two checks above verbatim rather than
+writing their own.
+
 ## Implementation notes
 
 - Stdlib only (`argparse`, `re`, `pathlib`), no external dependencies, so it

@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+Changes committed to `master` but not yet stamped in a tag. Nothing here is
+pinnable: a layover resolves `@vX.Y.Z` against a tag, and no tag yet contains
+these changes. When a release is cut, this section folds into a numbered
+heading and the changes become pinnable at that version.
+
+### Mirror destination resolution (OME-002)
+
+`MirrorHandler` gains two additive methods (commit `824bbf1`):
+
+- `resolve_destination(*, repo_override, org_github_login, repo_name, fallback, variable)`
+  resolves the mirror destination by strict precedence — a per-repository
+  override wins, otherwise the organisation declaration composes
+  `<github.login>/<repo_name>`, otherwise the run fails naming the variable to
+  set. A fallback is accepted only as a *gated* candidate and must be proven
+  before use.
+- `prove_destination(destination, *, token, api_base)` proves the destination
+  with two independent proofs before any push: EXISTS (`git ls-remote`) and
+  IS OURS (`permissions.push`). Neither proof creates a repository.
+
+Additive methods on an existing `contract` class, so the exports table and
+`ops_engine.__all__` are unchanged; a consumer pinned to `v3.0.0` is unaffected
+until it chooses to call them.
+
 ## 3.0.0
 
 **Breaking.** Organisation keys in `config.yml` are now canonical Forgejo

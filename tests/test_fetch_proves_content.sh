@@ -9,14 +9,15 @@
 #
 # Checks (criterion 2 + 3):
 #   A. The old private URL yields HTML and is rejected by the guard.
-#   B. The public URL yields a shebang and is accepted by the guard.
+#   B. The pinned public URL (a tag, never master) yields a shebang and is
+#      accepted by the guard.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 OLD_PRIVATE_URL="https://git.langevc.com/langevc/lvc-ops/raw/branch/main/scripts/version-sync.py"
-PUBLIC_URL="https://raw.githubusercontent.com/LangeVC/ops-engine/master/scripts/version-sync.py"
+PUBLIC_URL="https://raw.githubusercontent.com/LangeVC/ops-engine/v3.0.0/scripts/version-sync.py"
 
 TMPDIR_="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR_"' EXIT
