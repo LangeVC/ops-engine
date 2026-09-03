@@ -2,74 +2,64 @@
 """mirror-destination-propose - propose the per-repository mirror pairing, and
 apply it only after the operator confirms.
 
-OME-004. Given a Forgejo org and a GitHub org, enumerate both, propose a
-per-repository pairing, show what is unpaired in either direction, and let the
-operator confirm or amend BEFORE anything is written. This lane writes
-configuration across an organisation, so nothing it writes may happen without
-confirmation: confirmation is an acceptance criterion, not a convenience.
+OME-011. The mirror workflow contract moved on 2026-09-03 from the single
+``GH_REPOSITORY`` variable to a PAIR read through the Forgejo ``vars`` context:
+
+    GH_REPO_OWNER   org scope    the GitHub org/user that owns the mirror
+    GH_REPO         repo scope   the full owner/name destination
+
+The workflow's preflight refuses, in cost order, on: unset owner, unset repo,
+DOUBLE MATCH failure (``GH_REPO``'s owner prefix != ``GH_REPO_OWNER``, a
+CASE-SENSITIVE string compare evaluated BEFORE any GitHub request), then
+existence, then push permission. ``GH_REPOSITORY`` is no longer read by anything.
+
+This lane therefore proposes and writes the ``GH_REPO_OWNER`` / ``GH_REPO``
+pair. The destination OWNER is not derivable from the org name: ``elementeer``
+stays lowercase, ``capacium`` becomes ``Capacium``, ``fusionaize`` becomes
+``fusionAIze``, ``veeona`` becomes ``Veeona-AI``. The org-scope variable is the
+ONLY source of the owner. The tool READS ``GH_REPO_OWNER`` and NEVER writes it.
+
+Contract:
+
+    precondition   the org carries GH_REPO_OWNER. The tool READS it. It NEVER
+                   writes it.
+    propose        for each repo in the org: GH_REPO = <GH_REPO_OWNER>/<name>,
+                   unless amended. The composed value uses the owner VERBATIM.
+    uniqueness     no two canonical repos may propose the same destination.
+                   Colliding pairs are REFUSED, both sources and the destination
+                   named. Never propose either half. This is first-come,
+                   first-served, NOT a refusal of the whole org.
+    confirm        --apply --confirm, exactly as today.
+    write          CREATE (POST) when absent, UPDATE (PUT) when present, NOTHING
+                   when already equal.
+
+An owner that carries no variable and no ``--map`` override is a REFUSAL naming
+the org. Reading org-scope variables may require rights the credential lacks:
+ABSENT (404) and UNREADABLE (401/403/5xx) are reported distinctly, never folded
+together and never into a derived owner.
 
 Two forges: Forgejo (git.langevc.com) is canonical and the mirror source; a push
-there mirrors a ref to GitHub. The org-scope rule composes the destination as the
-org's GitHub login plus the repository name, and a per-repo repository variable
-GH_REPOSITORY overrides that compose (repo wins — OME-001 measured it, OME-002
-made it a contract, OME-003 now honours the override in classify). A repo-scope
-override is the destination VERBATIM (`resolve_destination`:
-`destination = repo_override.strip()`), so a value like `LangeVC/skillweave` is
-already a full `owner/name` and is reported as paired/unchanged, never recomposed
-under the org login. The proposal is therefore the composed pairing
-`gh_login/<repo>` for every canonical repo without an override, and the verbatim
-override for those that carry one, annotated with the class the audit determined.
-
-WHAT THE AUDIT MEASURED, AND HOW IT SHAPES THIS TOOL
-The accepted audit (OME-003, 2026-09-03) counted 78 canonical repositories across
-six organisations:
-
-    class 1  resolves and reachable      61
-    class 2  resolves but unreachable     0
-    class 3  needs an exception            1   langevc/txt-humanizer
-    class 4  not mirrored by policy       16
-
-Class 4 rests on a single measured fact — the mirror workflow is absent — and the
-audit's reviewer said explicitly they would rely on it today. The exception case
-occurs ONCE in 78. A proposal flow built for dozens of exceptions would be the
-wrong tool: the value here is not in proposing pairings a human then corrects, it
-is in DEMONSTRATING that the other 77 genuinely need no exception, and surfacing
-the one that does. So this tool does not build a giant amendment editor. It:
-
-  * proposes the pairing as a derived, mechanical list, not an editable premise;
-  * marks every row with its measured audit class so the operator sees, at a
-    glance, that the pairing agrees with the world (class 1) and where it does
-    not (class 3 name drift, class 4 policy);
-  * lists unpaired repositories in EITHER direction (Forgejo-side repos the
-    GitHub org does not carry under the composed name, and GitHub-side repos the
-    canonical org does not declare);
-  * accepts an *amendment* only to correct the genuine disagreement — a small
-    JSON map from canonical `owner/name` to an explicit `dest_owner/dest_name`
-    (or `null` to leave deliberately unmirrored). An amendment overrides the
-    proposal. Everything else is proven by the proposal, not re-asked.
+there mirrors a ref to github.com. A repo-scope ``GH_REPO`` override is the
+destination VERBATIM, so a value like ``LangeVC/skillweave`` is already a full
+``owner/name`` and is reported as paired/unchanged, never recomposed.
 
 CONFIRMATION GATE (acceptance criterion: nothing applied without it)
-The tool runs in three modes that form the confirmation chain:
+The tool runs in modes that form the confirmation chain:
 
     propose    (default)    write NOTHING. Print the pairing, the unpaired sides,
-                            and the list of amendments that differ from the audit.
-    amend                    show how a supplied --amendments file changes the
-                            proposal; STILL write nothing.
+                            and the collision rows (a loser named with its
+                            competitor).
     apply                    apply the confirmed pairing to the canonical forge
-                            (set each repo's GH_REPOSITORY variable). Refuses to
-                            run without an explicit --confirm, and refuses to
-                            apply any pairing the operator has not confirmed.
+                             (set each repo's GH_REPO variable). Refuses without
+                             --confirm.
 
-The apply path writes a per-repo GH_REPOSITORY variable on the FORGEJO side —
-never on GitHub, never any org-scope variable, never a concrete ref. It is
-idempotent: a second apply over an already-mapped org detects the variable already
-holds the target value and skips it, saying so, so a rerun changes nothing.
+The apply path writes a per-repo GH_REPO variable on the FORGEJO side — never on
+GitHub, never an org-scope variable, never a concrete ref. CREATE when absent,
+UPDATE when present, NO request when already equal, so a rerun changes nothing.
 
 RED PROOF: a proposal for a Forgejo org whose GitHub counterpart does not exist is
-REFUSED, naming the org, rather than proposing an empty pairing. This is checked
-by reading the GitHub org list directly; a 404 (org does not exist) is a refusal;
-a 401/403/5xx (org exists but unreadable) is an UNMEASURED refusal, never an empty
-pairing. The two are reported distinctly.
+REFUSED, naming the org, rather than proposing an empty pairing. A 404 is a
+refusal; a 401/403/5xx is an UNMEASURED refusal. The two are reported distinctly.
 
 Stdlib only.
 
@@ -80,7 +70,7 @@ Environment:
   GITHUB_TOKEN   Bearer to api.github.com with read scope on the orgs
 
 Usage:
-    mirror-destination-propose.py --map langevc:LangeVC [--orgs a,b]
+    mirror-destination-propose.py [--map langevc:LangeVC] [--orgs a,b]
         [--amend PATH.json] [--apply --confirm] [--dry-run] [--json]
     mirror-destination-propose.py --selftest
 """
@@ -97,7 +87,14 @@ import urllib.request
 
 FORGEJO_API_DEFAULT = "https://git.langevc.com/api/v1"
 GITHUB_API = "https://api.github.com"
-UA = "ops-engine/mirror-destination-propose (OME-004)"
+UA = "ops-engine/mirror-destination-propose (OME-011)"
+
+# The two Actions variables of the 2026-09-03 mirror contract. GH_REPO_OWNER is
+# org scope and is only ever READ here; GH_REPO is repo scope and is the value
+# this tool proposes and writes. GH_REPOSITORY (the OME-001..004 single-variable
+# contract) is no longer read or written anywhere by this tool.
+OWNER_VAR = "GH_REPO_OWNER"
+REPO_VAR = "GH_REPO"
 
 
 class ReadFailure(Exception):
@@ -105,32 +102,40 @@ class ReadFailure(Exception):
 
 
 class Refusal(Exception):
-    """A proposal is refused on principle: the GitHub counterpart does not exist.
+    """A proposal is refused on principle.
 
     Carries the org name so the operator sees which org was named, not an empty
-    pairing. Distinct from ReadFailure in that a void pairing is the deliberate
-    outcome here, not a transport failure.
+    pairing. ``reason`` states whether the counterpart does not exist (404) or
+    exists but is unreadable (401/403/5xx, marked UNMEASURED). Distinct from
+    ReadFailure in that a void pairing is the deliberate outcome here, not a
+    transport failure.
     """
 
-    def __init__(self, org, gh_login, reason):
+    def __init__(self, org, reason):
         self.org = org
-        self.gh_login = gh_login
         self.reason = reason
-        super().__init__(f"REFUSED: no GitHub counterpart for org '{org}' "
-                         f"(composed login '{gh_login}'): {reason}")
+        super().__init__(f"REFUSED: org '{org}': {reason}")
 
 
-def _http_get(url, headers):
-    req = urllib.request.Request(url, headers=headers)
+class OwnerRefusal(Refusal):
+    """The org carries no readable GH_REPO_OWNER and no --map override."""
+
+
+def _http_json(url, headers, method="GET", payload=None):
+    data = None
+    if payload is not None:
+        data = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
+    req = urllib.request.Request(url, headers=headers, data=data, method=method)
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
-            return r.status, r.read()
+            body = r.read()
+            return r.status, body
     except urllib.error.HTTPError as e:
-        raise ReadFailure(f"GET {url} -> HTTP {e.code}") from e
+        return e.code, e.read()
     except urllib.error.URLError as e:
-        raise ReadFailure(f"GET {url} -> {e.reason!r}") from e
+        raise ReadFailure(f"{method} {url} -> {e.reason!r}") from e
     except TimeoutError as e:
-        raise ReadFailure(f"GET {url} -> timeout") from e
+        raise ReadFailure(f"{method} {url} -> timeout") from e
 
 
 def _basic(u, t):
@@ -145,98 +150,104 @@ def _bearer(t):
 def _slug(name: str) -> str:
     """Normalise so the two forges' spelling drift folds onto one key.
 
-    Forgejo `txt-humanizer` and GitHub `txtHumanizer` are the same repository to a
-    human but not to a string compare. This mirrors the audit's normalisation so
-    the one class-3 case is surfaced, not silently reported as 'unpaired on both
-    sides'.
+    Forgejo ``txt-humanizer`` and GitHub ``txtHumanizer`` are the same repository
+    to a human but not to a string compare.
     """
     return re.sub(r"[^a-z0-9]", "", name.lower())
 
 
-def _404(e: urllib.error.HTTPError) -> bool:
-    return e.code == 404
-
-
-def _get_json(url, headers):
-    req = urllib.request.Request(url, headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=30) as r:
-            body = r.read()
-    except urllib.error.HTTPError as e:
-        if _404(e):
-            raise ReadFailure(f"GET {url} -> HTTP 404 (not found)") from e
-        raise ReadFailure(f"GET {url} -> HTTP {e.code}") from e
-    except urllib.error.URLError as e:
-        raise ReadFailure(f"GET {url} -> {e.reason!r}") from e
-    except TimeoutError as e:
-        raise ReadFailure(f"GET {url} -> timeout") from e
-    return json.loads(body)
+def _404(code: int) -> bool:
+    return code == 404
 
 
 class Census:
-    """Read-only snapshot of one Forgejo org and its GitHub counterpart."""
+    """Read/write view of one Forgejo org and its GitHub counterpart."""
 
     def __init__(self, api, fg_user, fg_token, gh_token):
         self.fg = _basic(fg_user, fg_token)
         self.gh = _bearer(gh_token)
         self.api = api
+        self.fg_json = {**self.fg, "Content-Type": "application/json"}
 
     def forgejo_repos(self, org) -> dict[str, dict]:
         """Enumerate the canonical org's repos, keyed by repo name."""
-        repos = _get_json(f"{self.api}/orgs/{org}/repos?limit=200", self.fg)
+        status, body = _http_json(f"{self.api}/orgs/{org}/repos?limit=200", self.fg)
+        if status != 200:
+            raise ReadFailure(f"list org repos {org} -> HTTP {status}")
+        repos = json.loads(body)
         return {r["name"]: r for r in repos}
 
-    def github_org_exists_and_names(self, gh_login, org) -> set[str]:
-        """Return the GitHub org's repo-name set, or Refusal if it does not exist.
+    def org_owner(self, org) -> str | None:
+        """Read org-scope GH_REPO_OWNER.
 
-        The refusal names the org (and the composed login). Distinguishes:
-        * 404 -> org does not exist -> Refusal (the red-proof case),
-        * 401/403/5xx -> exists but unreadable -> Refusal marked UNMEASURED,
-        * 200  -> the name set.
+        Returns None when the variable is ABSENT (404). Raises ReadFailure when
+        it is UNREADABLE (401/403/5xx/transport). The two are deliberately
+        distinct: never let an unreadable scope degrade into "absent" or into a
+        derived owner.
         """
+        url = f"{self.api}/orgs/{org}/actions/variables/{OWNER_VAR}"
+        status, body = _http_json(url, self.fg)
+        if _404(status):
+            return None
+        if status != 200:
+            raise ReadFailure(f"read org {OWNER_VAR} for '{org}' -> HTTP {status}")
+        d = json.loads(body)
+        if isinstance(d, dict) and d.get("data"):
+            return d["data"]
+        return None
+
+    def github_org_exists_and_names(self, gh_login, org) -> set[str]:
+        """Return the GitHub org's repo-name set, or Refusal if it does not exist."""
         url = f"{GITHUB_API}/orgs/{gh_login}/repos?per_page=200"
-        req = urllib.request.Request(url, headers=self.gh)
-        try:
-            with urllib.request.urlopen(req, timeout=30) as r:
-                body = r.read()
-        except urllib.error.HTTPError as e:
-            if e.code == 404:
-                raise Refusal(org, gh_login, "GitHub org does not exist (HTTP 404)")
-            raise Refusal(org, gh_login, f"GitHub org exists but is unreadable: HTTP {e.code}")
-        except urllib.error.URLError as e:
-            raise Refusal(org, gh_login, f"GitHub org unreadable: {e.reason!r}")
-        except TimeoutError as e:
-            raise Refusal(org, gh_login, "GitHub org read timed out")
+        status, body = _http_json(url, self.gh)
+        if status == 404:
+            raise Refusal(org, "GitHub org does not exist (HTTP 404)")
+        if status != 200:
+            raise Refusal(org, f"GitHub org exists but is unreadable: HTTP {status} (UNMEASURED)")
         repos = json.loads(body)
         return {r["name"] for r in repos}
 
     def repo_var(self, org, repo) -> str | None:
-        """Read GH_REPOSITORY override; None if unset; ReadFailure if unreadable."""
-        url = f"{self.api}/repos/{org}/{repo}/actions/variables/GH_REPOSITORY"
-        req = urllib.request.Request(url, headers=self.fg)
-        try:
-            with urllib.request.urlopen(req, timeout=30) as r:
-                body = r.read()
-        except urllib.error.HTTPError as e:
-            if _404(e):
-                return None
-            raise ReadFailure(f"GET {url} -> HTTP {e.code}") from e
-        except urllib.error.URLError as e:
-            raise ReadFailure(f"GET {url} -> {e.reason!r}") from e
-        except TimeoutError as e:
-            raise ReadFailure(f"GET {url} -> timeout") from e
+        """Read repo-scope GH_REPO; None if unset; ReadFailure if unreadable."""
+        url = f"{self.api}/repos/{org}/{repo}/actions/variables/{REPO_VAR}"
+        status, body = _http_json(url, self.fg)
+        if _404(status):
+            return None
+        if status != 200:
+            raise ReadFailure(f"read repo {REPO_VAR} for '{org}/{repo}' -> HTTP {status}")
         d = json.loads(body)
         return d.get("data") if isinstance(d, dict) else None
 
 
-def propose(api, fg_user, fg_token, gh_token, org, gh_login):
-    """Enumerate both orgs and return (pairing_rows, unpaired_fg, unpaired_gh).
+def read_owner(api, fg_user, fg_token, org, override_map):
+    """Resolve the destination owner for one org.
 
-    Read-only: neither forge is written. `unpaired_fg` are canonical repos whose
-    composed name the GitHub org does not carry (exact or spelling-variant);
-    `unpaired_gh` are GitHub-side repos the canonical org does not declare under
-    any matched name. The one class-3 name-drift case is surfaced as a spelling
-    variant, not as "unpaired on both sides".
+    Order: --map override wins; else the org-scope GH_REPO_OWNER variable; else
+    a refusal. An unreadable variable is an OwnerRefusal naming the scope, never
+    a silent fall-through to "absent" or to a derived owner.
+    """
+    if org in override_map:
+        return override_map[org]
+    c = Census(api, fg_user, fg_token, "")
+    try:
+        owner = c.org_owner(org)
+    except ReadFailure as e:
+        raise OwnerRefusal(org, f"{OWNER_VAR} exists but is UNREADABLE: {e}") from e
+    if owner is None:
+        raise OwnerRefusal(
+            org,
+            f"no {OWNER_VAR} read at org scope and no --map override; "
+            f"the destination owner cannot be derived from the org name",
+        )
+    return owner
+
+
+def propose(api, fg_user, fg_token, gh_token, org, gh_login):
+    """Enumerate both orgs and return (rows, unpaired_fg, unpaired_gh).
+
+    Read-only: neither forge is written. ``gh_login`` is the destination OWNER,
+    taken VERBATIM from the org-scope GH_REPO_OWNER (or a --map override). Every
+    composed GH_REPO carries that owner verbatim, never normalised.
     """
     c = Census(api, fg_user, fg_token, gh_token)
     fg_repos = c.forgejo_repos(org)
@@ -247,17 +258,15 @@ def propose(api, fg_user, fg_token, gh_token, org, gh_login):
 
     rows = []
     unpaired_fg = []
-    for name, r in fg_repos.items():
+    for name, _r in sorted(fg_repos.items()):
         try:
             override = c.repo_var(org, name)
-        except ReadFailure as e:
+        except ReadFailure:
             override = None
-        # A repo-scope override is the destination VERBATIM (OME-002
-        # resolve_destination: destination = repo_override.strip()). It is not a
-        # bare name under the org login; recomposing it would double the owner
-        # (e.g. LangeVC/skillweave -> LangeVC/LangeVC/skillweave). The override
-        # path therefore uses owner/name semantics exactly like the amendment
-        # path, so the two halves of this tool agree.
+        # A repo-scope GH_REPO override is the destination VERBATIM (the
+        # workflow's double match compares GH_REPO's owner prefix against
+        # GH_REPO_OWNER, case-sensitive). A value with a "/" is a full owner/name
+        # destination, never a bare name under the org owner.
         if override and "/" in override:
             dest_owner, dest_name = override.split("/", 1)
             pairing = override
@@ -277,9 +286,6 @@ def propose(api, fg_user, fg_token, gh_token, org, gh_login):
                     unpaired_fg.append({"org": org, "repo": name,
                                         "pairing": pairing, "status": "unpaired"})
             else:
-                # Override names a destination under a DIFFERENT owner than the
-                # mapped github login: it is an explicit, deliberate re-target,
-                # so it is paired as-is (the operator declared it, verbatim).
                 rows.append({"org": org, "repo": name, "dest": dest_owner,
                              "dest_name": dest_name, "pairing": pairing,
                              "status": "paired", "via": "override"})
@@ -307,6 +313,60 @@ def propose(api, fg_user, fg_token, gh_token, org, gh_login):
     return rows, unpaired_fg, unpaired_gh
 
 
+def resolve_uniqueness(rows):
+    """Enforce destination uniqueness, first-come-first-served, NOT a refusal.
+
+    Two canonical repos that would compose the SAME GH_REPO cannot both hold it:
+    they would push over each other on the public mirror. Leaving the loser unset
+    prevents that by construction; its mirror job then refuses LOUDLY with the
+    workflow's own message. "First" is principled and deterministic:
+
+      i.  a repo that ALREADY carries GH_REPO wins, always — a decision the
+          operator already made (the apply path reports it `unchanged`);
+      ii. among repos carrying none, a stable order decides: sorted org, then
+          sorted repo.
+
+    Returns (kept_rows, loss_rows) where loss_rows name the loser, its competitor
+    and the shared destination, with no variable written for the loser.
+    """
+    # First pass: an already-carried override (via == "override") is the operator's
+    # prior decision and always beats a fresh compose. Group by destination so a
+    # fresh compose that collides with any override loses outright.
+    override_dests = {r.get("pairing"): r for r in rows if r.get("via") == "override"}
+
+    seen = {}
+    kept = []
+    losses = []
+    for row in sorted(rows, key=lambda r: (r["org"], r["repo"])):
+        dest = row.get("pairing") or f"{row['dest']}/{row['dest_name']}"
+        is_existing = row.get("via") == "override"
+        rival = override_dests.get(dest)
+        if not is_existing and rival is not None and rival["repo"] != row["repo"]:
+            # A fresh compose that collides with an existing override loses.
+            losses.append({
+                "org": row["org"], "repo": row["repo"],
+                "destination": dest,
+                "winner": f"{rival['org']}/{rival['repo']}",
+                "reason": "destination collision; the competitor already holds "
+                          "this pairing",
+            })
+            continue
+        if dest in seen:
+            prev = seen[dest]
+            # Neither dominated -> sorted order (org, repo) already decided prev.
+            winner, loser = prev, row
+            losses.append({
+                "org": loser["org"], "repo": loser["repo"],
+                "destination": dest,
+                "winner": f"{winner['org']}/{winner['repo']}",
+                "reason": "destination collision; first-come-first-served",
+            })
+            continue
+        seen[dest] = row
+        kept.append(row)
+    return kept, losses
+
+
 def load_amendments(path: str) -> dict[str, str | None]:
     """Read the operator's amendment map: canonical "owner/name" -> explicit
     "dest_owner/dest_name", or null to leave deliberately unmirrored."""
@@ -315,24 +375,40 @@ def load_amendments(path: str) -> dict[str, str | None]:
     return {k: (v if v is None else str(v)) for k, v in data.items()}
 
 
-def apply_pairing(api, fg_user, fg_token, rows, org, dry_run=False):
-    """Set the confirmed per-repo GH_REPOSITORY variable on the FORGEJO side.
+def double_match_ok(owner, dest_owner):
+    """The workflow's preflight double match: GH_REPO owner prefix == GH_REPO_OWNER.
 
-    Idempotent: reads the current value first; if it already equals the target,
-    the repo is reported 'unchanged' and no write happens. Applies only rows whose
-    status is 'paired' (and not the composed identity of a drift row unless the
-    operator has amended it). Returns per-repo outcome strings. Never writes to
-    GitHub, never writes an org-scope variable, never pushes a ref.
+    A CASE-SENSITIVE string compare, evaluated BEFORE any GitHub request. This is
+    enforced at write time too, so a mismatch is caught the moment the tool would
+    write it, not on the operator's next push. Returns (ok, message).
+    """
+    if dest_owner != owner:
+        return False, (
+            f"DOUBLE MATCH failed: GH_REPO owner prefix '{dest_owner}' != "
+            f"GH_REPO_OWNER '{owner}' (case-sensitive)"
+        )
+    return True, "double match OK"
 
-    dry_run=True prints the intended write ("would set") and performs none, so the
-    apply path can be exercised against a live org without mutating it.
+
+def apply_pairing(api, fg_user, fg_token, rows, org, owner, dry_run=False):
+    """Write the confirmed per-repo GH_REPO variable on the FORGEJO side.
+
+    CREATE (POST) when absent, UPDATE (PUT) when present, NO request when the
+    stored value already equals the target. The double match is enforced BEFORE
+    any request: a composed owner that does not equal the org's GH_REPO_OWNER is
+    refused naming both values and no request is made. Never writes to GitHub,
+    never writes an org-scope variable, never pushes a ref.
     """
     c = Census(api, fg_user, fg_token, "")
-    header = {**c.fg, "Content-Type": "application/json"}
     outcomes = []
     for row in rows:
         repo = row["repo"]
         target = f"{row['dest']}/{row['dest_name']}"
+        ok, msg = double_match_ok(owner, row["dest"])
+        if not ok:
+            outcomes.append((repo, "REFUSED",
+                             f"{msg}; target '{target}' not written"))
+            continue
         try:
             current = c.repo_var(org, repo)
         except ReadFailure as e:
@@ -344,34 +420,41 @@ def apply_pairing(api, fg_user, fg_token, rows, org, dry_run=False):
         if dry_run:
             outcomes.append((repo, "would-set", f"{current or '<unset>'} -> {target} (dry-run)"))
             continue
-        url = f"{api}/repos/{org}/{repo}/actions/variables/GH_REPOSITORY"
-        payload = json.dumps({"name": "GH_REPOSITORY", "value": target}).encode()
-        req = urllib.request.Request(url, data=payload, headers=header, method="PUT")
+        url = f"{api}/repos/{org}/{repo}/actions/variables/{REPO_VAR}"
+        payload = {"name": REPO_VAR, "value": target}
+        if current is None:
+            method = "POST"
+            note = "create"
+        else:
+            method = "PUT"
+            note = "update"
         try:
-            with urllib.request.urlopen(req, timeout=30) as r:
-                r.read()
-            outcomes.append((repo, "set", f"{current or '<unset>'} -> {target}"))
-        except urllib.error.HTTPError as e:
-            outcomes.append((repo, "FAILED", f"PUT -> HTTP {e.code}"))
-        except urllib.error.URLError as e:
-            outcomes.append((repo, "FAILED", f"PUT -> {e.reason!r}"))
+            status, _ = _http_json(url, c.fg_json, method=method, payload=payload)
+        except ReadFailure as e:
+            outcomes.append((repo, "FAILED", f"{method} -> {e}"))
+            continue
+        if status in (200, 201, 204):
+            outcomes.append((repo, "set", f"({note}) {current or '<unset>'} -> {target}"))
+        else:
+            outcomes.append((repo, "FAILED", f"{method} -> HTTP {status}"))
     return outcomes
 
 
-def emit(rows, unpaired_fg, unpaired_gh, org, gh_login, as_json):
+def emit(rows, unpaired_fg, unpaired_gh, losses, org, gh_login, as_json):
     if as_json:
-        blob = {"org": org, "github_login": gh_login,
+        blob = {"org": org, "github_owner": gh_login,
                 "paired": [r for r in rows if r["status"] == "paired"],
                 "drift": [r for r in rows if r["status"] == "drift"],
                 "unpaired_forgejo": unpaired_fg,
-                "unpaired_github": unpaired_gh}
+                "unpaired_github": unpaired_gh,
+                "collisions": losses}
         sys.stdout.write(json.dumps(blob, indent=2) + "\n")
         return
     paired = [r for r in rows if r["status"] == "paired"]
     drift = [r for r in rows if r["status"] == "drift"]
     lines = ["# Mirror pairing proposal",
              "",
-             f"Forgejo org `{org}`  ->  GitHub org `{gh_login}`",
+             f"Forgejo org `{org}`  ->  GitHub owner `{gh_login}`",
              "",
              f"| outcome | count |",
              "|---------|-------|",
@@ -379,6 +462,7 @@ def emit(rows, unpaired_fg, unpaired_gh, org, gh_login, as_json):
              f"| drift (names differ) | {len(drift)} |",
              f"| unpaired on Forgejo side | {len(unpaired_fg)} |",
              f"| unpaired on GitHub side | {len(unpaired_gh)} |",
+             f"| collisions (loser left unset) | {len(losses)} |",
              ""]
     if paired:
         lines += ["## Paired", "",
@@ -409,58 +493,66 @@ def emit(rows, unpaired_fg, unpaired_gh, org, gh_login, as_json):
         for n in unpaired_gh:
             lines.append(f"| {n} |")
         lines.append("")
+    if losses:
+        lines += ["## Destination collisions (loser left unset)", "",
+                  "| loser | destination | winner |",
+                  "|-------|-------------|--------|"]
+        for L in sorted(losses, key=lambda x: (x["org"], x["repo"])):
+            lines.append(f"| {L['org']}/{L['repo']} | {L['destination']} | {L['winner']} |")
+        lines.append("")
     lines.append("Nothing was written. Confirm or amend, then re-run with `--apply --confirm`.")
     sys.stdout.write("\n".join(lines) + "\n")
 
 
 def _selftest():
-    """Decision-function proofs without touching either forge.
-
-    Exercises the exact cases the tool exists to catch:
-      * the one exception (name drift) is surfaced as drift, not "unpaired";
-      * an override re-targets a genuinely different name and stays paired;
-      * a full owner/name override is a verbatim destination, never recomposed;
-      * a canonical repo whose composed name is absent on GitHub is unpaired-fg;
-      * a GitHub repo with no canonical twin is unpaired-gh;
-      * the refusal: an org whose GitHub counterpart does not exist refuses.
-    """
-    # drift: forgejo txt-humanizer vs github txtHumanizer is "drift", not unpaired
-    drift_rows = []
-    for name, gh_names in [("txt-humanizer", {"txtHumanizer"})]:
-        if name in gh_names:
-            drift_rows.append("paired")
-        elif _slug(name) in {_slug(n) for n in gh_names}:
-            drift_rows.append("drift")
-    assert drift_rows == ["drift"], drift_rows
-    # exact compose -> paired
-    assert "capacium" in {"capacium"}
-    # override re-target (repo wins): resolved against the override, not the compose
-    override_target = "host-lab-main"
-    assert override_target in {"host-lab-main", "host-core-lab"}
-    # a full owner/name override is a verbatim destination: split once on "/"
-    # gives owner and name, and the pairing is the override itself, never doubled
-    ov = "LangeVC/skillweave"
-    owner, dname = ov.split("/", 1)
-    assert owner == "LangeVC" and dname == "skillweave"
-    assert owner + "/" + dname == ov  # no recomposition under any login
+    """Decision-function proofs without touching either forge."""
     # slug normalisation folds hyphen/case/dot onto one key
     assert _slug("txt-humanizer") == _slug("txtHumanizer")
     assert _slug("env-ctl.v2") == _slug("EnvCtlV2")
+    # a full owner/name override is a verbatim destination: split once on "/"
+    ov = "LangeVC/skillweave"
+    owner, dname = ov.split("/", 1)
+    assert owner == "LangeVC" and dname == "skillweave"
+    assert owner + "/" + dname == ov
+    # double match is case-sensitive and refuses on a real mismatch
+    ok, _ = double_match_ok("LangeVC", "LangeVC")
+    assert ok
+    ok, _ = double_match_ok("fusionAIze", "fusionaize")
+    assert not ok
+    ok, _ = double_match_ok("Capacium", "capacium")
+    assert not ok
+    # uniqueness: first-come-first-served, existing override wins
+    rows = [
+        {"org": "a", "repo": "z", "pairing": "O/z", "status": "paired", "via": "compose"},
+        {"org": "a", "repo": "a", "pairing": "O/z", "status": "paired", "via": "compose"},
+    ]
+    kept, losses = resolve_uniqueness(rows)
+    assert len(kept) == 1 and len(losses) == 1, (kept, losses)
+    assert kept[0]["repo"] == "a", kept  # sorted order: 'a' before 'z'
+    # existing (via override) beats a fresh compose regardless of sort order
+    rows = [
+        {"org": "a", "repo": "z", "pairing": "O/z", "status": "paired", "via": "override"},
+        {"org": "a", "repo": "a", "pairing": "O/z", "status": "paired", "via": "compose"},
+    ]
+    kept, losses = resolve_uniqueness(rows)
+    assert kept[0]["repo"] == "z", kept  # override wins even though 'a' sorts first
+    assert losses[0]["repo"] == "a"
+    assert losses[0]["winner"] == "a/z"
     # refusal construction names the org
-    r = Refusal("nonexistent-org", "NoSuchLogin", "GitHub org does not exist (HTTP 404)")
-    assert "nonexistent-org" in str(r) and "NoSuchLogin" in str(r)
-    print("selftest PASS: drift->drift | override re-target stays paired | "
-          "full owner/name override is verbatim | "
-          "slug folds spelling | refusal names the org")
+    r = Refusal("nonexistent-org", "GitHub org does not exist (HTTP 404)")
+    assert "nonexistent-org" in str(r) and "404" in str(r)
+    print("selftest PASS: slug folds spelling | override is verbatim | "
+          "double match is case-sensitive | uniqueness FCFS with override priority "
+          "| refusal names the org")
     return 0
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--map", required=False, help="forgejoOrg:GitHubLogin[, ...]")
+    ap.add_argument("--map", required=False, help="forgejoOrg:GitHubOwner[, ...] (override for the org variable)")
     ap.add_argument("--orgs", help="restrict canonical orgs (comma list)")
     ap.add_argument("--amend", help="JSON amendments: {\"owner/repo\": \"dest/destName\" or null}")
-    ap.add_argument("--apply", action="store_true", help="apply the confirmed pairing (writes Forgejo vars)")
+    ap.add_argument("--apply", action="store_true", help="apply the confirmed pairing (writes Forgejo reps)")
     ap.add_argument("--confirm", action="store_true", help="required with --apply")
     ap.add_argument("--dry-run", action="store_true", help="with --apply: print intended writes, write nothing")
     ap.add_argument("--json", action="store_true")
@@ -468,14 +560,11 @@ def main():
     a = ap.parse_args()
     if a.selftest:
         return _selftest()
-    if not a.map:
-        print("mirror-destination-propose: ERROR: --map is required (or --selftest)", file=sys.stderr)
-        return 2
     if a.apply and not a.confirm:
         print("mirror-destination-propose: ERROR: --apply requires --confirm "
               "(nothing is applied without the operator's confirmation)", file=sys.stderr)
         return 2
-    org_map = dict(p.split(":", 1) for p in a.map.split(",") if ":" in p)
+    override_map = dict(p.split(":", 1) for p in (a.map or "").split(",") if ":" in p)
     fg_token = os.environ.get("FORGEJO_TOKEN")
     gh_token = os.environ.get("GITHUB_TOKEN")
     if not fg_token or not gh_token:
@@ -487,12 +576,32 @@ def main():
     orgs_only = set(a.orgs.split(",")) if a.orgs else None
     amendments = load_amendments(a.amend) if a.amend else {}
 
+    # Discover the canonical orgs: from --map if supplied, else all Forgejo orgs
+    # readable under the credential. The owner for each is the org variable (with
+    # --map as the explicit override).
+    if not a.map:
+        status, body = _http_json(f"{api}/user/orgs", _basic(fg_user, fg_token))
+        if status != 200:
+            print(f"mirror-destination-propose: ERROR: cannot list orgs: HTTP {status}",
+                  file=sys.stderr)
+            return 2
+        org_names = sorted(o["username"] for o in json.loads(body))
+    else:
+        org_names = sorted(override_map.keys())
+
     exit_code = 0
-    for org, gh_login in sorted(org_map.items()):
+    results = []
+    for org in org_names:
         if orgs_only and org not in orgs_only:
             continue
         try:
-            rows, unpaired_fg, unpaired_gh = propose(api, fg_user, fg_token, gh_token, org, gh_login)
+            owner = read_owner(api, fg_user, fg_token, org, override_map)
+        except OwnerRefusal as e:
+            print(f"mirror-destination-propose: REFUSED {e}", file=sys.stderr)
+            exit_code = 1
+            continue
+        try:
+            rows, unpaired_fg, unpaired_gh = propose(api, fg_user, fg_token, gh_token, org, owner)
         except Refusal as e:
             print(f"mirror-destination-propose: REFUSED {e}", file=sys.stderr)
             exit_code = 1
@@ -505,30 +614,33 @@ def main():
             if key in amendments:
                 val = amendments[key]
                 if val is None:
-                    continue  # deliberately unmirrored
-                owner, name = val.split("/", 1)
-                final_rows.append({**r, "dest": owner, "dest_name": name,
+                    continue
+                ow, nm = val.split("/", 1)
+                final_rows.append({**r, "dest": ow, "dest_name": nm,
                                    "pairing": val, "status": "paired",
-                                   "note": "amended"})
+                                   "via": "amended"})
             else:
                 final_rows.append(r)
 
+        kept_rows, losses = resolve_uniqueness(final_rows)
+
         if not a.apply:
-            emit(final_rows, unpaired_fg, unpaired_gh, org, gh_login, a.json)
-            if amendments:
-                print(f"(amendments file supplied; shown with amendments honoured. "
-                      f"still nothing written.)", file=sys.stderr)
+            emit(kept_rows, unpaired_fg, unpaired_gh, losses, org, owner, a.json)
             continue
 
-        applyable = [r for r in final_rows if r["status"] == "paired"]
-        outcomes = apply_pairing(api, fg_user, fg_token, applyable, org, dry_run=a.dry_run)
+        applyable = [r for r in kept_rows if r["status"] == "paired"]
+        outcomes = apply_pairing(api, fg_user, fg_token, applyable, org, owner,
+                                 dry_run=a.dry_run)
         changed = 0
         for repo, state, note in outcomes:
             if state in ("set", "would-set"):
                 changed += 1
             print(f"  {state:9} {org}/{repo}  {note}", file=sys.stderr)
+        for L in losses:
+            print(f"  collision  {L['org']}/{L['repo']}  left unset; winner {L['winner']} "
+                  f"for {L['destination']}", file=sys.stderr)
         print(f"apply {org}: {len(outcomes)} repos, {changed} changed, "
-              f"{len(outcomes) - changed} unchanged/unmeasured")
+              f"{len(outcomes) - changed} unchanged/unmeasured/refused")
     return exit_code
 
 
