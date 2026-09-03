@@ -12,9 +12,13 @@ Two forges: Forgejo (git.langevc.com) is canonical and the mirror source; a push
 there mirrors a ref to GitHub. The org-scope rule composes the destination as the
 org's GitHub login plus the repository name, and a per-repo repository variable
 GH_REPOSITORY overrides that compose (repo wins — OME-001 measured it, OME-002
-made it a contract, OME-003 now honours the override in classify). The proposal
-is therefore the composed pairing `gh_login/<repo>` for every canonical repo,
-annotated with the class the audit already determined.
+made it a contract, OME-003 now honours the override in classify). A repo-scope
+override is the destination VERBATIM (`resolve_destination`:
+`destination = repo_override.strip()`), so a value like `LangeVC/skillweave` is
+already a full `owner/name` and is reported as paired/unchanged, never recomposed
+under the org login. The proposal is therefore the composed pairing
+`gh_login/<repo>` for every canonical repo without an override, and the verbatim
+override for those that carry one, annotated with the class the audit determined.
 
 WHAT THE AUDIT MEASURED, AND HOW IT SHAPES THIS TOOL
 The accepted audit (OME-003, 2026-09-03) counted 78 canonical repositories across
@@ -248,6 +252,38 @@ def propose(api, fg_user, fg_token, gh_token, org, gh_login):
             override = c.repo_var(org, name)
         except ReadFailure as e:
             override = None
+        # A repo-scope override is the destination VERBATIM (OME-002
+        # resolve_destination: destination = repo_override.strip()). It is not a
+        # bare name under the org login; recomposing it would double the owner
+        # (e.g. LangeVC/skillweave -> LangeVC/LangeVC/skillweave). The override
+        # path therefore uses owner/name semantics exactly like the amendment
+        # path, so the two halves of this tool agree.
+        if override and "/" in override:
+            dest_owner, dest_name = override.split("/", 1)
+            pairing = override
+            if dest_owner == gh_login and dest_name in gh_names:
+                rows.append({"org": org, "repo": name, "dest": dest_owner,
+                             "dest_name": dest_name, "pairing": pairing,
+                             "status": "paired", "via": "override"})
+            elif dest_owner == gh_login:
+                slug_match = gh_slug_to_name.get(_slug(dest_name))
+                if slug_match is not None:
+                    rows.append({"org": org, "repo": name, "dest": dest_owner,
+                                 "dest_name": slug_match,
+                                 "pairing": f"{dest_owner}/{slug_match}",
+                                 "status": "drift",
+                                 "note": f"forgejo '{name}' vs github '{slug_match}' (spelling)"})
+                else:
+                    unpaired_fg.append({"org": org, "repo": name,
+                                        "pairing": pairing, "status": "unpaired"})
+            else:
+                # Override names a destination under a DIFFERENT owner than the
+                # mapped github login: it is an explicit, deliberate re-target,
+                # so it is paired as-is (the operator declared it, verbatim).
+                rows.append({"org": org, "repo": name, "dest": dest_owner,
+                             "dest_name": dest_name, "pairing": pairing,
+                             "status": "paired", "via": "override"})
+            continue
         target = override or name
         base = f"{gh_login}/{target}"
         if target in gh_names:
@@ -383,6 +419,7 @@ def _selftest():
     Exercises the exact cases the tool exists to catch:
       * the one exception (name drift) is surfaced as drift, not "unpaired";
       * an override re-targets a genuinely different name and stays paired;
+      * a full owner/name override is a verbatim destination, never recomposed;
       * a canonical repo whose composed name is absent on GitHub is unpaired-fg;
       * a GitHub repo with no canonical twin is unpaired-gh;
       * the refusal: an org whose GitHub counterpart does not exist refuses.
@@ -400,6 +437,12 @@ def _selftest():
     # override re-target (repo wins): resolved against the override, not the compose
     override_target = "host-lab-main"
     assert override_target in {"host-lab-main", "host-core-lab"}
+    # a full owner/name override is a verbatim destination: split once on "/"
+    # gives owner and name, and the pairing is the override itself, never doubled
+    ov = "LangeVC/skillweave"
+    owner, dname = ov.split("/", 1)
+    assert owner == "LangeVC" and dname == "skillweave"
+    assert owner + "/" + dname == ov  # no recomposition under any login
     # slug normalisation folds hyphen/case/dot onto one key
     assert _slug("txt-humanizer") == _slug("txtHumanizer")
     assert _slug("env-ctl.v2") == _slug("EnvCtlV2")
@@ -407,6 +450,7 @@ def _selftest():
     r = Refusal("nonexistent-org", "NoSuchLogin", "GitHub org does not exist (HTTP 404)")
     assert "nonexistent-org" in str(r) and "NoSuchLogin" in str(r)
     print("selftest PASS: drift->drift | override re-target stays paired | "
+          "full owner/name override is verbatim | "
           "slug folds spelling | refusal names the org")
     return 0
 
