@@ -220,4 +220,9 @@ python3 scripts/mirror-destination-audit.py \
 ```
 
 Credentials via `FORGEJO_TOKEN`+`GITHUB_TOKEN`. `--selftest` runs the planted
-name-mismatch proof with no forge read.
+name-mismatch proof (class 3 vs class 2) and the `GH_REPOSITORY` repo-wins proof
+with no forge read. A read failure (401/403/5xx, network) is reported UNMEASURED
+and is never confused with an absent workflow or an unset variable (HTTP 404 is
+the genuine-absence outcome); a repo the token cannot read is UNMEASURED, never
+silently class 4, and a wholly denied forge is a clean error exit, not a
+mid-report crash.
