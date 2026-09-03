@@ -1,21 +1,34 @@
 """CORE-004: MirrorHandler — Verify mirror sync after push to primary forge.
 
-OME-002 resolution contract (public surface, additive on ``MirrorHandler``):
+OME-012 resolution contract (mirror destination is TWO variables, not one):
 
-The mirror destination is resolved by a strict precedence, never by a blind
-inline fallback. A silently-wrong destination surfaces as a git exit 128 deep
-inside a push; the contract instead fails at a named preflight, before any
-push, naming the variable to set and the value it expected.
+The mirror destination is resolved from TWO Actions variables — the two halves
+of one contract, not two sources of one value:
 
-Resolution order:
-  1. an explicit per-repository override wins  (the exception mechanism);
-  2. otherwise the organisation declaration composes the destination
-     (``org.github.login`` + ``/`` + for the forge repo name);
-  3. otherwise the run FAILS — names the variable and the value it expected.
+  GH_REPO_OWNER  ORG scope   the GitHub owner            e.g. ``Capacium``
+  GH_REPO        REPO scope  the full owner/name target  e.g. ``Capacium/capacium``
 
-A fallback is only ever a GATED fallback: it is computed as a candidate, then
-proven with two independent proofs before it may be used. The two proofs
-answer different questions:
+BOTH are required. There is no precedence between them, and there is no
+fallback: an unset variable is a hard refusal — never a computed candidate.
+The check order, matching the deployed preflight guard (the "Preflight —
+resolve, double-match, verify, and vouch for the destination" step of the
+canonical ``.forgejo/workflows/mirror.yml``), is:
+
+  1. GH_REPO_OWNER unset  -> refuse, naming the ORG-scope variable.
+  2. GH_REPO unset        -> refuse, naming the REPO-scope variable.
+  3. DOUBLE MATCH: GH_REPO's owner prefix == GH_REPO_OWNER, a CASE-SENSITIVE
+     string compare performed BEFORE ANY NETWORK CALL. Mismatch refuses,
+     naming both values. No strip/lower/title/slug is applied — the owner and
+     destination are used verbatim (whitespace strip only), so a pair whose
+     prefix has strayed is caught, never silently re-cased into agreement.
+  4. EXISTS  — reachability (``git ls-remote``).
+  5. IS OURS — push permission (reachability is not ownership).
+
+A silently-wrong destination surfaces as a git exit 128 deep inside a push;
+the contract instead fails at a named preflight, before any push, naming the
+variable to set, its SCOPE, and the value it expected.
+
+The two proofs answer different questions:
 
   EXISTS   ``git ls-remote`` proves the repository is there and readable. It
            is the operator's premise — the mirror must FIND a destination,
@@ -30,6 +43,10 @@ answer different questions:
 
 Neither proof creates a repository under any outcome. Both use real git, not
 heuristics in this repository.
+
+The canonical variable names are declared ONCE here (see
+:data:`MIRROR_OWNER_VARIABLE` / :data:`MIRROR_REPO_VARIABLE`) and exported so
+operator scripts can import them instead of restating them.
 """
 
 import asyncio
@@ -42,10 +59,13 @@ from ops_engine.config_loader import MirrorConfig
 
 logger = logging.getLogger(__name__)
 
-# The repository variable (repo or org scope) whose value, when set, is the
-# per-repository override. Repo scope wins over org scope (measured: run 38407 /
-# job 68398, a PLATFORM rule on this Forgejo instance, not a repo property).
-MIRROR_VARIABLE = "GH_REPOSITORY"
+# The two Actions variables that carry the mirror contract. Declared once here
+# and exported, so operator scripts import these names instead of restating the
+# strings (restatement is how the contract drifted). The OME-002 single
+# variable ``GH_REPOSITORY`` is retired: the contract is now two halves, an
+# owning org/user (ORG scope) and a full owner/name destination (REPO scope).
+MIRROR_OWNER_VARIABLE = "GH_REPO_OWNER"
+MIRROR_REPO_VARIABLE = "GH_REPO"
 
 
 class MirrorDestinationError(RuntimeError):
@@ -61,10 +81,11 @@ class MirrorDestinationError(RuntimeError):
 class MirrorDestinationResolution:
     """The outcome of resolving a mirror destination before any push.
 
-    ``destination`` is the ``owner/repo`` to push to. ``source`` records which
-    rule produced it: ``"repo override"``, ``"org declaration"``, or
-    ``"gated fallback"``. A ``"gated fallback"`` has not yet been proven; call
-    :meth:`MirrorHandler.prove_destination` before using it.
+    ``destination`` is the ``owner/repo`` to push to, taken verbatim from
+    ``GH_REPO`` (whitespace stripped only). ``source`` records that it came
+    from the resolved two-variable contract: ``"double match"``. The value has
+    passed the double-match check but has NOT yet been proven reachable and
+    writable; call :meth:`MirrorHandler.prove_destination` before using it.
     """
 
     destination: str
@@ -141,54 +162,70 @@ class MirrorHandler:
     @staticmethod
     def resolve_destination(
         *,
-        repo_override: Optional[str] = None,
-        org_github_login: Optional[str] = None,
-        repo_name: Optional[str] = None,
-        fallback: Optional[str] = None,
-        variable: str = MIRROR_VARIABLE,
+        gh_repo_owner: Optional[str] = None,
+        gh_repo: Optional[str] = None,
     ) -> MirrorDestinationResolution:
-        """Resolve the mirror destination by strict precedence.
+        """Resolve the mirror destination from the two-variable contract.
 
-        Precedence (see module docstring):
+        ``gh_repo_owner`` is the ORG-scope ``GH_REPO_OWNER`` (the GitHub owner).
+        ``gh_repo`` is the REPO-scope ``GH_REPO`` (the full ``owner/name``
+        destination). BOTH are required: they are two halves of one contract,
+        not two sources of one value, so there is no precedence between them
+        and no fallback — unset is a hard refusal, never a computed candidate.
 
-        1. ``repo_override`` (repo-scope ``vars.GH_REPOSITORY``) wins.
-        2. ``org_github_login`` composes ``"<login>/<repo_name>"``.
-        3. otherwise the run FAILS, naming ``variable`` and the value it
-           expected. A ``fallback`` is accepted only as a *gated* candidate
-           (``source == "gated fallback"``): it is computed, NOT trusted, and
-           must still pass :meth:`prove_destination` before use.
+        Check order (matching the deployed preflight guard):
+
+        1. ``gh_repo_owner`` unset -> refuse, naming the ORG-scope variable.
+        2. ``gh_repo`` unset -> refuse, naming the REPO-scope variable.
+        3. DOUBLE MATCH: ``gh_repo``'s owner prefix == ``gh_repo_owner``, a
+           CASE-SENSITIVE string compare performed BEFORE ANY NETWORK CALL.
+           Mismatch refuses, naming both values.
+
+        The owner and destination are used VERBATIM — whitespace stripped, and
+        nothing else (no lower/title/slug), because the double match IS a plain
+        case-sensitive compare and any normalisation breaks the very check this
+        contract is built on.
 
         Raises:
-            MirrorDestinationError: no destination is resolvable. The message
-                names the variable to set and the value it expected.
+            MirrorDestinationError: a variable is unset or the double match
+                fails. The message names the variable AND its scope, gives the
+                value it held/expected, and (for the mismatch) proves no
+                network call is needed to refuse.
         """
-        if repo_override:
-            return MirrorDestinationResolution(
-                destination=repo_override.strip(), source="repo override"
+        owner = gh_repo_owner.strip() if gh_repo_owner is not None else None
+        repo = gh_repo.strip() if gh_repo is not None else None
+
+        if not owner:
+            raise MirrorDestinationError(
+                f"cannot resolve mirror destination: {MIRROR_OWNER_VARIABLE} "
+                f"is UNSET. Set the ORG-level Actions variable "
+                f"{MIRROR_OWNER_VARIABLE} to the GitHub org/user that owns "
+                f"the mirror (e.g. Capacium)."
             )
 
-        if org_github_login and repo_name:
-            return MirrorDestinationResolution(
-                destination=f"{org_github_login.strip()}/{repo_name.strip()}",
-                source="org declaration",
+        if not repo:
+            raise MirrorDestinationError(
+                f"cannot resolve mirror destination: {MIRROR_REPO_VARIABLE} "
+                f"is UNSET. Set the REPOSITORY-level Actions variable "
+                f"{MIRROR_REPO_VARIABLE} to the full destination "
+                f"(owner/repo, e.g. Capacium/capacium)."
             )
 
-        if fallback:
-            return MirrorDestinationResolution(
-                destination=fallback.strip(), source="gated fallback"
+        repo_owner = repo.split("/", 1)[0]
+        if repo_owner != owner:
+            raise MirrorDestinationError(
+                f"DOUBLE MATCH failed: {MIRROR_REPO_VARIABLE} '{repo}' has "
+                f"owner prefix '{repo_owner}', but {MIRROR_OWNER_VARIABLE} is "
+                f"'{owner}' (case-sensitive). Correct one of the two variables "
+                f"so {MIRROR_REPO_VARIABLE}'s owner prefix equals "
+                f"{MIRROR_OWNER_VARIABLE} exactly. Refusing to push; no GitHub "
+                f"request was made."
             )
 
-        expected = (
-            f"{org_github_login.strip()}/{repo_name.strip()}"
-            if org_github_login and repo_name
-            else "<github-org>/<repo>"
+        return MirrorDestinationResolution(
+            destination=repo, source="double match"
         )
-        raise MirrorDestinationError(
-            f"cannot resolve mirror destination: {variable} is unset at both "
-            f"repo and org scope, and no org github login is declared to "
-            f"compose one. Set {variable} to the destination (owner/repo), "
-            f"e.g. {expected}."
-        )
+
 
     @staticmethod
     async def prove_destination(
@@ -222,7 +259,8 @@ class MirrorHandler:
         if not exists:
             raise MirrorDestinationError(
                 f"cannot vouch for mirror destination '{destination}': it is "
-                f"not reachable/readable at {api_base}. Set {MIRROR_VARIABLE} "
+                f"not reachable/readable at {api_base}. Set the "
+                f"REPOSITORY-level Actions variable {MIRROR_REPO_VARIABLE} "
                 f"to the real destination (owner/repo) and retry."
             )
 
@@ -234,7 +272,8 @@ class MirrorHandler:
                 f"mirror destination '{destination}' exists but is NOT ours: "
                 f"the authenticated token has no push permission on it. The "
                 f"name of a public repository owned by someone else must not "
-                f"resolve as a writable destination. Correct {MIRROR_VARIABLE} "
+                f"resolve as a writable destination. Correct the "
+                f"REPOSITORY-level Actions variable {MIRROR_REPO_VARIABLE} "
                 f"to a repository this token may write to."
             )
 
