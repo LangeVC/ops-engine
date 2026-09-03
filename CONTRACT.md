@@ -17,9 +17,18 @@ The single source of truth for the classification is the `contract` field in
 this table. `kind` describes the shape of the name (`class`, `typedef`, or
 `function`); it records intent and is not itself versioned.
 
+`schema` is `2`. Schema 2 adds the `methods` array: the keyword arguments (and
+positional arguments) of the *methods* this contract guarantees on its public
+classes. `tests/test_public_surface.py` derives the expected signature from
+this array via `ast` and compares it against the class in source, so a
+signature change in the code with no matching declaration edit fails CI. The
+`methods` array does **not** cover every method in the package — it covers only
+the mirror-destination methods named in prose below, the ones whose semantics
+are promised. Other methods on public classes are not signature-guarded here.
+
 ```json
 {
-  "schema": 1,
+  "schema": 2,
   "package": "ops_engine",
   "semver": "SemVer 2.0.0",
   "exports": [
@@ -57,6 +66,22 @@ this table. `kind` describes the shape of the name (`class`, `typedef`, or
     {"name": "ApplyResult",                   "kind": "class",    "contract": true},
     {"name": "runner_from_config",            "kind": "function", "contract": true},
     {"name": "ChangelogParser",               "kind": "class",    "contract": true}
+  ],
+  "methods": [
+    {
+      "class": "MirrorHandler",
+      "module": "ops_engine.modules.mirror",
+      "name": "resolve_destination",
+      "args": [],
+      "kwargs": ["gh_repo_owner", "gh_repo"]
+    },
+    {
+      "class": "MirrorHandler",
+      "module": "ops_engine.modules.mirror",
+      "name": "prove_destination",
+      "args": ["destination"],
+      "kwargs": ["token", "api_base"]
+    }
   ]
 }
 ```
@@ -108,7 +133,7 @@ to this public surface:
   rename, or otherwise break any existing `contract` name, nor change the type
   of an existing parameter, field, or return value.
 
-## Mirror destination resolution (OME-002)
+## Mirror destination resolution (OME-012)
 
 `MirrorHandler` (a `contract` name above) gains two additive methods that
 together form the mirror-destination resolution contract. They are additive
@@ -116,20 +141,38 @@ methods on an existing public class, so they do not change the exports table
 above; a consumer that pins the current version is unaffected until it chooses
 to call them.
 
-- `MirrorHandler.resolve_destination(*, repo_override, org_github_login,
-  repo_name, fallback, variable)` resolves the destination by strict
-  precedence and returns a `MirrorDestinationResolution` (``destination``,
-  ``source``). Order: a per-repository override wins; otherwise the
-  organisation declaration composes ``<org.github.login>/<repo_name>``;
-  otherwise it raises `MirrorDestinationError` naming the variable to set and
-  the value it expected. A ``fallback`` is accepted only as a *gated* candidate
-  (``source == "gated fallback"``) and must be proven before use.
+The mirror destination is resolved from **two** Actions variables — the two
+halves of one contract, not two sources of one value:
+
+- `GH_REPO_OWNER` — **ORG scope**, the GitHub owner that owns the mirror
+  (e.g. `Capacium`).
+- `GH_REPO` — **REPO scope**, the full `owner/repo` destination
+  (e.g. `Capacium/capacium`).
+
+**Both are required.** There is no precedence between them and no fallback: an
+unset variable is a hard refusal, never a computed candidate.
+
+- `MirrorHandler.resolve_destination(*, gh_repo_owner, gh_repo)` maps the two
+  variables to their contract halves and returns a
+  `MirrorDestinationResolution` (`destination`, `source`). It refuses — before
+  any network call — in this order: `gh_repo_owner` unset (naming the ORG-scope
+  variable), `gh_repo` unset (naming the REPO-scope variable), then a
+  **case-sensitive double match**: `gh_repo`'s owner prefix must equal
+  `gh_repo_owner` exactly (no lower/title/slug; owner and destination are used
+  verbatim, whitespace-stripped only). On success `source` is `"double match"`.
+
 - `MirrorHandler.prove_destination(destination, *, token, api_base)` proves the
   destination with two independent proofs before any push: **EXISTS**
-  (``git ls-remote`` proves the repository exists and is readable) and
-  **IS OURS** (the repository's ``permissions.push`` for the authenticated token
+  (`git ls-remote` proves the repository exists and is readable) and
+  **IS OURS** (the repository's `permissions.push` for the authenticated token
   is true — reachability is not ownership). Neither proof creates a repository
   under any outcome.
+
+The methods above implement the deployed preflight guard — the
+"Preflight — resolve, double-match, verify, and vouch for the destination" step
+of the canonical `.forgejo/workflows/mirror.yml` — which is the source of truth
+for this contract. The check order matches it exactly: presence, double match,
+existence, then permission.
 
 `MirrorDestinationResolution` and `MirrorDestinationError` are names in the
 internal submodule `ops_engine.modules.mirror` and are therefore unpromised by
@@ -137,9 +180,36 @@ this contract, exactly like the other submodule names. The promised surface is
 the two methods on `MirrorHandler`; the exception a layover must handle is
 `ops_engine.modules.mirror.MirrorDestinationError`.
 
+## Variable-name constants
+
+`MIRROR_OWNER_VARIABLE` and `MIRROR_REPO_VARIABLE` live in the unpromised
+submodule `ops_engine.modules.mirror`. They hold the strings `GH_REPO_OWNER` and
+`GH_REPO` — the *single declaration* of the variable names — and
+`scripts/mirror-destination-audit.py` imports them rather than restating the
+strings (restatement is how the contract drifted). They are
+**unpromised-but-internally-consumed**: they are not part of the public surface
+this contract guarantees, and a consumer outside this repository must not rely
+on them. Where the public methods above name a variable in their error text,
+that text is the human-facing contract; the constants are an implementation
+detail that the in-repo audit consumes so the strings stay declared once. They
+may change or move in a minor bump, and the audit (which imports them) moves
+with them.
+
 ## Test enforcement
 
 `tests/test_public_surface.py` asserts, at CI time, that this declaration and
 `ops_engine.__all__` agree: the set of names is identical and every name is
-classified `contract`. A drift between the code and this document fails the
-suite before any release.
+classified `contract`. It also derives the `methods` signatures above and
+compares them to the class in source via `ast`, so a signature change with a
+stale declaration fails the suite before any release.
+
+## Compatibility note
+
+The `MirrorHandler` resolution contract was corrected in this revision. The
+previous wording (an `override`-wins precedence model with a `gated fallback`)
+described a retired design and never shipped: neither `resolve_destination` nor
+`prove_destination` is present in `v3.0.0`
+(`git show v3.0.0:src/ops_engine/modules/mirror.py | grep -c resolve_destination`
+is `0`, and the same for `CONTRACT.md`). This is the correction of an
+unreleased declaration, not a compatibility event: no layover can pin either
+method against a released version.
