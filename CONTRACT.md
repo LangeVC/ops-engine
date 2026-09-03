@@ -17,14 +17,27 @@ The single source of truth for the classification is the `contract` field in
 this table. `kind` describes the shape of the name (`class`, `typedef`, or
 `function`); it records intent and is not itself versioned.
 
-`schema` is `2`. Schema 2 adds the `methods` array: the keyword arguments (and
-positional arguments) of the *methods* this contract guarantees on its public
-classes. `tests/test_public_surface.py` derives the expected signature from
-this array via `ast` and compares it against the class in source, so a
-signature change in the code with no matching declaration edit fails CI. The
-`methods` array does **not** cover every method in the package — it covers only
-the mirror-destination methods named in prose below, the ones whose semantics
-are promised. Other methods on public classes are not signature-guarded here.
+`schema` is `2`. Schema 2 adds the `methods` array: for the *methods* this
+contract guarantees on its public classes, each entry records the ordered
+positional-parameter names (`args`), the ordered keyword-only-parameter names
+(`kwargs`), which of those parameters are *required* versus defaulted
+(`required_args` / `required_kwargs`), and the method *kind* (`kind`: instance,
+`classmethod`, or `staticmethod`, each sync or `async_`). `tests/test_public_surface.py`
+derives these same facts from the class in source via `ast` and compares them
+to this array, so a change in the parameter-NAME lists, in required-ness, or in
+the method kind — with no matching declaration edit — fails CI.
+
+That is the *whole* of what the gate checks. It does **not** gate: the
+default *values*, type annotations, method *decorators* other than
+`staticmethod`/`classmethod`, `*args`/`**kwargs` (none of the gated methods use
+them), or the method **body**. In particular the semantic promises elsewhere in
+this file — the case-sensitive double match, the check order, and the guarantee
+that no network call happens before the double match — are **contract prose that
+no machine check covers**; a reader who trusts CI to catch a change to those
+promises is trusting something CI does not look at. The `methods` array does
+**not** cover every method in the package — it covers only the
+mirror-destination methods named in prose below, the ones whose semantics are
+promised. Other methods on public classes are not signature-guarded here.
 
 ```json
 {
@@ -72,15 +85,21 @@ are promised. Other methods on public classes are not signature-guarded here.
       "class": "MirrorHandler",
       "module": "ops_engine.modules.mirror",
       "name": "resolve_destination",
+      "kind": "staticmethod",
       "args": [],
-      "kwargs": ["gh_repo_owner", "gh_repo"]
+      "required_args": [],
+      "kwargs": ["gh_repo_owner", "gh_repo"],
+      "required_kwargs": []
     },
     {
       "class": "MirrorHandler",
       "module": "ops_engine.modules.mirror",
       "name": "prove_destination",
+      "kind": "async_staticmethod",
       "args": ["destination"],
-      "kwargs": ["token", "api_base"]
+      "required_args": ["destination"],
+      "kwargs": ["token", "api_base"],
+      "required_kwargs": []
     }
   ]
 }
@@ -199,9 +218,17 @@ with them.
 
 `tests/test_public_surface.py` asserts, at CI time, that this declaration and
 `ops_engine.__all__` agree: the set of names is identical and every name is
-classified `contract`. It also derives the `methods` signatures above and
-compares them to the class in source via `ast`, so a signature change with a
-stale declaration fails the suite before any release.
+classified `contract`. It also derives, for each entry in the `methods` array,
+the ordered positional-parameter names, the ordered keyword-only-parameter
+names, which parameters are required versus defaulted, and the method kind
+(instance/`classmethod`/`staticmethod`, sync/async) from the class in source
+via `ast`, and compares them to this array — so a stale declaration that
+disagrees with the code on any of those specific facts fails the suite before
+any release. Signature dimensions **not** compared this way — defaults' values,
+type annotations, `*args`/`**kwargs`, and the method body — can change without
+this test noticing, and the semantic promises in prose above (case-sensitivity,
+check order, "no network call before the double match") are likewise **not
+machine-checked** anywhere.
 
 ## Compatibility note
 

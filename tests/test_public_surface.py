@@ -90,11 +90,13 @@ def _module_file(module: str) -> Path:
 
 
 def _promised_method_signatures():
-    """Return the method signatures the declaration promises, keyed by method.
+    """Return the method signatures the declaration promises, per method.
 
-    Each entry is ``(module, class_name, method_name, args, kwargs)`` where
-    ``args`` is the ordered positional-arg names and ``kwargs`` the ordered
-    keyword-only names, as written in the ```json``` declaration block.
+    Each entry is ``(module, class_name, method_name, sig)`` where ``sig`` is a
+    dict with the keys ``kind``, ``args`` (ordered positional names),
+    ``required_args`` (positional names with no default), ``kwargs`` (ordered
+    keyword-only names), and ``required_kwargs`` (keyword-only names with no
+    default), all as written in the ```json``` declaration block.
     """
     declaration = _load_declaration()
     out = []
@@ -104,20 +106,41 @@ def _promised_method_signatures():
                 m["class"],
                 m["module"],
                 m["name"],
-                list(m.get("args", [])),
-                list(m.get("kwargs", [])),
+                {
+                    "kind": m.get("kind"),
+                    "args": list(m.get("args", [])),
+                    "required_args": list(m.get("required_args", [])),
+                    "kwargs": list(m.get("kwargs", [])),
+                    "required_kwargs": list(m.get("required_kwargs", [])),
+                },
             )
         )
     return out
 
 
-def _code_method_signature(module: str, class_name: str, method_name: str):
-    """Extract ``(args, kwargs)`` for ``Class.method`` from source via ast.
+def _method_kind(node: ast.FunctionDef) -> str:
+    """The method kind as a string: sync/async plus instance/static/class."""
+    async_ = "async_" if isinstance(node, ast.AsyncFunctionDef) else ""
+    for deco in node.decorator_list:
+        name = None
+        if isinstance(deco, ast.Name):
+            name = deco.id
+        elif isinstance(deco, ast.Attribute):
+            name = deco.attr
+        if name in ("staticmethod", "classmethod"):
+            return f"{async_}{name}"
+    return f"{async_}instance"
 
-    Returns the ordered positional-arg names and keyword-only names of the
-    method (``self``/``cls`` excluded). Raises ``AssertionError`` if the class
-    or method is not found, so a name the declaration promises but the code
-    lacks fails the gate rather than being silently skipped.
+
+def _code_method_signature(module: str, class_name: str, method_name: str):
+    """Extract the gated signature facts for ``Class.method`` from source.
+
+    Returns a dict ``{kind, args, required_args, kwargs, required_kwargs}``
+    where ``args``/``kwargs`` are the ordered positional / keyword-only names
+    (``self``/``cls`` excluded) and ``required_*`` the subset of those names
+    that carry no default. Raises ``AssertionError`` if the class or method is
+    not found, so a name the declaration promises but the code lacks fails the
+    gate rather than being silently skipped.
     """
     tree = ast.parse(_module_file(module).read_text(encoding="utf-8"))
 
@@ -129,41 +152,61 @@ def _code_method_signature(module: str, class_name: str, method_name: str):
 
     for node in cls_node.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == method_name:
-            args = [
+            all_pos = node.args.posonlyargs + node.args.args
+            pos_names = [a.arg for a in all_pos if a.arg not in ("self", "cls")]
+            n_defaults = len(node.args.defaults)
+            required_args = pos_names[: len(pos_names) - n_defaults]
+
+            kw_names = [a.arg for a in node.args.kwonlyargs]
+            kw_defaults = node.args.kw_defaults or []
+            required_kwargs = [
                 a.arg
-                for a in node.args.posonlyargs + node.args.args
-                if a.arg not in ("self", "cls")
+                for i, a in enumerate(node.args.kwonlyargs)
+                if i >= len(kw_defaults) or kw_defaults[i] is None
             ]
-            kwargs = [a.arg for a in node.args.kwonlyargs]
-            return args, kwargs
+
+            return {
+                "kind": _method_kind(node),
+                "args": pos_names,
+                "required_args": required_args,
+                "kwargs": kw_names,
+                "required_kwargs": required_kwargs,
+            }
 
     raise AssertionError(f"{module}.{class_name}.{method_name} not found in source")
 
 
 def test_promised_method_signatures_match_code():
-    """The declaration, not the code, is the source of the promised signatures.
+    """The declaration, not the code, is the source of the promised facts.
 
     Each method promised in the ```json``` block's ``methods`` array is located
-    in source via ``ast`` and its positional and keyword-only parameter names
-    are compared to the declaration. A signature change in the code with a
-    stale declaration therefore fails this test — in BOTH directions: a rename
-    in code, or a rename in prose.
+    in source via ``ast`` and its ordered positional / keyword-only parameter
+    names, required-ness, and kind are compared to the declaration. A change in
+    any of those facts in the code with a stale declaration therefore fails this
+    test — in BOTH directions: a change in code, or a change in prose.
 
-    Boundary: this gates ONLY the methods listed in the ``methods`` array (the
-    mirror-destination methods with promised semantics). It is not a total
-    signature contract for every method on every public class.
+    Boundary: this gates ONLY the facts named (names, required-ness, kind) for
+    ONLY the methods listed in the ``methods`` array (the mirror-destination
+    methods with promised semantics). Default values, type annotations, the
+    method body, and ``*args``/``**kwargs`` are NOT gated, and neither are the
+    semantic prose promises (case-sensitivity, check order, no network call
+    before the double match). It is not a total signature contract for every
+    method on every public class.
     """
     promised = _promised_method_signatures()
     assert promised, "declaration promises no methods; the signature gate is inert"
 
-    for class_name, module, method_name, exp_args, exp_kwargs in promised:
-        act_args, act_kwargs = _code_method_signature(module, class_name, method_name)
-        assert act_args == exp_args, (
-            f"{class_name}.{method_name} positional args drift: "
-            f"code={act_args} declaration={exp_args}"
-        )
-        assert act_kwargs == exp_kwargs, (
-            f"{class_name}.{method_name} keyword-only args drift: "
-            f"code={act_kwargs} declaration={exp_kwargs}"
-        )
+    for class_name, module, method_name, exp in promised:
+        act = _code_method_signature(module, class_name, method_name)
+        for key, label in (
+            ("kind", "kind"),
+            ("args", "positional args"),
+            ("required_args", "required positional args"),
+            ("kwargs", "keyword-only args"),
+            ("required_kwargs", "required keyword-only args"),
+        ):
+            assert act[key] == exp[key], (
+                f"{class_name}.{method_name} {label} drift: "
+                f"code={act[key]} declaration={exp[key]}"
+            )
 
