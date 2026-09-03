@@ -19,26 +19,42 @@ method is available on a pin, a consumer needs three records, in this order:
    tag yet". If the answer is empty, the contract exists on a branch only and
    no released version carries it.
 3. **When an unreleased contract will be pinnable.** An "Unreleased" section at
-   the top of `CHANGELOG.md` is the operational record: it names what is
-   committed to master but not stamped in a tag. A consumer that needs it waits
-   for the release that folds that section into a numbered heading; until then
-   there is no pinnable version and the requirement must not be dispatched.
+   the top of `CHANGELOG.md` names what is not yet in any release. Each entry
+   states where the change actually lives (a branch not yet merged, or master
+   not yet tagged), because a change can be unreleased for two different
+   reasons. A consumer that needs it waits for the release that folds that
+   section into a numbered heading; until then there is no pinnable version and
+   the requirement must not be dispatched. If the entry says the change is on
+   an unmerged branch, the merge to `master` is a prerequisite to any release
+   carrying it — the "first pinnable version" is the release cut *after* that
+   merge, not the next release of any branch that lacks the code.
 
-## 2026-09-03 — contract on master, not yet pinnable (OME-002)
+## 2026-09-03 — mirror-destination contract exists, but not pinnable (OME-002)
 
 The mirror-destination resolution contract (`MirrorHandler.resolve_destination`
-and `MirrorHandler.prove_destination`, commit `824bbf1`) landed on
-`feature/OME-002-resolution-contract`, three commits past the `v3.0.0` tag
-(`21d003a`). `git tag --contains 824bbf1` is empty: **no released version
-carries these methods yet.** A layover that needs destination resolution cannot
-pin any tag to get it, and must not follow `master` to reach it (see the stable
-ref in `docs/version-sync.md`). The record of when it becomes pinnable is the
-"Unreleased" section of `CHANGELOG.md`; the release that folds that section
-into a numbered heading is the first pinnable version.
+and `MirrorHandler.prove_destination`, commit `824bbf1`) exists on branch
+`feature/OME-002-resolution-contract`. Three facts a consumer asking "can I pin
+something that has the destination contract?" needs:
 
-Do not repin to `master` in response. Pinning master is the runtime-dependency
-defect this record exists to prevent: it would make a release gate execute a
-moving branch.
+| question | answer |
+|---|---|
+| does the contract exist | yes — branch `feature/OME-002-resolution-contract`, commit `824bbf1` |
+| is it on `master` | no — `git merge-base --is-ancestor 824bbf1 master` is false |
+| is it in a release | no — `pyproject.toml` is `3.0.0`, tag `v3.0.0` (`21d003a`) predates it; `git tag --contains 824bbf1` is empty |
+
+So there is **nothing pinnable today**: no tag carries these methods. What has
+to happen first, in order:
+
+1. `feature/OME-002-resolution-contract` is merged to `master`.
+2. A release is cut from `master` after that merge (bumping the version past
+   `3.0.0`, which is taken).
+
+The release that follows step 2 is the first pinnable version. Until then a
+layover that needs destination resolution must not repin at all — not to
+`master`, and to no tag, because none exists that carries the contract (see the
+stable ref in `docs/version-sync.md`). This is the honest answer to "which
+release first carries it": none yet, and the two steps above are what must
+happen first.
 
 ## 2026-08-23 — repin to v3.0.0
 

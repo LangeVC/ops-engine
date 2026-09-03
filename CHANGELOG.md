@@ -2,14 +2,36 @@
 
 ## Unreleased
 
-Changes committed to `master` but not yet stamped in a tag. Nothing here is
-pinnable: a layover resolves `@vX.Y.Z` against a tag, and no tag yet contains
-these changes. When a release is cut, this section folds into a numbered
-heading and the changes become pinnable at that version.
+Changes not yet in any release. Nothing here is pinnable: a layover resolves
+`@vX.Y.Z` against a tag, and no tag contains these changes. An entry here does
+**not** mean the change is on `master`; it means it exists anywhere in the
+repository and has no tag yet. Where the change actually lives is stated in the
+entry itself, so a consumer can answer "which release first carries what I
+need". Until a numbered heading appears for it, the answer is: none.
 
-### Mirror destination resolution (OME-002)
+### Mirror destination resolution (OME-002) — not yet on `master`, not yet released
 
-`MirrorHandler` gains two additive methods (commit `824bbf1`):
+The mirror-destination resolution contract (`MirrorHandler.resolve_destination`
+and `MirrorHandler.prove_destination`, commit `824bbf1`) has **not been merged
+to `master`** and is **not in any release**. It exists on branch
+`feature/OME-002-resolution-contract` only. `git tag --contains 824bbf1` is
+empty, and `pyproject.toml` is `3.0.0` whose tag `v3.0.0` (`21d003a`) predates
+the change. A layover that needs destination resolution cannot pin any tag to
+reach it today.
+
+What has to happen first for this to become pinnable:
+
+1. `feature/OME-002-resolution-contract` is merged to `master`.
+2. A release is cut from `master` **after** that merge, folding this section
+   into a numbered heading (and bumping the version, since `3.0.0` is taken).
+
+The release that folds this entry into a numbered heading is the first
+pinnable version. Until both steps have happened, there is no pinnable version,
+and the requirement must not be dispatched as a repin (see
+`docs/layover-repin-log.md` for the release→contract lookup a consumer should
+follow).
+
+The methods themselves (commit `824bbf1`) are additive:
 
 - `resolve_destination(*, repo_override, org_github_login, repo_name, fallback, variable)`
   resolves the mirror destination by strict precedence — a per-repository
@@ -20,10 +42,6 @@ heading and the changes become pinnable at that version.
 - `prove_destination(destination, *, token, api_base)` proves the destination
   with two independent proofs before any push: EXISTS (`git ls-remote`) and
   IS OURS (`permissions.push`). Neither proof creates a repository.
-
-Additive methods on an existing `contract` class, so the exports table and
-`ops_engine.__all__` are unchanged; a consumer pinned to `v3.0.0` is unaffected
-until it chooses to call them.
 
 ## 3.0.0
 
