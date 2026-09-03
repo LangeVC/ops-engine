@@ -13,7 +13,7 @@ Before submitting code, please understand our core philosophy:
 
 ## Local Development
 
-1. Fork the repo and create your branch from `master`.
+1. Fork the repo and create your branch from `main`.
 2. Install dependencies: `pip install -e .`
 3. We use `hatch` for builds. 
 4. Ensure your code is properly formatted (PEP 8 standard).

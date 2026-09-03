@@ -2,7 +2,7 @@
 
 ## Supported Versions
 
-Currently, only the latest `master` branch is supported with security updates.
+Currently, only the latest `main` branch is supported with security updates.
 
 ## Reporting a Vulnerability
 
