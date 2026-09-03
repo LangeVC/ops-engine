@@ -183,6 +183,42 @@ class MergeConfig(BaseModel):
     delete_branch: bool = Field(default=True)
 
 
+class VisibilityConfig(BaseModel):
+    """Visibility classification for mirror push gating (OME-008).
+
+    Decides whether a ref may be mirrored to a PUBLIC destination by judging
+    what its tree actually carries (state), not what a push diff touched. A file
+    is classified by CONTENT into one of two classes:
+
+      - ``substrate`` — planning material (a PRD's prose, a strategy document,
+        a contract draft). Must never be pushed to a public mirror, INCLUDING
+        when it is already present and no diff touches it.
+      - ``product``    — a schema shipped inside a skill, a test fixture whose
+        purpose is to mirror a real artifact's structure, an interface spec.
+        Must NEVER block.
+
+    The classification is not a key dictionary. The discriminator the ecosystem
+    itself introduced (SW152-025/SW152-027) is a neutral-placeholder redaction
+    marker: when prose values are replaced by ``neutral_placeholder`` the file
+    carries structure but no intellectual property, so it is ``product``; the
+    same path on a branch/tag where the prose survives is ``substrate``. A JSON
+    schema is ``product`` by structure (``$schema`` + object/properties), never
+    a PRD instance.
+    """
+
+    enabled: bool = Field(default=False)
+    # Content marker a redacted file carries in place of real planning prose.
+    # A file whose non-structure content collapses to this marker (or the literal
+    # secret-redaction token) carries no IP and classifies as ``product``.
+    neutral_placeholder: str = Field(
+        default="Neutral placeholder wording",
+    )
+    # Substring used to strip a redaction marker from probe content before the
+    # "does real prose survive" check, so a redacted file never reads as
+    # substrate because of the marker itself.
+    secret_redaction_token: str = Field(default="***REDACTED***")
+
+
 class MirrorConfig(BaseModel):
     """Configuration for mirror sync verification."""
     enabled: bool = Field(default=False)
@@ -190,6 +226,7 @@ class MirrorConfig(BaseModel):
     mirror_url: str = Field(default="")
     verify_on_push: bool = Field(default=True)
     max_drift_seconds: int = Field(default=300)
+    visibility: Optional[VisibilityConfig] = None
 
 
 class NotificationChannel(BaseModel):

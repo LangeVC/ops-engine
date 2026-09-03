@@ -137,6 +137,45 @@ this contract, exactly like the other submodule names. The promised surface is
 the two methods on `MirrorHandler`; the exception a layover must handle is
 `ops_engine.modules.mirror.MirrorDestinationError`.
 
+## Mirror visibility classification (OME-008)
+
+`MirrorHandler` gains one additive method that classifies a file's visibility
+by content — the decision a mirror gate needs when it must judge *what a ref
+actually carries* rather than *what a push diff touched*. It is an additive
+method on an existing `contract` name, so it does not change the exports table
+above.
+
+- `MirrorHandler.classify_visibility(path, *, content, config)` classifies a
+  single file as **product** (never block: a shipped schema, a template, a
+  redacted fixture whose prose is a neutral placeholder, a synthetic sample) or
+  **substrate** (always block: planning prose, strategy, contract draft). It
+  returns a `VisibilityDecision` (`path`, `kind`, `reason`). Classification
+  requires `content`; a path alone is refused rather than guessed from the name,
+  because a name is not intellectual property — only the text is.
+- `MirrorHandler.substrate_files(paths, *, read, config)` classifies a ref's
+  full tree and returns every substrate file. The caller supplies the ref's
+  complete inventory (`git ls-tree -r`) and a `read` callback that yields each
+  file's content at that ref (`git show <ref>:<path>`). This is the state
+  judgement: a ref whose tree carries substrate is refused even when no diff
+  touches it.
+
+The classification signal is the ecosystem's own redaction convention
+(SW152-025 / SW152-027): a `VisibilityConfig` (`enabled`,
+`neutral_placeholder`, `secret_redaction_token`) declares the markers a
+redacted file carries in place of prose. A file whose prose has been replaced by
+the neutral placeholder carries structure but no intellectual property and
+classifies `product`; the same path carrying its original prose (on a tag or
+non-default branch) classifies `substrate`.
+
+`VisibilityDecision` and the `_matches_candidate`/`_is_json_schema`/etc.
+helpers are names in the internal submodule `ops_engine.modules.mirror` and are
+therefore unpromised. `VisibilityConfig` lives in `ops_engine.config_loader`,
+which is an internal module (see "Unpromised names"); a layover reaches it via
+the existing `MirrorConfig.visibility` field on a `contract` config model, not
+as a bare import. As with OME-002, the promised surface is the method on
+`MirrorHandler`; the enabled/off switch is the `MirrorConfig.visibility.enabled`
+field.
+
 ## Test enforcement
 
 `tests/test_public_surface.py` asserts, at CI time, that this declaration and

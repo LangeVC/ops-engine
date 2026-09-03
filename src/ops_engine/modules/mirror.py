@@ -33,12 +33,13 @@ heuristics in this repository.
 """
 
 import asyncio
+import fnmatch
 import logging
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Callable, Optional, Sequence
 
 from ops_engine.adapters.base import ForgeAdapter
-from ops_engine.config_loader import MirrorConfig
+from ops_engine.config_loader import MirrorConfig, VisibilityConfig
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,30 @@ logger = logging.getLogger(__name__)
 # per-repository override. Repo scope wins over org scope (measured: run 38407 /
 # job 68398, a PLATFORM rule on this Forgejo instance, not a repo property).
 MIRROR_VARIABLE = "GH_REPOSITORY"
+
+# The path classes that may carry planning substrate. These are a CANDIDATE
+# filter, not the decision: a file is only inspected for substrate content when
+# its path falls into one of these classes. The decision itself is content-based
+# (see :meth:`MirrorHandler.classify_visibility`). The arms mirror the deployed
+# gate's BLOCKED_PATHS so a layover can feed the same candidate set, but here
+# they only narrow *where* content is measured — never the verdict.
+_VISIBILITY_CANDIDATE_GLOBS: tuple[str, ...] = (
+    ".skillweave/**",
+    "strategy.md",
+    "**/strategy.md",
+    "prd*.md",
+    "**/prd*.md",
+    "prd*.json",
+    "**/prd*.json",
+    "*.contract*",
+    "**/*.contract*",
+    "*contract*.md",
+    "**/*contract*.md",
+    "*proposal*.md",
+    "**/*proposal*.md",
+    "*.proposal*",
+    "**/*.proposal*",
+)
 
 
 class MirrorDestinationError(RuntimeError):
@@ -69,6 +94,21 @@ class MirrorDestinationResolution:
 
     destination: str
     source: str
+
+
+@dataclass(frozen=True)
+class VisibilityDecision:
+    """The outcome of classifying one file's visibility (OME-008).
+
+    ``kind`` is ``"product"`` or ``"substrate"``. ``reason`` names the content
+    signal that produced the decision, so a blocked push can be audited:
+    ``"schema"``, ``"redacted"``, ``"template"``, ``"synthetic"``,
+    ``"planning prose"``, or ``"not a planning class"``.
+    """
+
+    path: str
+    kind: str
+    reason: str
 
 
 class MirrorHandler:
@@ -237,6 +277,155 @@ class MirrorHandler:
                 f"resolve as a writable destination. Correct {MIRROR_VARIABLE} "
                 f"to a repository this token may write to."
             )
+
+    @staticmethod
+    def classify_visibility(
+        path: str,
+        *,
+        content: Optional[str] = None,
+        config: Optional[VisibilityConfig] = None,
+    ) -> VisibilityDecision:
+        """Classify one file as ``product`` or ``substrate`` by content (OME-008).
+
+        Visibility is a question about what a ref's tree CARRIES, not what a
+        push diff touched. A file is inspected only when its path falls into a
+        planning class (see ``_VISIBILITY_CANDIDATE_GLOBS``); the verdict within
+        that class is content, not name:
+
+        * a JSON schema (``$schema`` + object/properties) is ``product`` — a
+          shipped schema must never block;
+        * a redacted file (its prose replaced by the neutral placeholder, or by
+          the secret-redaction token) is ``product`` — it carries structure, not
+          intellectual property;
+        * a template or synthetic sample is ``product``;
+        * otherwise, a planning-class file whose prose survives is ``substrate``.
+
+        ``content`` is the file's full text. When ``content`` is omitted the
+        caller must supply it (a path alone cannot be classified); classification
+        without content is refused rather than guessed from the name.
+        """
+        if content is None:
+            raise MirrorDestinationError(
+                f"cannot classify visibility of '{path}': content is required. "
+                "A name is not intellectual property; only the text can decide "
+                "whether a planning-class file carries substrate."
+            )
+
+        cfg = config or VisibilityConfig()
+
+        if not MirrorHandler._matches_candidate(path):
+            return VisibilityDecision(path=path, kind="product", reason="not a planning class")
+
+        if MirrorHandler._is_json_schema(content):
+            return VisibilityDecision(path=path, kind="product", reason="schema")
+
+        if MirrorHandler._is_template(content):
+            return VisibilityDecision(path=path, kind="product", reason="template")
+
+        if MirrorHandler._is_synthetic(path, content):
+            return VisibilityDecision(path=path, kind="product", reason="synthetic")
+
+        if MirrorHandler._is_redacted(cfg, content):
+            return VisibilityDecision(path=path, kind="product", reason="redacted")
+
+        return VisibilityDecision(path=path, kind="substrate", reason="planning prose")
+
+    @staticmethod
+    def substrate_files(
+        paths: Sequence[str],
+        *,
+        read: Callable[[str], Optional[str]],
+        config: Optional[VisibilityConfig] = None,
+    ) -> list[VisibilityDecision]:
+        """Classify a ref's full tree and return every substrate file.
+
+        This is the state judgement: the caller supplies the ref's complete
+        file inventory (``git ls-tree -r`` on the ref) plus a ``read`` callback
+        that yields each file's content at that ref (``git show <ref>:<path>``).
+        Files outside a planning class are product and never inspected; every
+        planning-class file is classified by content and the substrate ones are
+        returned, so a ref whose tree carries planning material is refused even
+        when a push diff touched none of it.
+        """
+        decisions: list[VisibilityDecision] = []
+        for path in paths:
+            decision = MirrorHandler.classify_visibility(
+                path, content=read(path), config=config
+            )
+            if decision.kind == "substrate":
+                decisions.append(decision)
+        return decisions
+
+    @staticmethod
+    def _matches_candidate(path: str) -> bool:
+        """True when ``path`` falls into a planning class (candidate, not verdict)."""
+        return any(fnmatch.fnmatch(path, g) for g in _VISIBILITY_CANDIDATE_GLOBS)
+
+    @staticmethod
+    def _is_json_schema(content: str) -> bool:
+        """A JSON-schema-shaped document (``$schema`` + object properties), not a
+        PRD instance. The shipped ``prd.schema.json`` is this shape and must
+        never block."""
+        return (
+            '"$schema"' in content
+            and '"type": "object"' in content
+            and '"properties"' in content
+        )
+
+    @staticmethod
+    def _is_template(content: str) -> bool:
+        """A template teaches structure; it carries section guidance, not a real
+        plan. Detected by structural-guidance markers, not the word 'template'."""
+        markers = (
+            "## Document Structure",
+            "**Purpose:**",
+            "**Content:**",
+        )
+        return sum(1 for m in markers if m in content) >= 2
+
+    @staticmethod
+    def _is_synthetic(path: str, content: str) -> bool:
+        """A synthetic sample/example declares itself as one rather than naming a
+        real work item. Detected by an explicit self-describing marker — in the
+        content (``corrected —``, ``a prd in the format``, ``sample``,
+        ``example``, ``demo``) or, for a test fixture, in its own name
+        (``-sample``, ``-example``). A fixture whose path declares ``sample`` is
+        by definition a sample; it carries no planning IP. Never an inferred
+        'looks fake' heuristic."""
+        head = content[:4096].lower()
+        content_markers = (
+            "corrected —",
+            "a prd in the format",
+            "sample",
+            "example",
+            "demo",
+        )
+        if any(m in head for m in content_markers):
+            return True
+        lower_path = path.lower()
+        return "-sample" in lower_path or "-example" in lower_path or "sample." in lower_path
+
+    @staticmethod
+    def _is_redacted(config: VisibilityConfig, content: str) -> bool:
+        """True when the content carries the ecosystem's redaction marker.
+
+        A redacted file has had its prose values replaced by the neutral
+        placeholder (SW152-025) or its secrets replaced by the literal
+        redaction token. A key dictionary (``lane``, ``criteria``, ``sequence``,
+        ``points``) is not IP; the prose is, and a file whose prose is gone is
+        ``product`` — structure deliberately retained so it still validates the
+        shipped schema. The same path carrying the original prose (unredacted,
+        on a tag or non-default branch) is ``substrate``.
+        """
+        if config.neutral_placeholder:
+            marker = config.neutral_placeholder.strip()
+            if marker and marker in content:
+                return True
+        if config.secret_redaction_token:
+            token = config.secret_redaction_token.strip()
+            if token and token in content:
+                return True
+        return False
 
     @staticmethod
     async def _repo_exists(remote: str) -> bool:

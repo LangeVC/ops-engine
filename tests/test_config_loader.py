@@ -9,6 +9,7 @@ from ops_engine.config_loader import (
     MirrorConfig,
     NotificationConfig,
     NotificationChannel,
+    VisibilityConfig,
 )
 
 
@@ -65,6 +66,22 @@ def test_v2_mirror_config():
         max_drift_seconds=300,
     )
     assert config.mirror_url == "github.com/org/repo"
+
+
+def test_mirror_visibility_config_defaults():
+    config = MirrorConfig(
+        enabled=True,
+        visibility=VisibilityConfig(enabled=True),
+    )
+    assert config.visibility.enabled is True
+    # The neutral placeholders are the ecosystem's own redaction markers.
+    assert config.visibility.neutral_placeholder == "Neutral placeholder wording"
+    assert config.visibility.secret_redaction_token == "***REDACTED***"
+
+
+def test_mirror_visibility_config_is_optional():
+    config = MirrorConfig(enabled=True)
+    assert config.visibility is None
 
 
 def test_v2_notification_config():
