@@ -42,6 +42,31 @@ classification plus a named ``DefaultBranchBlockedError`` on the default-branch
 case. Nothing in this contract retries, and nothing overrides a refusal — the
 break-glass remains a deliberate operator action, never an automatic push of a
 ref the gate refused.
+
+OME-010 one rule, both paths (additive on ``MirrorHandler`` / ``Refusal``):
+
+A mirror ref must receive the SAME verdict whether it reached the gate from a
+push EVENT (a ref an incremental push just advanced) or from a FULL-STATE sweep
+(every ref re-judged before a bulk sync). There is one classification — content
+of the ref's carried tree, ``classify_visibility`` — implemented once and reached
+only through ``gate_ref``. Neither path carries its own copy of the rule; a
+second classification implementation in this repository is a defect (proven by
+grep in OME-010's acceptance). A call site that feeds a DIFF instead of the ref's
+carried tree is recreating the OME-010 incident and is outside this contract.
+
+The break-glass exact-ref push — an operator re-pushing a SINGLE, manually-named
+ref past the gate — is decided here, explicitly, rather than left to be
+discovered: it is **OUT of the automatic gate but still judged**. The gate never
+overrides itself: ``gate_ref`` returns a ``Refusal``, ``refuse`` still raises on a
+default-branch refusal, and nothing in this module can auto-push a refused ref
+(OME-009 unchanged). What OME-010 adds is the one sanctioned place a refusal may
+be marked as operator-overridden: ``MirrorHandler.release_override``, which
+requires a reason and returns a NEW ``Refusal`` whose ``override_reason`` is set.
+The automatic path never consults ``override_reason`` — a marked refusal raises no
+differently in ``refuse``. It is an auditable attestation that a human, having read
+the refusal, intends to push that exact ref anyway (the workflow_dispatch
+``release_override`` on a single ref-per-dispatch). A bulk full-state sweep stays
+un-overridable per ref, exactly as OME-009 and the running gate intend.
 """
 
 import asyncio
@@ -148,11 +173,20 @@ class Refusal:
       feature/topic branch is refused and nothing downstream is stranded.
 
     ``substrate`` is the tuple of refused paths, in the ref's tree order.
+
+    ``override_reason`` is empty unless an OPERATOR has attested a break-glass
+    re-push of this exact ref via :meth:`MirrorHandler.release_override` (OME-010).
+    The automatic gate never sets it and never consults it: ``refuse`` raises on a
+    default-branch refusal identically whether or not the reason is present. It
+    exists only so the single rule the event and full-state paths share can also
+    record, in one place, that a human stepped OUT of the automatic gate for one
+    explicitly-named ref.
     """
 
     ref: str
     is_default: bool
     substrate: tuple[str, ...]
+    override_reason: Optional[str] = None
 
     @property
     def is_release_blocker(self) -> bool:
@@ -437,18 +471,28 @@ class MirrorHandler:
         read: Callable[[str], Optional[str]],
         config: Optional[VisibilityConfig] = None,
     ) -> Optional["Refusal"]:
-        """Refuse a ref whose tree carries substrate (OME-009).
+        """Refuse a ref whose tree carries substrate (OME-009; the ONE rule both
+        paths share, OME-010).
 
-        The gate itself: classifies the ref's full tree (``substrate_files``)
-        and returns ``None`` when the ref is clean, or a ``Refusal`` naming
-        every refused path. ``is_default`` on the returned ``Refusal`` records
-        whether ``ref`` equals ``default_branch`` — the distinction between a
-        refused feature branch (the gate working) and a refused default branch
-        (a release blocker). This method CLASSIFIES and RETURNS; it does not
-        raise and does not push. It never overrides a refusal: the only output
-        is a value the caller inspects, and the only "action" any code here can
-        take downstream is to raise ``DefaultBranchBlockedError`` via
-        :meth:`refuse`. There is no code path that pushes a refused ref.
+        This is the single function a mirror gate feeds a candidate ref through,
+        however the ref arrived: a push EVENT just advanced it, or a FULL-STATE
+        sweep is re-judging every ref before a bulk sync. It classifies the ref's
+        FULL carried tree (``substrate_files`` → ``classify_visibility``) — the
+        same content rule exists once and is reached only here. Feeding a diff
+        instead of the carried tree is the OME-010 incident and is outside this
+        contract. Returns ``None`` when the ref is clean, or a ``Refusal`` naming
+        every refused path. ``is_default`` records whether ``ref`` equals
+        ``default_branch`` — the distinction between a refused feature branch
+        (the gate working) and a refused default branch (a release blocker).
+
+        This method CLASSIFIES and RETURNS; it does not raise and does not push.
+        It never overrides a refusal: the only output is a value the caller
+        inspects, and the only "action" any code here can take downstream is to
+        raise ``DefaultBranchBlockedError`` via :meth:`refuse`. The break-glass
+        exact-ref push is OUT of this automatic gate by design: the one sanctioned
+        way to step past a refusal is an operator's :meth:`release_override`,
+        which records a reason and is never applied by the gate itself. There is
+        no code path that pushes a refused ref.
         """
         substrate = MirrorHandler.substrate_files(paths, read=read, config=config)
         if not substrate:
@@ -470,9 +514,50 @@ class MirrorHandler:
         the responsible paths AND the consequence. This is the ONLY action this
         lane introduces, and it cannot push any ref: it either returns or
         raises, never writes to a forge.
+
+        ``refuse`` deliberately NEVER consults ``override_reason``: an
+        operator-marked ``Refusal`` (OME-010 :meth:`release_override`) raises no
+        differently here, which is the invariant that keeps the break-glass OUT
+        of the automatic gate. A human acts on an ``override_reason`` in the
+        consuming workflow, where the single exact ref is pushed by name; nothing
+        in this module ever auto-pushes it.
         """
         if refusal is not None and refusal.is_default:
             raise DefaultBranchBlockedError(refusal.message)
+
+    @staticmethod
+    def release_override(refusal: "Refusal", *, reason: str) -> "Refusal":
+        """Mark a refusal as an operator-attested break-glass re-push (OME-010).
+
+        The break-glass exact-ref push is OUT of the automatic gate, so this is
+        the ONE sanctioned way a refusal may carry an operator override. It
+        requires a non-empty ``reason`` (a gate with no way out gets bypassed,
+        which is worse than no gate) and returns a NEW ``Refusal`` — the original
+        frozen value is unchanged — whose ``override_reason`` records the reason.
+
+        This is an ATTESTATION OF INTENT ONLY, not an authorisation to push from
+        this module: ``refuse()`` ignores ``override_reason``, so a marked
+        default-branch refusal still raises. The automatic event and full-state
+        paths never call this; only a human action on a single exact ref does
+        (the workflow ``release_override`` path on one ref per dispatch). A bulk
+        full-state sweep stays un-overridable per ref.
+
+        Raises:
+            ValueError: ``reason`` is empty or whitespace-only.
+        """
+        reason = reason.strip()
+        if not reason:
+            raise ValueError(
+                "release_override requires a non-empty reason: a break-glass "
+                "re-push without a recorded reason is indistinguishable from "
+                "the leak it exists to escape."
+            )
+        return Refusal(
+            ref=refusal.ref,
+            is_default=refusal.is_default,
+            substrate=refusal.substrate,
+            override_reason=reason,
+        )
 
     @staticmethod
     def _matches_candidate(path: str) -> bool:
