@@ -30,6 +30,18 @@ answer different questions:
 
 Neither proof creates a repository under any outcome. Both use real git, not
 heuristics in this repository.
+
+OME-009 default-branch blocker (additive on ``MirrorHandler``):
+
+A refusal of the DEFAULT branch is a release blocker, and the gate now says so
+instead of reporting a dropped ref that only surfaces two steps later as a
+different forge's hard-gate failure. A refused default branch is not the gate
+working — it strands every release that follows. ``MirrorHandler.gate_ref``
+distinguishes the two cases without deciding what happens next: it is pure
+classification plus a named ``DefaultBranchBlockedError`` on the default-branch
+case. Nothing in this contract retries, and nothing overrides a refusal — the
+break-glass remains a deliberate operator action, never an automatic push of a
+ref the gate refused.
 """
 
 import asyncio
@@ -82,6 +94,18 @@ class MirrorDestinationError(RuntimeError):
     """
 
 
+class DefaultBranchBlockedError(RuntimeError):
+    """The mirror's DEFAULT branch was refused and is now a release blocker.
+
+    Carries the full ``Refusal.message``, which names both the paths
+    responsible (the substrate that cannot be mirrored) AND the consequence:
+    the mirror's default branch is now behind, and every release depending on
+    it will be rejected on another forge. This is an alarm, not a log line —
+    the fail-visible distinction between "the gate works" (a feature branch
+    refused) and "every downstream release is stranded" (the default refused).
+    """
+
+
 @dataclass(frozen=True)
 class MirrorDestinationResolution:
     """The outcome of resolving a mirror destination before any push.
@@ -109,6 +133,54 @@ class VisibilityDecision:
     path: str
     kind: str
     reason: str
+
+
+@dataclass(frozen=True)
+class Refusal:
+    """A ref the visibility gate refuses (OME-009).
+
+    ``is_default`` marks the distinction this lane exists for:
+
+    * ``is_default=True``  — a RELEASE BLOCKER. The mirror's default branch is
+      now behind, and every release depending on it will be rejected on another
+      forge. This must be raised (``DefaultBranchBlockedError``), not logged.
+    * ``is_default=False`` — the gate working as intended: substrate on a
+      feature/topic branch is refused and nothing downstream is stranded.
+
+    ``substrate`` is the tuple of refused paths, in the ref's tree order.
+    """
+
+    ref: str
+    is_default: bool
+    substrate: tuple[str, ...]
+
+    @property
+    def is_release_blocker(self) -> bool:
+        return self.is_default
+
+    @property
+    def message(self) -> str:
+        """A human-readable refusal, distinct for the two cases.
+
+        The default-branch form names BOTH the responsible paths and the
+        consequence; the non-default form stays the terse "refused here" the
+        gate already produced.
+        """
+        paths = "\n".join(f"  - {p}" for p in self.substrate)
+        if self.is_default:
+            return (
+                f"HARD GATE: refusing mirror of default branch '{self.ref}' — "
+                f"this is a RELEASE BLOCKER.\n"
+                f"The mirror's default branch is now BEHIND, and every release "
+                f"depending on it will be rejected on another forge.\n"
+                f"Responsible paths (substrate that cannot be mirrored):\n{paths}\n"
+                f"Break-glass is a deliberate operator action; nothing here "
+                f"retries or overrides this refusal."
+            )
+        return (
+            f"mirror gate refuses non-default branch '{self.ref}' "
+            f"(the gate working as intended):\n{paths}"
+        )
 
 
 class MirrorHandler:
@@ -355,6 +427,52 @@ class MirrorHandler:
             if decision.kind == "substrate":
                 decisions.append(decision)
         return decisions
+
+    @staticmethod
+    def gate_ref(
+        ref: str,
+        *,
+        default_branch: str = "main",
+        paths: Sequence[str],
+        read: Callable[[str], Optional[str]],
+        config: Optional[VisibilityConfig] = None,
+    ) -> Optional["Refusal"]:
+        """Refuse a ref whose tree carries substrate (OME-009).
+
+        The gate itself: classifies the ref's full tree (``substrate_files``)
+        and returns ``None`` when the ref is clean, or a ``Refusal`` naming
+        every refused path. ``is_default`` on the returned ``Refusal`` records
+        whether ``ref`` equals ``default_branch`` — the distinction between a
+        refused feature branch (the gate working) and a refused default branch
+        (a release blocker). This method CLASSIFIES and RETURNS; it does not
+        raise and does not push. It never overrides a refusal: the only output
+        is a value the caller inspects, and the only "action" any code here can
+        take downstream is to raise ``DefaultBranchBlockedError`` via
+        :meth:`refuse`. There is no code path that pushes a refused ref.
+        """
+        substrate = MirrorHandler.substrate_files(paths, read=read, config=config)
+        if not substrate:
+            return None
+        return Refusal(
+            ref=ref,
+            is_default=(ref == default_branch),
+            substrate=tuple(d.path for d in substrate),
+        )
+
+    @staticmethod
+    def refuse(refusal: Optional["Refusal"]) -> None:
+        """Convert a default-branch refusal into visible failure (OME-009).
+
+        The fail-visible step: a ``None`` (clean ref) or a non-default
+        ``Refusal`` returns silently so the gate keeps its current behaviour —
+        a refused feature branch is logged, not an alarm. A default-branch
+        ``Refusal`` raises ``DefaultBranchBlockedError`` whose message names
+        the responsible paths AND the consequence. This is the ONLY action this
+        lane introduces, and it cannot push any ref: it either returns or
+        raises, never writes to a forge.
+        """
+        if refusal is not None and refusal.is_default:
+            raise DefaultBranchBlockedError(refusal.message)
 
     @staticmethod
     def _matches_candidate(path: str) -> bool:
