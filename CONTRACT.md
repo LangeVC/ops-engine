@@ -108,6 +108,35 @@ to this public surface:
   rename, or otherwise break any existing `contract` name, nor change the type
   of an existing parameter, field, or return value.
 
+## Mirror destination resolution (OME-002)
+
+`MirrorHandler` (a `contract` name above) gains two additive methods that
+together form the mirror-destination resolution contract. They are additive
+methods on an existing public class, so they do not change the exports table
+above; a consumer that pins the current version is unaffected until it chooses
+to call them.
+
+- `MirrorHandler.resolve_destination(*, repo_override, org_github_login,
+  repo_name, fallback, variable)` resolves the destination by strict
+  precedence and returns a `MirrorDestinationResolution` (``destination``,
+  ``source``). Order: a per-repository override wins; otherwise the
+  organisation declaration composes ``<org.github.login>/<repo_name>``;
+  otherwise it raises `MirrorDestinationError` naming the variable to set and
+  the value it expected. A ``fallback`` is accepted only as a *gated* candidate
+  (``source == "gated fallback"``) and must be proven before use.
+- `MirrorHandler.prove_destination(destination, *, token, api_base)` proves the
+  destination with two independent proofs before any push: **EXISTS**
+  (``git ls-remote`` proves the repository exists and is readable) and
+  **IS OURS** (the repository's ``permissions.push`` for the authenticated token
+  is true — reachability is not ownership). Neither proof creates a repository
+  under any outcome.
+
+`MirrorDestinationResolution` and `MirrorDestinationError` are names in the
+internal submodule `ops_engine.modules.mirror` and are therefore unpromised by
+this contract, exactly like the other submodule names. The promised surface is
+the two methods on `MirrorHandler`; the exception a layover must handle is
+`ops_engine.modules.mirror.MirrorDestinationError`.
+
 ## Test enforcement
 
 `tests/test_public_surface.py` asserts, at CI time, that this declaration and
