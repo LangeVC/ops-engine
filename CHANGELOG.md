@@ -1,5 +1,88 @@
 # Changelog
 
+## 3.1.0
+
+The mirror destination is now a contract of two variables instead of one, and
+the tooling can create it rather than only update it. `GH_REPO_OWNER` at org
+scope names the GitHub owner; `GH_REPO` at repo scope names the full
+`owner/repo` destination. Both are required, neither wins over the other, and
+their agreement is checked first: `GH_REPO`'s owner prefix must equal
+`GH_REPO_OWNER` in a case-sensitive comparison, evaluated before any GitHub
+request. Only then is the destination proven to exist and proven to be ours.
+This matches the workflow contract already live on `main` in `lvc-ops`,
+`skillweave` and `capacium`.
+
+Why a minor bump: the Python surface grew only by addition. `MirrorHandler`
+gains two methods, the `exports` declaration still carries the same 34 names,
+and neither method shipped in 3.0.0 — so no layover can be pinned to the
+retired single-variable shape. Consumers act only when they choose to call the
+new methods.
+
+### The owner is not derivable, so it is declared (OME-011, OME-012)
+
+Across the six mirrored organisations the GitHub owner cannot be computed from
+the Forgejo org name: `elementeer` stays lowercase, `capacium` becomes
+`Capacium`, `fusionaize` becomes `fusionAIze`, `veeona` becomes `Veeona-AI`.
+No casing rule produces all of them, and because the double match is
+case-sensitive, a normalised owner fails the very preflight it was written to
+satisfy. Owner and destination are therefore carried verbatim, with whitespace
+stripping as the only permitted change.
+
+`MirrorHandler.resolve_destination(*, gh_repo_owner, gh_repo)` refuses an unset
+owner, then an unset repo, then a double-match disagreement — each naming the
+variable, its scope, and the value it expected. There is no fallback: an
+unresolvable destination is a refusal, never a computed candidate.
+`prove_destination` is unchanged in behaviour, still proving EXISTS and IS OURS
+as two independent questions, because reachability is not ownership.
+
+### The tooling can create the variable, not only overwrite it (OME-011)
+
+`scripts/mirror-destination-propose.py` reads the org-scope `GH_REPO_OWNER`,
+proposes `<owner>/<name>` per repository, and on `--apply --confirm` writes the
+repo-scope `GH_REPO`: POST where the variable is absent, PUT where it exists,
+and no request at all where the stored value already equals the target. The
+absent case is the one that matters — of 78 repositories across the six
+organisations, two carried the variable and 76 did not.
+
+Where two canonical organisations resolve to one GitHub owner (`skillweave` and
+`langevc` both map to `LangeVC`), a shared destination is settled
+first-come-first-served: a repository that already carries `GH_REPO` wins, and
+among unconfigured ones a stated stable order decides. The loser is never
+written and is reported with its competitor and the shared destination, so its
+mirror refuses loudly on an unset variable rather than two repositories pushing
+over each other.
+
+### The audit reports the world as it is (OME-013)
+
+`scripts/mirror-destination-audit.py` classifies every canonical repository
+against the live GitHub organisation. A repository whose `GH_REPO` disagrees
+with its organisation's `GH_REPO_OWNER` is its own outcome — not "reachable"
+and not "unreachable", because the workflow refuses it before asking GitHub at
+all. Both tools take the full destination verbatim; the earlier recomposition
+that turned `LangeVC/skillweave` into `LangeVC/LangeVC/skillweave` is gone, so
+the two correctly configured repositories are no longer reported as broken.
+
+### The public declaration is machine-checked (OME-014)
+
+`CONTRACT.md` moves to schema 2 and carries a `methods` array for the mirror
+methods it promises. `tests/test_public_surface.py` derives the ordered
+positional and keyword-only parameter names, which parameters are required
+versus defaulted, and the method kind from the source and compares them to that
+array, so a stale declaration fails CI. What the gate does **not** cover is
+named in the document itself: default values, type annotations, other
+decorators, `*args`/`**kwargs`, and the method body — including the semantic
+promises about case sensitivity, check order and no network call before the
+double match. Those remain prose, and the text says so rather than implying a
+guarantee it cannot carry.
+
+### Housekeeping
+
+The default branch is `main`; `master` no longer exists on either forge. A
+webhook ingress test that asserted a refusal from the retired `lower_name`
+design is rewritten to assert the refusal that exists — neither an org-form
+`full_name` nor `owner.username` yielding an org — so the guard survives while
+the stale assertion does not (OME-015).
+
 ## 3.0.0
 
 **Breaking.** Organisation keys in `config.yml` are now canonical Forgejo
