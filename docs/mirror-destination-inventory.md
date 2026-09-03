@@ -1,8 +1,9 @@
 # Mirror destination inventory — which repositories the organisation rule does not cover
 
-Task: OME-003 audit. Count the repositories on both forges and classify every
-canonical (Forgejo) repository by how the organisation mirror-destination rule
-treats it. Corrects the never-counted "about seventy" figure.
+Task: OME-003 audit, retrofitted to the OME-012 two-variable contract. Count the
+repositories on both forges and classify every canonical (Forgejo) repository by
+how the mirror-destination contract treats it. Corrects the never-counted "about
+seventy" figure.
 
 Measured: 2026-09-03, by reading both forges read-only (Forgejo
 `git.langevc.com` canonical + GitHub mirror orgs) with an admin/owner token.
@@ -10,24 +11,41 @@ Tool: `scripts/mirror-destination-audit.py` in this repository. The script
 changes neither forge and writes only its own report.
 
 Reference decisions this audit builds on, not re-derives:
-- Repeated repo- and org-scope variable injection is live and repo-scope wins
-  (runs 38384 / 38386 / 38407); it is a platform rule on this Forgejo instance,
-  so it holds for every organisation.
-- OME-002 built the resolution contract (`resolve_destination` / `prove_destination`)
-  on `feature/OME-002-resolution-contract`. It has no production caller yet and is
-  in no released tag. This inventory describes the world **as it is today**, not
-  as it will be once that contract is wired.
+- The mirror destination is a **two-variable contract** (OME-012), not an org
+  compose plus a repo override. The two halves carry no precedence between them:
+
+      GH_REPO_OWNER  ORG scope   the GitHub owner            e.g. `Capacium`
+      GH_REPO        REPO scope  the full owner/name         e.g. `Capacium/capacium`
+
+  BOTH are required. A repository's `GH_REPO` is the destination **verbatim**
+  (whitespace stripped only), and its owner prefix must equal the org's
+  `GH_REPO_OWNER` in a **case-sensitive double match decided before any GitHub
+  request**. Mismatch or an unset half refuses; that repository will never
+  mirror. There is **no compose** of `GH_REPO_OWNER + repository name` — an unset
+  `GH_REPO` is a hard refusal, never a computed candidate.
+- OME-011 built the propose tool (`mirror-destination-propose.py`) that writes
+  each repo's `GH_REPO` pairing; it has proposed, but the operator has not yet
+  `--apply --confirm`-ed it. This inventory describes the world **as it is
+  today**: only the two repositories that already carry a `GH_REPO` are
+  presently configured to mirror.
 
 ## Method
 
 Forgejo is the single source of truth: a push there mirrors a ref to GitHub. For
-each canonical repository the audit resolves the mirror destination the org rule
-would produce — the org's GitHub login `owner/<repo>`, overridden by any repo
-variable `GH_REPOSITORY` — and decides which of four classes it is in. GitHub
-login-to-canonal-org (the compose owner) and the GitHub visible names are read
-live, not hardcoded. `*-planning` / `*-internal-docs` is the only naming basis,
-and it is applied only as *evidence* next to a measured absence of a mirror
-workflow, never as a list that overrides measurement.
+each canonical repository the audit reads the org-scope `GH_REPO_OWNER` and the
+repo-scope `GH_REPO` (both live, not hardcoded), applies the double match and the
+reachability test, and places the repository in exactly one of five classes:
+
+  1. resolves and reachable        — double match OK, GitHub carries the name
+  2. resolves but unreachable      — double match OK, GitHub lacks the name
+  3. needs an exception            — the two forges disagree on the name
+  4. not mirrored by policy        — no mirror workflow on the canonical repo
+  5. refused before any GitHub request — an unset half or a double-match mismatch
+
+The GitHub mirror owner is read live from the org-scope `GH_REPO_OWNER`; the
+`--map` flag is an explicit override only. `*-planning` / `*-internal-docs` is
+the only naming basis, and it is applied only as *evidence* next to a measured
+absence of a mirror workflow, never as a list that overrides measurement.
 
 Class 4 is never assigned on a hardcoded list: a repository is class 4 because
 measured evidence shows it is not pushed by a mirror workflow on the canonical
@@ -41,9 +59,9 @@ in this run.
 **78** canonical repositories across the six mirroring organisations on the
 canonical Forgejo (below). GitHub holds more rows than 78 because the mirror
 host orgs (`LangeVC`, …) carry `.github` and other long-lived public repos and,
-for the skillweave mirror, the GitHub login is `LangeVC` (skillweave has no
-GitHub org of its own), so both the five langevc + four skillweave canonical
-repos land under one host. Two GitHub orgs added (`Vamerli`: 3 repos) have no
+for the skillweave mirror, the GitHub owner is `LangeVC` (skillweave has no
+GitHub org of its own), so both the five langevc and four skillweave canonical
+repos land under one owner. Two GitHub orgs added (`Vamerli`: 3 repos) have no
 canonical twin on this canonical forge and are not part of the mirror rule.
 
 The "about seventy" estimate was not counting this population — no single number
@@ -53,44 +71,90 @@ fits it:
 - the GitHub host count (≈88 incl. `.github`/non-mirror repos) is higher still.
 
 The count that matters and that was previously never established is the canonical
-side: **78**, of which the org rule actually drives **62** (class 1 + class 3);
-the other **16** are deliberately not workflow-mirrored from the canonical forge.
+side: **78**. Under the two-variable contract, only **2** are presently
+configured (class 1 — the two repositories that carry a `GH_REPO`); **60** carry
+a mirror workflow but no `GH_REPO` and so refuse at the preflight (class 5); the
+other **16** are deliberately not workflow-mirrored from the canonical forge
+(class 4).
 
 ## Counts per class
 
 | class | meaning | count |
 |-------|---------|-------|
-| 1 | resolves and reachable | 61 |
-| 2 | resolves but unreachable | 0 |
-| 3 | needs an exception — the two forges disagree on the name | 1 |
+| 1 | resolves and reachable — double match OK, GitHub carries the name | 2 |
+| 2 | resolves but unreachable — double match OK, GitHub lacks the name | 0 |
+| 3 | needs an exception — the two forges disagree on the name | 0 |
 | 4 | not mirrored by policy (deliberately) | 16 |
+| 5 | refused before any GitHub request — unset half or double-match mismatch | 60 |
 
 ## Per org
 
-| canonical org | GitHub mirror owner | class 1 | class 2 | class 3 | class 4 |
-|---------------|---------------------|---------|---------|---------|---------|
-| langevc | LangeVC | 7 | 0 | 1 | 1 |
-| capacium | Capacium | 22 | 0 | 0 | 2 |
-| elementeer | elementeer | 9 | 0 | 0 | 1 |
-| fusionaize | fusionAIze | 18 | 0 | 0 | 0 |
-| skillweave | LangeVC | 5 | 0 | 0 | 4 |
-| veeona | Veeona-AI | 0 | 0 | 0 | 8 |
+| canonical org | GitHub mirror owner | class 1 | class 2 | class 3 | class 4 | class 5 |
+|---------------|---------------------|---------|---------|---------|---------|---------|
+| langevc | LangeVC | 0 | 0 | 0 | 1 | 8 |
+| capacium | Capacium | 1 | 0 | 0 | 2 | 21 |
+| elementeer | elementeer | 0 | 0 | 0 | 1 | 9 |
+| fusionaize | fusionAIze | 0 | 0 | 0 | 0 | 18 |
+| skillweave | LangeVC | 1 | 0 | 0 | 4 | 4 |
+| veeona | Veeona-AI | 0 | 0 | 0 | 8 | 0 |
 
-The skillweave figure in the brief (9 repos, 8 private / 1 public, all
-main-branch mirror workflows carrying an inline GitHub destination) is **not a
-microcosm of the whole**: the inline-destination generation is a predecessor to
-the variable-derived rule and does not represent every org. The full census above
-does.
+The owners are read verbatim from each org's `GH_REPO_OWNER` and are **not**
+derivable from the org name: `elementeer` stays lowercase, `capacium` is
+capitalised, `veeona` becomes `Veeona-AI`. The double match is case-sensitive,
+so any normalisation of these values would break the very check the contract is
+built on.
 
-## Known class 3 — the two forges disagree on a name
+## Class 1 — resolves and reachable
 
-| canonical (forgejo) | class | github destination | note |
-|---------------------|-------|--------------------|------|
-| langevc/txt-humanizer | 3 | LangeVC/txtHumanizer | Forgejo spells it `txt-humanizer`; GitHub spells it `txtHumanizer`. The org rule composing `LangeVC/txt-humanizer` produces an unreachable name; the repo's own workflow hardcodes the corrected `LangeVC/txtHumanizer.git`. This is the exception case OME-002's repo-variable override exists for. |
+Only two repositories in the entire corpus carry a `GH_REPO` (the full
+`owner/name` destination), and both double-match their org's `GH_REPO_OWNER`:
 
-Reported as class 3 (needs an exception), **not** class 2 (broken). Nearest other
-candidate — an exact-name collision under the same org with a genuinely different
-repository — was not present; no other two-forge name disagreement was found.
+| canonical (forgejo) | class | destination | note |
+|---------------------|-------|-------------|------|
+| capacium/capacium | 1 | `Capacium/capacium` | `GH_REPO` = `Capacium/capacium`, owner prefix matches `GH_REPO_OWNER` = `Capacium` |
+| skillweave/skillweave | 1 | `LangeVC/skillweave` | `GH_REPO` = `LangeVC/skillweave`, owner prefix matches `GH_REPO_OWNER` = `LangeVC` |
+
+These are the two repositories the pre-012 defect (recomposing the full
+`GH_REPO` back onto the owner, yielding `Capacium/Capacium/capacium` and
+`LangeVC/LangeVC/skillweave`) misclassified as unreachable. The audit now uses
+the `GH_REPO` value verbatim; a recomposed string is unreachable in any output.
+
+## Class 5 — refused before any GitHub request
+
+A repository is class 5 when the workflow would stop at the preflight and never
+ask GitHub: an unset `GH_REPO_OWNER`, an unset `GH_REPO`, or a `GH_REPO` whose
+owner prefix disagrees with `GH_REPO_OWNER` (case-sensitive). All 60 class-5
+repositories in this run are "`GH_REPO` unset at repo scope" — the parity between
+the two forges is intact, but `mirror-destination-propose.py` has proposed the
+pairings without them having been applied. No live repository currently carries a
+double-match **mismatch** (the disagreement sub-case is exercised only by
+`--selftest`, which proves it is reported as its own class-5 outcome and is
+decided without a GitHub request).
+
+| canonical org | repo | basis |
+|---------------|------|-------|
+| capacium | capacium-action-publish, capacium-action-validate, capacium-admin, capacium-app, capacium-bridge, capacium-bridge-tests, capacium-crawler, capacium-docs, capacium-exchange, capacium-github-app, capacium-internal-docs, capacium-marketplace-tui, capacium-mcp, capacium-models, capacium-ops, capacium-spec, capacium-test-lab, capacium-web, claude-code-capacium, jetbrains-capacium, vscode-capacium | `GH_REPO` unset at repo scope |
+| elementeer | elementeer, elementeer-addon-voxel, elementeer-bridge, elementeer-docs, elementeer-internal-docs, elementeer-mcp, elementeer-ops, elementeer-planning, elementeer-pro | `GH_REPO` unset at repo scope |
+| fusionaize | faifabric, faigate, faigrid, failens, faiops-browser, faiops-cli, faios, faisignal, faistudio, fusionaize-docs, fusionaize-internal-docs, fusionaize-metadata, fusionaize-metadata-public, fusionaize-ops, fusionaize-planning, fusionaize-project-template, fusionaize-sdk, grok-api-hook | `GH_REPO` unset at repo scope |
+| langevc | agent-test-env, envctl, lvc-docs, lvc-internal-docs, lvc-ops, ops-engine, txt-humanizer, wp-test-env | `GH_REPO` unset at repo scope |
+| skillweave | skillweave-docs, skillweave-internal-docs, skillweave-ops, skillweave-sdk | `GH_REPO` unset at repo scope |
+
+This is the principal finding of the retrofitted audit: the two-variable
+contract reports, honestly, that 60 of 78 canonical repositories are not yet
+configured to mirror, even though they all carry a mirror workflow. The propose
+tool's view of the same corpus ("proposed, paired") is a plan, not the
+as-measured state; the audit and the propose tool are not describing the same
+moment, and that disagreement is stated here rather than smoothed over.
+
+## Class 3 — the two forges disagree on a name
+
+None at measurement time. The former class-3 specimen `langevc/txt-humanizer`
+(Forgejo `txt-humanizer` vs GitHub `txtHumanizer`) is now class 5: it carries no
+`GH_REPO`, so the workflow refuses on the unset half before it ever gets to a
+name comparison. The class-3 drift machinery (`_slug` fold over spelling
+variants) remains in the audit and is exercised by `--selftest`, but no live
+repository currently reaches it, because reaching it requires a `GH_REPO` that
+double-matches yet names a spelling-variant.
 
 ## Class 4 — deliberately not workflow-mirrored (policy)
 
@@ -113,94 +177,95 @@ entirely private by design, which is why the whole org reads class 4.
 | veeona | veeona, veeona-agents, veeona-docs, veeona-internal-docs, veeona-media, veeona-ops, veeona-planning, veeona-test-lab | org has no canonical mirror workflow; host GitHub org (`Veeona-AI`) is private by design |
 
 Note the internal-docs / planning-named repositories that DO carry a mirror
-workflow are class 1 (e.g. across elementeer / fusionaize); they resolve to a
-GitHub twin under the same name and, where the twin is private, feed a private
-GitHub repo rather than surfacing publicly. Class 4 applies only where no mirror
-workflow exists — not to every `*-internal-docs` name.
+workflow are class 5 (e.g. across elementeer / fusionaize); they carry a
+workflow but no `GH_REPO`. Class 4 applies only where no mirror workflow exists
+— not to every `*-internal-docs` name.
 
 ## Class 2 — resolves but unreachable
 
-None. Every canonical repository that runs a mirror workflow resolves to a name
-GitHub already carries. The single near-absent case (`txt-humanizer`) is a name
-spelling disagreement and is class 3, not class 2.
+None. No repository currently carries a `GH_REPO` that double-matches and yet
+names a destination GitHub does not carry. The pre-012 "composes but unreachable"
+case no longer exists under the two-variable contract, because there is no
+compose: an unset `GH_REPO` is class 5 (refused), not class 2 (composed but
+absent).
 
 ## Full row table
 
 Produced verbatim by the audit tool against the live forges; destination is the
-`owner/name` the org rule resolves, or the GitHub spelling for class 3.
+verbatim `GH_REPO` (class 1) or the refusal reason (class 5).
 
 | org | repo | class | private | destination / note |
 |-----|------|-------|---------|--------------------|
-| langevc | agent-test-env | 1 | false | LangeVC/agent-test-env |
-| langevc | envctl | 1 | true | LangeVC/envctl |
-| langevc | lvc-docs | 1 | false | LangeVC/lvc-docs |
-| langevc | lvc-internal-docs | 1 | true | LangeVC/lvc-internal-docs |
-| langevc | lvc-ops | 1 | true | LangeVC/lvc-ops |
-| langevc | lvc-planning | 4 | true | no workflow; policy marker |
-| langevc | ops-engine | 1 | false | LangeVC/ops-engine |
-| langevc | txt-humanizer | 3 | false | LangeVC/txtHumanizer (name differs) |
-| langevc | wp-test-env | 1 | false | LangeVC/wp-test-env |
 | capacium | capacium | 1 | true | Capacium/capacium |
-| capacium | capacium-action-publish | 1 | false | Capacium/capacium-action-publish |
-| capacium | capacium-action-validate | 1 | false | Capacium/capacium-action-validate |
-| capacium | capacium-admin | 1 | true | Capacium/capacium-admin |
-| capacium | capacium-app | 1 | true | Capacium/capacium-app |
-| capacium | capacium-bridge | 1 | true | Capacium/capacium-bridge |
-| capacium | capacium-bridge-tests | 1 | true | Capacium/capacium-bridge-tests |
-| capacium | capacium-crawler | 1 | true | Capacium/capacium-crawler |
-| capacium | capacium-docs | 1 | true | Capacium/capacium-docs |
-| capacium | capacium-exchange | 1 | true | Capacium/capacium-exchange |
-| capacium | capacium-github-app | 1 | false | Capacium/capacium-github-app |
-| capacium | capacium-install-policy | 4 | true | no workflow measured |
-| capacium | capacium-internal-docs | 1 | true | Capacium/capacium-internal-docs |
-| capacium | capacium-marketplace-tui | 1 | false | Capacium/capacium-marketplace-tui |
-| capacium | capacium-mcp | 1 | true | Capacium/capacium-mcp |
-| capacium | capacium-models | 1 | true | Capacium/capacium-models |
-| capacium | capacium-ops | 1 | true | Capacium/capacium-ops |
+| capacium | capacium-action-publish | 5 | false | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| capacium | capacium-action-validate | 5 | false | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| capacium | capacium-admin | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| capacium | capacium-app | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| capacium | capacium-bridge | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| capacium | capacium-bridge-tests | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| capacium | capacium-crawler | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| capacium | capacium-docs | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| capacium | capacium-exchange | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| capacium | capacium-github-app | 5 | false | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| capacium | capacium-install-policy | 4 | true | no mirror workflow measured |
+| capacium | capacium-internal-docs | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| capacium | capacium-marketplace-tui | 5 | false | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| capacium | capacium-mcp | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| capacium | capacium-models | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| capacium | capacium-ops | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
 | capacium | capacium-planning | 4 | true | no workflow; policy marker |
-| capacium | capacium-spec | 1 | true | Capacium/capacium-spec |
-| capacium | capacium-test-lab | 1 | true | Capacium/capacium-test-lab |
-| capacium | capacium-web | 1 | true | Capacium/capacium-web |
-| capacium | claude-code-capacium | 1 | false | Capacium/claude-code-capacium |
-| capacium | jetbrains-capacium | 1 | false | Capacium/jetbrains-capacium |
-| capacium | vscode-capacium | 1 | true | Capacium/vscode-capacium |
-| elementeer | elementeer | 1 | true | elementeer/elementeer |
-| elementeer | elementeer-addon-voxel | 1 | true | elementeer/elementeer-addon-voxel |
-| elementeer | elementeer-bridge | 1 | true | elementeer/elementeer-bridge |
-| elementeer | elementeer-docs | 1 | true | elementeer/elementeer-docs |
-| elementeer | elementeer-internal-docs | 1 | true | elementeer/elementeer-internal-docs |
-| elementeer | elementeer-mcp | 1 | true | elementeer/elementeer-mcp |
-| elementeer | elementeer-ops | 1 | true | elementeer/elementeer-ops |
-| elementeer | elementeer-planning | 1 | true | elementeer/elementeer-planning |
-| elementeer | elementeer-pro | 1 | true | elementeer/elementeer-pro |
-| elementeer | elementeer-specs | 4 | false | no workflow measured |
-| fusionaize | faifabric | 1 | true | fusionAIze/faifabric |
-| fusionaize | faigate | 1 | true | fusionAIze/faigate |
-| fusionaize | faigrid | 1 | true | fusionAIze/faigrid |
-| fusionaize | failens | 1 | true | fusionAIze/failens |
-| fusionaize | faiops-browser | 1 | true | fusionAIze/faiops-browser |
-| fusionaize | faiops-cli | 1 | true | fusionAIze/faiops-cli |
-| fusionaize | faios | 1 | true | fusionAIze/faios |
-| fusionaize | faisignal | 1 | true | fusionAIze/faisignal |
-| fusionaize | faistudio | 1 | true | fusionAIze/faistudio |
-| fusionaize | fusionaize-docs | 1 | true | fusionAIze/fusionaize-docs |
-| fusionaize | fusionaize-internal-docs | 1 | true | fusionAIze/fusionaize-internal-docs |
-| fusionaize | fusionaize-metadata | 1 | true | fusionAIze/fusionaize-metadata |
-| fusionaize | fusionaize-metadata-public | 1 | true | fusionAIze/fusionaize-metadata-public |
-| fusionaize | fusionaize-ops | 1 | true | fusionAIze/fusionaize-ops |
-| fusionaize | fusionaize-planning | 1 | true | fusionAIze/fusionaize-planning |
-| fusionaize | fusionaize-project-template | 1 | true | fusionAIze/fusionaize-project-template |
-| fusionaize | fusionaize-sdk | 1 | true | fusionAIze/fusionaize-sdk |
-| fusionaize | grok-api-hook | 1 | true | fusionAIze/grok-api-hook |
+| capacium | capacium-spec | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| capacium | capacium-test-lab | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| capacium | capacium-web | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| capacium | claude-code-capacium | 5 | false | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| capacium | jetbrains-capacium | 5 | false | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| capacium | vscode-capacium | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| elementeer | elementeer | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| elementeer | elementeer-addon-voxel | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| elementeer | elementeer-bridge | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| elementeer | elementeer-docs | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| elementeer | elementeer-internal-docs | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| elementeer | elementeer-mcp | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| elementeer | elementeer-ops | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| elementeer | elementeer-planning | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| elementeer | elementeer-pro | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| elementeer | elementeer-specs | 4 | false | no mirror workflow measured |
+| fusionaize | faifabric | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| fusionaize | faigate | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| fusionaize | faigrid | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| fusionaize | failens | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| fusionaize | faiops-browser | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| fusionaize | faiops-cli | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| fusionaize | faios | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| fusionaize | faisignal | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| fusionaize | faistudio | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| fusionaize | fusionaize-docs | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| fusionaize | fusionaize-internal-docs | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| fusionaize | fusionaize-metadata | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| fusionaize | fusionaize-metadata-public | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| fusionaize | fusionaize-ops | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| fusionaize | fusionaize-planning | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| fusionaize | fusionaize-project-template | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| fusionaize | fusionaize-sdk | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| fusionaize | grok-api-hook | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| langevc | agent-test-env | 5 | false | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| langevc | envctl | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| langevc | lvc-docs | 5 | false | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| langevc | lvc-internal-docs | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| langevc | lvc-ops | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| langevc | lvc-planning | 4 | true | no workflow; policy marker |
+| langevc | ops-engine | 5 | false | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| langevc | txt-humanizer | 5 | false | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| langevc | wp-test-env | 5 | false | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
 | skillweave | skillweave | 1 | true | LangeVC/skillweave |
-| skillweave | skillweave-docs | 1 | true | LangeVC/skillweave-docs |
-| skillweave | skillweave-internal-docs | 1 | true | LangeVC/skillweave-internal-docs |
-| skillweave | skillweave-ops | 1 | true | LangeVC/skillweave-ops |
-| skillweave | skillweave-packs-pro | 4 | true | no workflow measured |
+| skillweave | skillweave-docs | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| skillweave | skillweave-internal-docs | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| skillweave | skillweave-ops | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| skillweave | skillweave-packs-pro | 4 | true | no mirror workflow measured |
 | skillweave | skillweave-planning | 4 | true | no workflow; policy marker |
-| skillweave | skillweave-profiles | 4 | true | no workflow measured |
-| skillweave | skillweave-sdk | 1 | true | LangeVC/skillweave-sdk |
-| skillweave | skillweave-test-lab | 4 | false | no workflow measured |
+| skillweave | skillweave-profiles | 4 | true | no mirror workflow measured |
+| skillweave | skillweave-sdk | 5 | true | GH_REPO unset at repo scope (workflow refuses before any GitHub request) |
+| skillweave | skillweave-test-lab | 4 | false | no mirror workflow measured |
 | veeona | veeona | 4 | true | org without canonical mirror workflow; github side private by design |
 | veeona | veeona-agents | 4 | true | same |
 | veeona | veeona-docs | 4 | true | same |
@@ -214,15 +279,19 @@ Produced verbatim by the audit tool against the live forges; destination is the
 
 ```
 python3 scripts/mirror-destination-audit.py \
-  --map langevc:LangeVC,capacium:Capacium,elementeer:elementeer,\
-         fusionaize:fusionAIze,skillweave:LangeVC,veeona:Veeona-AI \
+  --orgs capacium,elementeer,fusionaize,langevc,skillweave,veeona \
   [--out PATH]
 ```
 
-Credentials via `FORGEJO_TOKEN`+`GITHUB_TOKEN`. `--selftest` runs the planted
-name-mismatch proof (class 3 vs class 2) and the `GH_REPOSITORY` repo-wins proof
-with no forge read. A read failure (401/403/5xx, network) is reported UNMEASURED
-and is never confused with an absent workflow or an unset variable (HTTP 404 is
-the genuine-absence outcome); a repo the token cannot read is UNMEASURED, never
+The GitHub mirror owner for each org is read live from the org-scope
+`GH_REPO_OWNER`, so no `--map` is required (a `--map` entry is an explicit
+override only). Credentials via `FORGEJO_TOKEN`+`GITHUB_TOKEN`. `--selftest`
+runs the planted proofs with no forge read: the class-3 spelling-drift
+mismatch, the verbatim full-destination classification (no recomposition), the
+case-sensitive double-match refusal (class 5, decided without any GitHub
+request) on `elementeer`/`fusionAIze`/`Veeona-AI`, and the unset-half refusals.
+A read failure (401/403/5xx, network) is reported UNMEASURED and is never
+confused with an absent workflow or an unset variable (HTTP 404 is the
+genuine-absence outcome); a repo the token cannot read is UNMEASURED, never
 silently class 4, and a wholly denied forge is a clean error exit, not a
 mid-report crash.
