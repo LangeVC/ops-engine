@@ -190,6 +190,10 @@ class MirrorConfig(BaseModel):
     mirror_url: str = Field(default="")
     verify_on_push: bool = Field(default=True)
     max_drift_seconds: int = Field(default=300)
+    # Layer-2 mirror destination, declared here so config.yml's ``mirror.github``
+    # ("owner/name") and ``mirror.visibility`` are no longer dropped silently.
+    github: str = Field(default="")
+    visibility: str = Field(default="")  # "public" | "private" | ""
 
 
 class NotificationChannel(BaseModel):
@@ -259,6 +263,10 @@ class RepoConfig(BaseModel):
     auto_triage: Optional[AutoTriageConfig] = None
     workflow_dispatches: list[WorkflowDispatchConfig] = Field(default_factory=list)
     dependency_triggers: list[DependencyTriggerConfig] = Field(default_factory=list)
+    # The GitHub mirror name, only when it differs from the Forgejo repo name
+    # (e.g. lvc-ops ``txt-humanizer`` -> ``txtHumanizer``). Declared so the
+    # repo-level ``github_name`` config key is no longer dropped silently.
+    github_name: str = Field(default="")
     # v2
     release: Optional[ReleaseConfig] = None
     auto_merge: Optional[MergeConfig] = None
@@ -430,6 +438,7 @@ class OpsEngineConfig(BaseModel):
             auto_triage=repo_specific.auto_triage or org_config.auto_triage,
             workflow_dispatches=repo_specific.workflow_dispatches,
             dependency_triggers=repo_specific.dependency_triggers,
+            github_name=repo_specific.github_name,  # no org default (repo-specific only)
             # v2: merge with org defaults
             release=repo_specific.release or org_config.release,
             auto_merge=repo_specific.auto_merge or org_config.auto_merge,
