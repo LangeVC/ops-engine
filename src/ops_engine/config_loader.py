@@ -6,11 +6,15 @@ v3.2: Added Destination (DST-001) — the forge becomes a value, not a key name.
 """
 
 import warnings
+from pathlib import Path
 from typing import Any, Optional
+
+import yaml
 from pydantic import BaseModel, Field, ValidationError
 
 
 _DESTINATION_REMOVAL_VERSION = "4.0.0"
+_OPS_YAML_FILENAME = ".ops.yaml"
 
 
 def canonical_org_key(repository: dict[str, Any]) -> str:
@@ -83,6 +87,23 @@ class ConfigSectionError(TypeError):
             scope.append(f"repo {repo_name!r}")
         scope.append(f"section {section!r}")
         message = " -> ".join(scope) + " is not a valid typed config section"
+        if detail:
+            message += f": {detail}"
+        super().__init__(message)
+
+
+class OpsYamlError(ValueError):
+    """A repository's ``.ops.yaml`` (Layer-3 override) is malformed.
+
+    Raised naming the exact file, so a broken Layer-3 override is a refusal that
+    identifies its source — never a silent fallback to the Layer-2 config. A
+    silent fallback would leave the author believing an override is in force
+    when it is not.
+    """
+
+    def __init__(self, path: Path | str, *, detail: str = "") -> None:
+        self.path = str(path)
+        message = f"{self.path}: malformed .ops.yaml"
         if detail:
             message += f": {detail}"
         super().__init__(message)
@@ -367,6 +388,21 @@ class RepoConfig(BaseModel):
 
         return resolved
 
+    def merge_layer3(self, layer3: "RepoConfig") -> "RepoConfig":
+        """Merge a Layer-3 ``.ops.yaml`` :class:`RepoConfig` over this Layer-2 one.
+
+        Layer 3 overrides Layer 2 field by field. For every top-level field the
+        Layer-3 file explicitly sets, the Layer-3 value wins; every field it
+        leaves unset keeps the Layer-2 value. A list section (``destinations``,
+        ``workflow_dispatches``, ``dependency_triggers``) declared by Layer 3
+        REPLACES the Layer-2 list outright — it is never concatenated. The
+        replacement, not extension, keeps the resolved destinations equal to
+        exactly what the most-local declaration said: no field is a union that
+        requires reading two files to know its value.
+        """
+        overrides = {field: getattr(layer3, field) for field in layer3.model_fields_set}
+        return self.model_copy(update=overrides, deep=True)
+
 
 class ForgejoIdentity(BaseModel):
     """Forgejo-specific identity attributes for an org, stored under its key.
@@ -542,3 +578,40 @@ class OpsEngineConfig(BaseModel):
         )
         _assert_typed_sections(resolved, org_name, repo_name)
         return resolved
+
+
+def load_ops_yaml(repo_dir: Path | str) -> Optional[RepoConfig]:
+    """Load a repository's Layer-3 ``.ops.yaml`` override, if present.
+
+    ``repo_dir`` is the repository root — the directory that holds
+    ``.ops.yaml``. The file carries a :class:`RepoConfig`-shaped mapping: the
+    same shape as one ``repositories.<repo>`` entry of the Layer-2 org
+    ``config.yml``.
+
+    An absent file is the normal case and returns ``None`` ("no override"); the
+    caller keeps the Layer-2 config unchanged. A present but malformed file
+    raises :class:`OpsYamlError` naming the file — never a silent fallback to
+    the Layer-2 config, because an ignored broken override is an override its
+    author believes is in force.
+    """
+    path = Path(repo_dir) / _OPS_YAML_FILENAME
+    if not path.exists():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise OpsYamlError(path, detail=f"cannot read: {exc}") from exc
+    try:
+        raw = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise OpsYamlError(path, detail=f"invalid YAML: {exc}") from exc
+    if raw is None:
+        return RepoConfig()
+    if not isinstance(raw, dict):
+        raise OpsYamlError(
+            path, detail=f"expected a mapping, got {type(raw).__name__}"
+        )
+    try:
+        return RepoConfig.model_validate(raw)
+    except ValidationError as exc:
+        raise OpsYamlError(path, detail=str(exc)) from exc
