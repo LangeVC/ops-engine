@@ -2,10 +2,15 @@
 
 v2: Added ReleaseConfig, MergeConfig, MirrorConfig, NotificationConfig.
 v2.1: Added MigrationSourceConfig and MigrationTargetConfig (CORE-007).
+v3.2: Added Destination (DST-001) — the forge becomes a value, not a key name.
 """
 
+import warnings
 from typing import Any, Optional
 from pydantic import BaseModel, Field, ValidationError
+
+
+_DESTINATION_REMOVAL_VERSION = "4.0.0"
 
 
 def canonical_org_key(repository: dict[str, Any]) -> str:
@@ -183,17 +188,52 @@ class MergeConfig(BaseModel):
     delete_branch: bool = Field(default=True)
 
 
+class Destination(BaseModel):
+    """A single destination a repository publishes to.
+
+    The forge is a VALUE, not a key name (DST-001): ``mirror.github`` encoded the
+    forge in its key, which is why a GitHub-only or GitLab adopter could not
+    express a destination. This model replaces the three competing mirror shapes
+    — ``mirror.github`` + ``visibility``, ``mirror_url`` + ``primary_forge``, and
+    an absent ``mirror`` section — with one list form:
+
+      destinations:
+        - forge: github        # github | forgejo | gitlab | local
+          repo: LangeVC/ops-engine
+          role: mirror         # mirror | release | replica
+          visibility: public
+
+    ``role`` distinguishes the kind of destination: ``mirror`` (read-only
+    distribution copy), ``release`` (publishes release artifacts), ``replica``
+    (a full transactional copy). ``visibility`` is the per-repo public/private
+    classification LVC-247 CFG-006/007 reads.
+    """
+
+    forge: str = Field(default="github")  # "github" | "forgejo" | "gitlab" | "local"
+    repo: str
+    role: str = Field(default="mirror")  # "mirror" | "release" | "replica"
+    visibility: str = Field(default="")  # "public" | "private" | ""
+
+
 class MirrorConfig(BaseModel):
-    """Configuration for mirror sync verification."""
+    """Configuration for mirror sync verification.
+
+    As of DST-001 the mirror destination is expressed by ``RepoConfig.destinations``
+    (a :class:`Destination` list). The fields below remain only as DEPRECATED
+    aliases whose values resolve into that list via
+    :meth:`RepoConfig.resolve_destinations`; reading them emits a
+    ``DeprecationWarning`` naming the removal version. They are no longer the
+    canonical form.
+    """
     enabled: bool = Field(default=False)
-    primary_forge: str = Field(default="forgejo")  # "forgejo" | "github"
-    mirror_url: str = Field(default="")
+    primary_forge: str = Field(default="forgejo")  # DEPRECATED alias (4.0.0)
+    mirror_url: str = Field(default="")            # DEPRECATED alias (4.0.0)
     verify_on_push: bool = Field(default=True)
     max_drift_seconds: int = Field(default=300)
     # Layer-2 mirror destination, declared here so config.yml's ``mirror.github``
     # ("owner/name") and ``mirror.visibility`` are no longer dropped silently.
-    github: str = Field(default="")
-    visibility: str = Field(default="")  # "public" | "private" | ""
+    github: str = Field(default="")                # DEPRECATED alias (4.0.0)
+    visibility: str = Field(default="")  # "public" | "private" | ""  (DEPRECATED alias)
 
 
 class NotificationChannel(BaseModel):
@@ -272,6 +312,60 @@ class RepoConfig(BaseModel):
     auto_merge: Optional[MergeConfig] = None
     mirror: Optional[MirrorConfig] = None
     notifications: Optional[NotificationConfig] = None
+    # v3.2 (DST-001): the canonical destination list. The forge is a value here,
+    # not a key name. Deprecated mirror aliases resolve into this list.
+    destinations: list[Destination] = Field(default_factory=list)
+
+    def resolve_destinations(self) -> list[Destination]:
+        """Resolve this repo's destinations into a :class:`Destination` list.
+
+        The canonical list (``destinations``) is returned first, verbatim. Then
+        the three DEPRECATED mirror aliases are consulted, each emitting a
+        ``DeprecationWarning`` naming the removal version: ``mirror.github``
+        (+``mirror.visibility``) and ``mirror_url`` (+``mirror.primary_forge``)
+        each resolve into a single ``mirror``-role Destination, and an absent
+        ``mirror`` section resolves to an empty list (the deliberate
+        "unmirrored" case).
+        """
+        resolved: list[Destination] = list(self.destinations)
+
+        if self.mirror is not None:
+            mirror = self.mirror
+            if mirror.github:
+                warnings.warn(
+                    "mirror.github is deprecated and will be removed in "
+                    f"ops-engine {_DESTINATION_REMOVAL_VERSION}; use "
+                    "destinations with forge/repo/role/visibility instead.",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+                resolved.append(
+                    Destination(
+                        forge="github",
+                        repo=mirror.github,
+                        role="mirror",
+                        visibility=mirror.visibility,
+                    )
+                )
+            elif mirror.mirror_url:
+                warnings.warn(
+                    "mirror.mirror_url (with mirror.primary_forge) is deprecated "
+                    f"and will be removed in ops-engine {_DESTINATION_REMOVAL_VERSION}; "
+                    "use destinations with forge/repo/role/visibility instead.",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+                forge = mirror.primary_forge or "forgejo"
+                resolved.append(
+                    Destination(
+                        forge=forge,
+                        repo=mirror.mirror_url,
+                        role="mirror",
+                        visibility=mirror.visibility,
+                    )
+                )
+
+        return resolved
 
 
 class ForgejoIdentity(BaseModel):
@@ -444,6 +538,7 @@ class OpsEngineConfig(BaseModel):
             auto_merge=repo_specific.auto_merge or org_config.auto_merge,
             mirror=repo_specific.mirror,  # no org default (repo-specific only)
             notifications=repo_specific.notifications or org_config.notifications,
+            destinations=repo_specific.destinations,  # no org default (repo-specific only)
         )
         _assert_typed_sections(resolved, org_name, repo_name)
         return resolved
