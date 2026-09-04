@@ -303,3 +303,138 @@ mechanism and the content classification:
 - **Coverage is uneven by org.** langevc and elementeer gate no public repo at
   all; capacium, fusionaize and skillweave gate theirs yet still leak via
   state. The rewrite must first say *where* the gate is meant to run.
+
+## Re-measurement beside the old rates (CFG-007, 2026-09-04)
+
+The procedure above was **re-run across the same six mirroring organisations**
+against the live public mirrors on 2026-09-04, after the CFG-006 rebase.
+`veeona` is the null row: per `docs/mirror-destination-inventory.md` its eight
+canonical repos are all class 4 (private by design, not mirrored), so it
+contributes zero to both error directions and is recorded as such rather than
+assumed clean. The re-measurement was read-only: a full bare `--mirror` clone
+of `LangeVC/skillweave` (all heads and tags, current this session) plus
+default-branch probes of the other public mirrors via the live GitHub API. The
+old figures are quoted verbatim below every new figure.
+
+### Direction 1 — false positives (rule blocks product, old beside new)
+
+| org | old distinct product FP | re-measured 2026-09-04 |
+|---|---|---|
+| langevc | 0 | no canonical langevc repo deploys the gate |
+| skillweave | 7 | 7 — re-verified unchanged on the public mirror |
+| capacium | 1 | `capacium-marketplace-tui/docs/ipc-contract.md`, unchanged |
+| elementeer | 0 | `elementeer-ops` mirrors a private target |
+| fusionaize | 4 | `faigrid` executor-contract + 3 `fusionaize-sdk` `contract` docs |
+| **total** | **12** | **12** |
+
+Direction 1 re-measurement scope, stated plainly: a false positive is a product
+path that the rule blocks on a **delta**. Its set is a pure function of the rule
+(unchanged) and of *product* paths **added** to a gate-bearing repo's history
+after its gate shipped. This session re-derived that no such path was added on
+the skillweave public mirror: its default branch advanced by exactly the
+`fix/mirror-vars-contract` merge and two mirror-workflow parents
+(`git rev-list --count eaea86a..df143f4c` = 3), none touching any blocked path;
+the shipped schema/template/example that make up the seven skillweave false
+positives are present on `main` today. The capacium / elementeer / fusionaize
+false positives live in their canonical Forgejo histories; this session did not
+re-walk those (read-only scope below) and the figures are carried forward as
+unchanged because the rule and the recorded product paths did not change. This
+scoping is explicit so the reader does not mistake "carried forward" for
+"re-walked".
+
+### Direction 2 — false negatives, decisive skillweave split (old beside new)
+
+The default branch of `LangeVC/skillweave` (`main`) is at
+`df143f4c87c9949705234842a95d4663501872b0` this session. The prior measurement
+pinned `main` at `eaea86a6e05276be3626fdf30022cf3aa2d5aae8`. The only commits
+between them are the `fix/mirror-vars-contract` merge and its two mirror-workflow
+parents (`git rev-list --count eaea86a..df143f4c` = 3); none touches any
+blocked path, so the default-branch exposure set is byte-stable since the old
+count.
+
+Content-probing of the ten path-matched files on `main` this session confirms
+the corpus is unchanged: shipped schema, blank template, synthetic sample, the
+synthetic `corrected-build-format.json`, and the **redacted** copies of
+`forgejo-first.json` / `ops-002-mirror-rollout.json` (their `projectName` reads
+"Neutral placeholder wording describing the work…"; redaction marker scans
+`372` / `75` hits). No content IP remains on the default branch.
+
+| class | old (recorded in the rework above) | re-measured 2026-09-04 |
+|---|---|---|
+| on the default branch `main` | **0** | **0** — unchanged |
+| on release tags (distinct content) | 65 | **57** |
+| on non-default branches (distinct content) | 67 | **57** |
+| union across tags + non-default branches | 67 | **59** |
+
+Counts are distinct content-carrying files per ref class using the same
+content predicate as the rework: real planning/contract/decision prose, with
+framework substrate, blank/shipped templates and samples, synthetic proofs,
+empty stubs, and redacted copies excluded; the small gap between the old 67 and
+the re-measured 59/57 is a classification-boundary difference of the recorded
+method (which bodies under `.skillweave/prds/*` count as org content vs shipped
+skill bodies), not a measure of remediation — in both readings the residue sits
+entirely off `main` and none of it was removed between the old count and this
+one.
+
+The on-default-branch corpus and the off-main corpus are the same files the
+rework listed. Live probes this session:
+
+- `docs/repo-vierteilung-contract.md` — 27,996 B, marker-free live prose — still
+  present **only** on `feature/GLE-004-repo-vierteilung`.
+- un-redacted originals of `tests/fixtures/prd-schema/forgejo-first.json`
+  (96,938 B) and `…/ops-002-mirror-rollout.json` — still present on `dev`,
+  `ops/*`, `feature/*`, `fix/SW152-*`, `refs/pull/*` and on the older release
+  tags (`v1.3.x`–`v1.5.0`); the newest tag `v1.5.2` carries the redacted copies.
+
+### Direction 2 on the other organisations (old beside new, live this session)
+
+Each prior field-verified content anchor is still present and still content
+(no redaction marker, no deletion since the old count):
+
+| org + public repo | path | old | re-measured 2026-09-04 |
+|---|---|---|---|
+| langevc `LangeVC/agent-test-env` | `prd.json` / `prd.md` | present on `main` | present on `main` (27,305 B / 19,447 B, marker-free) |
+| langevc `LangeVC/txtHumanizer` | `.skillweave/prd-txthumanizer-v0.0.2.json` | present on `main` | present on `main` (3,614 B) |
+| fusionaize `FusionAIze/faigate` | `docs/blueprints/model-updater/prd.json` | present on `main` | present on `main` (17,254 B) |
+| elementeer `elementeer/elementeer-mcp` | `docs/blueprints/intent-wizard-contract.md` | present on `main` + every release tag | present on `main` (7,314 B) |
+| capacium | tag-tier `prd/` PRD set | ~8 on release tags | not on `main`; tag refs not re-probed this session (scoping note) |
+| veeona | — | null row | null row — no public mirror, nothing to probe |
+| `LangeVC/skillweave-profiles` | — | UNMEASURED | UNMEASURED — GitHub lists the repo but serves no objects |
+
+### Every false-negative class still open
+
+Named explicitly, not folded into a total:
+
+1. **skillweave un-redacted PRD fixtures off `main`.** `forgejo-first.json` and
+   `ops-002-mirror-rollout.json` originals (real planning JSON) still live on the
+   non-default branch set `dev`, `ops/*`, `feature/*`, `fix/SW152-*`,
+   `refs/pull/*` and on the release tags through `v1.5.0`. The redaction reached
+   only `main` and the newest tags.
+2. **skillweave genuine contract on a branch.** `docs/repo-vierteilung-contract.md`
+   marketing-free contract prose, present only on `feature/GLE-004-repo-vierteilung`.
+3. **skillweave initiative/council planning corpus off `main`.** `.skillweave/prds/
+   initiative-*` bodies, the v0.x planning corpus, and the council/strategy
+   discovery records remain on the non-default branch set.
+4. **langevc real PRDs on the public default branch.** `agent-test-env/prd.{md,json}`
+   and the `txtHumanizer` v0.0.2 PRD are live on `main` of their public mirrors.
+5. **fusionaize model-updater PRD pair on the default branch.** Live on `faigate` `main`.
+6. **elementeer intent-wizard contract.** Live on `elementeer-mcp` `main` and all
+   its release tags.
+7. **capacium tag-tier PRD set.** ~8 plan files ride the release tags, not `main`.
+8. **UNMEASURED `skillweave-profiles`.** Github lists it but serves no objects —
+   still not counted clean, still uncounted as open.
+9. All fall through the same mechanism the rework established: the file *matches*
+   the rule but is resident in a public state (a branch or a tag) that a push-diff
+   gate cannot revisit. Zero of the measured files evade the arms on a delta.
+
+### Finding
+
+**The visibility error rates did not improve.** Re-measured live this session,
+every documented count reproduces within the classification boundary of the
+method and not one class of false negative was reduced or removed: the skillweave
+default branch stays at 0 content IP (only the 2026-09-02 redaction — already
+reflected in the old count — keeps it there), the off-`main` residue on tags and
+non-default branches is unchanged, and each other-organisation default-branch
+anchor is still live. Nothing remediated them between the old count and this
+re-measurement; that is the finding, recorded as-is rather than adjusted away.
+OME-008 still has the full off-default workload in front of it.
