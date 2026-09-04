@@ -1,9 +1,14 @@
 """CORE-004: MirrorHandler — Verify mirror sync after push to primary forge.
 
-OME-012 resolution contract (mirror destination is TWO variables, not one):
+OME-012 resolution contract. As of CFG-002 the mirror destination is resolved
+from the CONFIG first (``mirror.github``, the Layer-2 destination declared by
+CFG-001), with the two Actions variables retained as a DEPRECATED override
+(removed in 4.0.0). The description below documents the two-variable path; the
+config path and the precedence between the two are documented on
+:meth:`MirrorHandler.resolve_destination` and in CONTRACT.md.
 
-The mirror destination is resolved from TWO Actions variables — the two halves
-of one contract, not two sources of one value:
+The deprecated two-variable path resolves the destination from TWO Actions
+variables — the two halves of one contract, not two sources of one value:
 
   GH_REPO_OWNER  ORG scope   the GitHub owner            e.g. ``Capacium``
   GH_REPO        REPO scope  the full owner/name target  e.g. ``Capacium/capacium``
@@ -81,11 +86,13 @@ class MirrorDestinationError(RuntimeError):
 class MirrorDestinationResolution:
     """The outcome of resolving a mirror destination before any push.
 
-    ``destination`` is the ``owner/repo`` to push to, taken verbatim from
-    ``GH_REPO`` (whitespace stripped only). ``source`` records that it came
-    from the resolved two-variable contract: ``"double match"``. The value has
-    passed the double-match check but has NOT yet been proven reachable and
-    writable; call :meth:`MirrorHandler.prove_destination` before using it.
+    ``destination`` is the ``owner/repo`` to push to, taken verbatim from the
+    source (whitespace stripped only). ``source`` records which of the two
+    contract sources supplied it: ``"config"`` (the primary Layer-2
+    ``mirror.github`` field) or ``"double match"`` (the deprecated two-variable
+    override). The value has passed the double-match check but has NOT yet been
+    proven reachable and writable; call :meth:`MirrorHandler.prove_destination`
+    before using it.
     """
 
     destination: str
@@ -162,36 +169,67 @@ class MirrorHandler:
     @staticmethod
     def resolve_destination(
         *,
+        config: Optional[MirrorConfig] = None,
         gh_repo_owner: Optional[str] = None,
         gh_repo: Optional[str] = None,
     ) -> MirrorDestinationResolution:
-        """Resolve the mirror destination from the two-variable contract.
+        """Resolve the mirror destination from the config, with the variables
+        as a deprecated override.
 
-        ``gh_repo_owner`` is the ORG-scope ``GH_REPO_OWNER`` (the GitHub owner).
-        ``gh_repo`` is the REPO-scope ``GH_REPO`` (the full ``owner/name``
-        destination). BOTH are required: they are two halves of one contract,
-        not two sources of one value, so there is no precedence between them
-        and no fallback — unset is a hard refusal, never a computed candidate.
+        There are two sources, in a fixed precedence that is part of the
+        contract (see CONTRACT.md "Mirror destination resolution"):
 
-        Check order (matching the deployed preflight guard):
+        1. **CONFIG (primary).** ``config.mirror.github`` is the Layer-2
+           destination, a single ``owner/name`` string written by the layover
+           config and now declared on ``MirrorConfig`` (CFG-001). When it is
+           non-empty it resolves the destination verbatim; the owner is its
+           prefix. The ``source`` of the result is ``"config"``.
 
-        1. ``gh_repo_owner`` unset -> refuse, naming the ORG-scope variable.
-        2. ``gh_repo`` unset -> refuse, naming the REPO-scope variable.
-        3. DOUBLE MATCH: ``gh_repo``'s owner prefix == ``gh_repo_owner``, a
-           CASE-SENSITIVE string compare performed BEFORE ANY NETWORK CALL.
-           Mismatch refuses, naming both values.
+        2. **VARIABLES (deprecated override).** ``gh_repo_owner`` (ORG-scope
+           ``GH_REPO_OWNER``) and ``gh_repo`` (REPO-scope ``GH_REPO``) form the
+           two halves of the v3.1.0 two-variable contract. They are consulted
+           ONLY when the config path carried no destination. The ``source`` of
+           the result is ``"double match"``.
+
+        The config wins when both are supplied: the variables are deprecated
+        (removed in 4.0.0, see DEC-003) and a stale variable must not silently
+        override a correct config, or the mapping would still live in the
+        variable store this feature exists to retire.
+
+        The case-sensitive double match runs before any network call whichever
+        source supplied the values: for the variable source it compares
+        ``gh_repo``'s owner prefix against ``gh_repo_owner`` (two independent
+        values); for the config source the destination is a single field whose
+        owner IS its prefix, so the same verbatim, case-sensitive, no-network
+        resolution applies and a malformed or absent destination refuses.
 
         The owner and destination are used VERBATIM — whitespace stripped, and
-        nothing else (no lower/title/slug), because the double match IS a plain
-        case-sensitive compare and any normalisation breaks the very check this
-        contract is built on.
+        nothing else (no lower/title/slug).
 
         Raises:
-            MirrorDestinationError: a variable is unset or the double match
-                fails. The message names the variable AND its scope, gives the
-                value it held/expected, and (for the mismatch) proves no
-                network call is needed to refuse.
+            MirrorDestinationError: no destination, or the double match fails.
+                The message names the source, its variable/section AND scope,
+                gives the value it held/expected, and proves no network call is
+                needed to refuse.
         """
+        # Config path: the Layer-2 ``mirror.github`` field, a single owner/name
+        # destination written by the layover config and declared on MirrorConfig
+        # by CFG-001. Resolved verbatim (whitespace stripped only).
+        config_github = config.github.strip() if config is not None and config.github else ""
+        if config_github:
+            repo = config_github
+            owner = repo.split("/", 1)[0]
+            if not owner or repo == owner:
+                raise MirrorDestinationError(
+                    f"cannot resolve mirror destination: config mirror.github "
+                    f"'{repo}' is not an 'owner/name' destination. Set it to "
+                    f"the full owner/name target (e.g. LangeVC/ops-engine)."
+                )
+            return MirrorDestinationResolution(
+                destination=repo, source="config"
+            )
+
+        # Variable path: the deprecated two-variable override.
         owner = gh_repo_owner.strip() if gh_repo_owner is not None else None
         repo = gh_repo.strip() if gh_repo is not None else None
 
