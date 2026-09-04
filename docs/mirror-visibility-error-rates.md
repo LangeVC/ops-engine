@@ -379,10 +379,10 @@ one.
 The on-default-branch corpus and the off-main corpus are the same files the
 rework listed. Live probes this session:
 
-- `docs/repo-vierteilung-contract.md` — 27,996 B, marker-free live prose — still
+- `docs/repo-vierteilung-contract.md` — 28,490 B, marker-free live prose — still
   present **only** on `feature/GLE-004-repo-vierteilung`.
 - un-redacted originals of `tests/fixtures/prd-schema/forgejo-first.json`
-  (96,938 B) and `…/ops-002-mirror-rollout.json` — still present on `dev`,
+  (97,056 B) and `…/ops-002-mirror-rollout.json` — still present on `dev`,
   `ops/*`, `feature/*`, `fix/SW152-*`, `refs/pull/*` and on the older release
   tags (`v1.3.x`–`v1.5.0`); the newest tag `v1.5.2` carries the redacted copies.
 
