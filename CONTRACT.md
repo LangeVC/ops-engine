@@ -7,7 +7,7 @@ the top-level package:
 from ops_engine import <name>
 ```
 
-As of this contract, `ops_engine.__all__` declares 34 names. Every name is
+As of this contract, `ops_engine.__all__` declares 35 names. Every name is
 classified below as either **contract** (consumers may rely on it) or
 **internal** (exposed only because Python has no hard privacy; not a promise).
 
@@ -40,7 +40,7 @@ mirror-destination methods named in prose below, the ones whose semantics are
 promised. Other methods on public classes are not signature-guarded here.
 
 By the same line, a model declared `contract: true` promises the **name**, not
-the **shape**. `MirrorConfig` is one of the 34 exports and is classified
+the **shape**. `MirrorConfig` is one of the 35 exports and is classified
 `contract: true` by name only: the `methods` array above gates the
 mirror-destination methods on `MirrorHandler`, not the fields of any model. A
 consumer may rely on the name `MirrorConfig` remaining importable and classified
@@ -69,6 +69,7 @@ of scope for this revision.
     {"name": "ReleaseConfig",                 "kind": "class",    "contract": true},
     {"name": "MergeConfig",                   "kind": "class",    "contract": true},
     {"name": "MirrorConfig",                  "kind": "class",    "contract": true},
+    {"name": "Destination",                   "kind": "class",    "contract": true},
     {"name": "NotificationConfig",            "kind": "class",    "contract": true},
     {"name": "NotificationChannel",           "kind": "class",    "contract": true},
     {"name": "MigrationSourceConfig",         "kind": "class",    "contract": true},
@@ -230,6 +231,43 @@ internal submodule `ops_engine.modules.mirror` and are therefore unpromised by
 this contract, exactly like the other submodule names. The promised surface is
 the two methods on `MirrorHandler`; the exception a layover must handle is
 `ops_engine.modules.mirror.MirrorDestinationError`.
+
+## Destination model (DST-001)
+
+`Destination` (a `contract` name above) is the canonical form a repository
+publishes its destinations in. The forge is a **value**, not a key name:
+
+```yaml
+destinations:
+  - forge: github        # github | forgejo | gitlab | local
+    repo: LangeVC/ops-engine
+    role: mirror         # mirror | release | replica
+    visibility: public
+```
+
+`Destination` fields: `forge` (the forge, default ``"github"``), `repo` (the
+``owner/name`` or forge-specific destination string, required), `role`
+(``"mirror"`` | ``"release"`` | ``"replica"``, default ``"mirror"``), and
+`visibility` (``"public"`` | ``"private"`` | ``""``). `RepoConfig.destinations`
+holds the list, and `RepoConfig.resolve_destinations()` returns it with the
+deprecated mirror aliases folded in.
+
+The three measured mirror shapes migrate as follows:
+
+- **`mirror.github` + `mirror.visibility`** (lvc-ops) — resolves to one
+  `Destination(forge="github", repo=<github>, role="mirror", visibility=<visibility>)`.
+- **`mirror_url` + `primary_forge`** (elementeer-ops, skillweave-ops) — resolves
+  to one `Destination(forge=<primary_forge>, repo=<mirror_url>, role="mirror")`.
+- **absent `mirror` section** (capacium-ops, fusionaize-ops) — resolves to an
+  empty list: the deliberate "unmirrored" case, not an error.
+
+The deprecated aliases `mirror.github`, `mirror.visibility`, `mirror_url` and
+`mirror.primary_forge` remain on `MirrorConfig` only as aliases. Resolving any
+non-empty alias through `resolve_destinations()` emits a `DeprecationWarning`
+naming the removal version (4.0.0, DEC-003). `resolve_destinations` is an
+instance method on `RepoConfig`; it is not a network call and holds no
+organisation knowledge, deferring to DST-003's forge-neutral `resolve_destinations`
+entry point for the pure resolver.
 
 ## Variable-name constants — deprecated
 
