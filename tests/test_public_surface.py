@@ -4,6 +4,7 @@ import ast
 import importlib
 import json
 import re
+import sys
 import warnings
 from pathlib import Path
 
@@ -235,4 +236,68 @@ def test_deprecated_variable_constants_warn_on_import(monkeypatch):
             issubclass(w.category, DeprecationWarning) and "4.0.0" in str(w.message)
             for w in caught
         ), f"{name} warning must be a DeprecationWarning naming 4.0.0: {[str(w.message) for w in caught]}"
+
+
+def _script_names():
+    root = Path(__file__).resolve().parent.parent
+    return {
+        "audit": root / "scripts" / "mirror-destination-audit.py",
+        "propose": root / "scripts" / "mirror-destination-propose.py",
+    }
+
+
+def test_operator_tools_do_not_import_the_action_variables():
+    """DST-004: neither operator tool imports the two deprecated variable
+    constants nor reads them on its primary path.
+
+    The audit previously imported ``MIRROR_OWNER_VARIABLE`` /
+    ``MIRROR_REPO_VARIABLE`` from ``ops_engine.modules.mirror`` (restating the
+    Forgejo Actions variable read) and resolved each destination from the org /
+    repo Actions variables. DST-004 made the org set arrive as repeated
+    ``--config`` paths and the destination resolve from the config via
+    ``resolve_destinations``. This is the READ that guards the write: we read
+    the scripts as text and assert the deprecated-variable surface is gone from
+    both, and that the config-first resolver import is present.
+    """
+    names = _script_names()
+    for label, path in names.items():
+        src = path.read_text(encoding="utf-8")
+        assert "MIRROR_OWNER_VARIABLE" not in src, (
+            f"{label} still imports/names MIRROR_OWNER_VARIABLE"
+        )
+        assert "MIRROR_REPO_VARIABLE" not in src, (
+            f"{label} still imports/names MIRROR_REPO_VARIABLE"
+        )
+        assert "--config" in src, (
+            f"{label} does not accept a --config path (org set at the call site)"
+        )
+    # the primary (propose) destination source is the Layer-1 pure resolver
+    for label in ("audit", "propose"):
+        src = names[label].read_text(encoding="utf-8")
+        assert "resolve_destinations" in src, (
+            f"{label} does not resolve through resolve_destinations"
+        )
+    # the audit is read-only and reads NO Forgejo Actions variable anywhere
+    audit_src = names["audit"].read_text(encoding="utf-8")
+    assert "/actions/variables/" not in audit_src, (
+        "audit still reads a Forgejo Actions variable"
+    )
+
+
+def test_audit_selftest_runs_hermetic():
+    """The audit's pure decision selftest exits 0 and never touches a forge.
+
+    The class-5 refusal (malformed config github destination) is decided before
+    any GitHub request; running the selftest is the hermetic proof of the pure
+    decision functions that the live reachability reads build on.
+    """
+    import subprocess as _sp
+
+    path = _script_names()["audit"]
+    res = _sp.run(
+        [sys.executable, str(path), "--selftest"],
+        capture_output=True, text=True,
+    )
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "class 5" in res.stdout
 
