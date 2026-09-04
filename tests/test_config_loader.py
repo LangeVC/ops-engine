@@ -67,6 +67,47 @@ def test_v2_mirror_config():
     assert config.mirror_url == "github.com/org/repo"
 
 
+def test_mirror_destination_fields_are_received():
+    """mirror.github, mirror.visibility and repo-level github_name must not be
+    silently dropped (LVC-247 / CFG-001). Without the declarations on
+    MirrorConfig and RepoConfig, pydantic discards all three and this test fails.
+    """
+    config = OpsEngineConfig.model_validate(
+        {
+            "orgs": {
+                "langevc": {
+                    "repositories": {
+                        "ops-engine": {
+                            "mirror": {
+                                "enabled": True,
+                                "github": "LangeVC/ops-engine",
+                                "visibility": "public",
+                                "verify_on_push": True,
+                            }
+                        },
+                        "txt-humanizer": {
+                            "github_name": "txtHumanizer",
+                            "mirror": {
+                                "enabled": True,
+                                "github": "LangeVC/txtHumanizer",
+                                "visibility": "public",
+                            },
+                        },
+                    }
+                }
+            }
+        }
+    )
+
+    resolved = config.get_repo_config("langevc", "ops-engine")
+    assert resolved.mirror is not None
+    assert resolved.mirror.github == "LangeVC/ops-engine"
+    assert resolved.mirror.visibility == "public"
+
+    renamed = config.get_repo_config("langevc", "txt-humanizer")
+    assert renamed.github_name == "txtHumanizer"
+
+
 def test_v2_notification_config():
     config = NotificationConfig(
         enabled=True,
