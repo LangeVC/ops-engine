@@ -39,6 +39,17 @@ promises is trusting something CI does not look at. The `methods` array does
 mirror-destination methods named in prose below, the ones whose semantics are
 promised. Other methods on public classes are not signature-guarded here.
 
+By the same line, a model declared `contract: true` promises the **name**, not
+the **shape**. `MirrorConfig` is one of the 34 exports and is classified
+`contract: true` by name only: the `methods` array above gates the
+mirror-destination methods on `MirrorHandler`, not the fields of any model. A
+consumer may rely on the name `MirrorConfig` remaining importable and classified
+`contract`, but its fields — `github`, `visibility`, `github_name`, and the rest
+— are documented in prose (here and in `config_loader.py`) and are not
+machine-checked. This answers, rather than silences, the gap CFG-001 named:
+field-level gating of a model's shape would be a schema change (schema 3), out
+of scope for this revision.
+
 ```json
 {
   "schema": 2,
@@ -220,7 +231,7 @@ this contract, exactly like the other submodule names. The promised surface is
 the two methods on `MirrorHandler`; the exception a layover must handle is
 `ops_engine.modules.mirror.MirrorDestinationError`.
 
-## Variable-name constants
+## Variable-name constants — deprecated
 
 `MIRROR_OWNER_VARIABLE` and `MIRROR_REPO_VARIABLE` live in the unpromised
 submodule `ops_engine.modules.mirror`. They hold the strings `GH_REPO_OWNER` and
@@ -231,9 +242,19 @@ strings (restatement is how the contract drifted). They are
 this contract guarantees, and a consumer outside this repository must not rely
 on them. Where the public methods above name a variable in their error text,
 that text is the human-facing contract; the constants are an implementation
-detail that the in-repo audit consumes so the strings stay declared once. They
-may change or move in a minor bump, and the audit (which imports them) moves
-with them.
+detail that the in-repo audit consumes so the strings stay declared once.
+
+**Deprecated in 3.2.0, removed in 4.0.0 (DEC-003).** The two-variable path these
+constants name is replaced by the config path: the Layer-2 `MirrorConfig.github`
+field declared by CFG-001 and resolved by `MirrorHandler.resolve_destination`
+(see "Mirror destination resolution" above). The variables remain only as a
+*deprecated override*. **Until removal in 4.0.0, the variable path requires a
+Forgejo Actions variable store:** `GH_REPO_OWNER` (ORG scope) and `GH_REPO`
+(REPO scope) are Forgejo Actions variables, and that path has no config-only
+equivalent. A consumer that still resolves a destination through these variables
+therefore depends on a Forgejo Actions variable store; the config path carries
+no such dependency. The constants may change or move in a minor bump, and the
+audit (which imports them) moves with them; at 4.0.0 both are removed.
 
 ## Test enforcement
 

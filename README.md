@@ -58,6 +58,14 @@ Layer 3: .ops.yaml (per-repo overrides — optional)
 
 `ops-engine` has **no dependency** on any specific CI system, AI tool, or orchestration framework. The interface is the webhook. A `git push --tags` produces the same result regardless of what triggered it.
 
+**Exception — mirror destination.** As of 3.2.0 the mirror destination is
+resolved from the config layer (`MirrorConfig.github`), so the mirror feature no
+longer requires any CI-specific mechanism on its primary path. A *deprecated
+override* remains until 4.0.0 (DEC-003): the two actions variables
+`GH_REPO_OWNER` / `GH_REPO` are Forgejo Actions variables, so a consumer that
+resolves a destination through that legacy path depends on a Forgejo Actions
+variable store. That exception is removed at 4.0.0.
+
 ---
 
 ## Quickstart

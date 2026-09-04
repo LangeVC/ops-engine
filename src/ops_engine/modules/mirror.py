@@ -49,13 +49,17 @@ The two proofs answer different questions:
 Neither proof creates a repository under any outcome. Both use real git, not
 heuristics in this repository.
 
-The canonical variable names are declared ONCE here (see
-:data:`MIRROR_OWNER_VARIABLE` / :data:`MIRROR_REPO_VARIABLE`) and exported so
-operator scripts can import them instead of restating them.
+The canonical (DEPRECATED) variable names are declared ONCE here (see
+:data:`MIRROR_OWNER_VARIABLE` / :data:`MIRROR_REPO_VARIABLE`), which importing
+them emits a DeprecationWarning for; they are served through module
+``__getattr__`` so a consumer that trips either name is told the config-layer
+replacement. The strings stay declared once so the module's own refusal text and
+legacy consumers do not restate them.
 """
 
 import asyncio
 import logging
+import warnings
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -64,13 +68,35 @@ from ops_engine.config_loader import MirrorConfig
 
 logger = logging.getLogger(__name__)
 
-# The two Actions variables that carry the mirror contract. Declared once here
-# and exported, so operator scripts import these names instead of restating the
-# strings (restatement is how the contract drifted). The OME-002 single
-# variable ``GH_REPOSITORY`` is retired: the contract is now two halves, an
-# owning org/user (ORG scope) and a full owner/name destination (REPO scope).
-MIRROR_OWNER_VARIABLE = "GH_REPO_OWNER"
-MIRROR_REPO_VARIABLE = "GH_REPO"
+# The two Actions variables that carry the legacy, DEPRECATED mirror override
+# (removed in 4.0.0 — DEC-003). The concrete strings below are the single
+# declaration point; the public names ``MIRROR_OWNER_VARIABLE`` /
+# ``MIRROR_REPO_VARIABLE`` are served through module ``__getattr__`` so that
+# IMPORTING either name emits a DeprecationWarning naming its replacement and the
+# removal version. The module's own error text references the private strings
+# directly (a refusal must not itself warn). The OME-002 single variable
+# ``GH_REPOSITORY`` is retired: the contract is now two halves, an owning
+# org/user (ORG scope) and a full owner/name destination (REPO scope).
+_MIRROR_OWNER_VARIABLE = "GH_REPO_OWNER"
+_MIRROR_REPO_VARIABLE = "GH_REPO"
+
+
+def __getattr__(name: str) -> str:
+    _DEPRECATED_VARIABLES = {
+        "MIRROR_OWNER_VARIABLE": _MIRROR_OWNER_VARIABLE,
+        "MIRROR_REPO_VARIABLE": _MIRROR_REPO_VARIABLE,
+    }
+    if name in _DEPRECATED_VARIABLES:
+        warnings.warn(
+            f"{name} is deprecated and will be removed in ops-engine 4.0.0. "
+            f"Resolve the mirror destination from the config layer "
+            f"(MirrorConfig.github) instead; the variable path requires a "
+            f"Forgejo Actions variable store.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return _DEPRECATED_VARIABLES[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 class MirrorDestinationError(RuntimeError):
@@ -235,28 +261,28 @@ class MirrorHandler:
 
         if not owner:
             raise MirrorDestinationError(
-                f"cannot resolve mirror destination: {MIRROR_OWNER_VARIABLE} "
+                f"cannot resolve mirror destination: {_MIRROR_OWNER_VARIABLE} "
                 f"is UNSET. Set the ORG-level Actions variable "
-                f"{MIRROR_OWNER_VARIABLE} to the GitHub org/user that owns "
+                f"{_MIRROR_OWNER_VARIABLE} to the GitHub org/user that owns "
                 f"the mirror (e.g. Capacium)."
             )
 
         if not repo:
             raise MirrorDestinationError(
-                f"cannot resolve mirror destination: {MIRROR_REPO_VARIABLE} "
+                f"cannot resolve mirror destination: {_MIRROR_REPO_VARIABLE} "
                 f"is UNSET. Set the REPOSITORY-level Actions variable "
-                f"{MIRROR_REPO_VARIABLE} to the full destination "
+                f"{_MIRROR_REPO_VARIABLE} to the full destination "
                 f"(owner/repo, e.g. Capacium/capacium)."
             )
 
         repo_owner = repo.split("/", 1)[0]
         if repo_owner != owner:
             raise MirrorDestinationError(
-                f"DOUBLE MATCH failed: {MIRROR_REPO_VARIABLE} '{repo}' has "
-                f"owner prefix '{repo_owner}', but {MIRROR_OWNER_VARIABLE} is "
+                f"DOUBLE MATCH failed: {_MIRROR_REPO_VARIABLE} '{repo}' has "
+                f"owner prefix '{repo_owner}', but {_MIRROR_OWNER_VARIABLE} is "
                 f"'{owner}' (case-sensitive). Correct one of the two variables "
-                f"so {MIRROR_REPO_VARIABLE}'s owner prefix equals "
-                f"{MIRROR_OWNER_VARIABLE} exactly. Refusing to push; no GitHub "
+                f"so {_MIRROR_REPO_VARIABLE}'s owner prefix equals "
+                f"{_MIRROR_OWNER_VARIABLE} exactly. Refusing to push; no GitHub "
                 f"request was made."
             )
 
@@ -298,7 +324,7 @@ class MirrorHandler:
             raise MirrorDestinationError(
                 f"cannot vouch for mirror destination '{destination}': it is "
                 f"not reachable/readable at {api_base}. Set the "
-                f"REPOSITORY-level Actions variable {MIRROR_REPO_VARIABLE} "
+                f"REPOSITORY-level Actions variable {_MIRROR_REPO_VARIABLE} "
                 f"to the real destination (owner/repo) and retry."
             )
 
@@ -311,7 +337,7 @@ class MirrorHandler:
                 f"the authenticated token has no push permission on it. The "
                 f"name of a public repository owned by someone else must not "
                 f"resolve as a writable destination. Correct the "
-                f"REPOSITORY-level Actions variable {MIRROR_REPO_VARIABLE} "
+                f"REPOSITORY-level Actions variable {_MIRROR_REPO_VARIABLE} "
                 f"to a repository this token may write to."
             )
 

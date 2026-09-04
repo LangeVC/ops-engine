@@ -1,8 +1,10 @@
 """Public surface contract: CONTRACT.md and ops_engine.__all__ must agree."""
 
 import ast
+import importlib
 import json
 import re
+import warnings
 from pathlib import Path
 
 SRC_INIT = Path(__file__).resolve().parent.parent / "src" / "ops_engine" / "__init__.py"
@@ -209,4 +211,28 @@ def test_promised_method_signatures_match_code():
                 f"{class_name}.{method_name} {label} drift: "
                 f"code={act[key]} declaration={exp[key]}"
             )
+
+
+def test_deprecated_variable_constants_warn_on_import(monkeypatch):
+    """Importing the two deprecated variable-name constants emits a
+    DeprecationWarning naming the removal version (4.0.0).
+
+    The constants live in the unpromised submodule ``ops_engine.modules.mirror``
+    and are served through module ``__getattr__`` precisely so that an importer
+    — not an internal refusal path — trips the warning. This asserts the
+    deprecation contract C1 names: both constants are deprecated, and the
+    removal version is stated.
+    """
+    mirror = importlib.import_module("ops_engine.modules.mirror")
+
+    for name in ("MIRROR_OWNER_VARIABLE", "MIRROR_REPO_VARIABLE"):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            value = getattr(mirror, name)
+        assert value in ("GH_REPO_OWNER", "GH_REPO"), value
+        assert caught, f"importing {name} emitted no DeprecationWarning"
+        assert any(
+            issubclass(w.category, DeprecationWarning) and "4.0.0" in str(w.message)
+            for w in caught
+        ), f"{name} warning must be a DeprecationWarning naming 4.0.0: {[str(w.message) for w in caught]}"
 
