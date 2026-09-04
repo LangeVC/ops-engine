@@ -8,6 +8,7 @@ that pin.
 import importlib.util
 import subprocess
 import sys
+import re
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -21,6 +22,21 @@ EXPECTED_LAYOVERS = [
     "skillweave-ops",
 ]
 
+# Each layout's ops-engine pin is read from its own pyproject.toml. Paths are
+# resolved the same way the sequence reads them: sibling repositories of the
+# ops-engine worktree root.
+PIN_READS = {
+    "lvc-ops": Path("../lvc-ops/pyproject.toml"),
+    "capacium-ops": Path("../../capacium/capacium-ops/pyproject.toml"),
+    "elementeer-ops": Path("../../elementeer/elementeer-ops/pyproject.toml"),
+    "fusionaize-ops": Path("../../fusionaize/fusionaize-ops/pyproject.toml"),
+    "skillweave-ops": Path("../../skillweave/skillweave-ops/pyproject.toml"),
+}
+
+OPS_ENGINE_RE = re.compile(
+    r'"ops-engine(?:\[[^\]]*\])?\s*@\s*git\+[^\s@]+@v?(\d+\.\d+\.\d+)"'
+)
+
 
 def _load_module():
     spec = importlib.util.spec_from_file_location("pin_drift_check", SCRIPT)
@@ -30,6 +46,30 @@ def _load_module():
 
 
 mod = _load_module()
+
+
+def real_pin_from_pyproject(path: Path) -> str:
+    """Return the ops-engine version a layover pins in its pyproject.toml.
+
+    The dependency line is ``ops-engine[extra] @ git+...@v3.0.0``; the version
+    carries a leading ``v`` that is dropped for comparison.
+    """
+    text = path.read_text(encoding="utf-8")
+    m = OPS_ENGINE_RE.search(text)
+    if not m:
+        raise ValueError(f"no ops-engine pin in {path}")
+    return m.group(1)
+
+
+def declared_pin_map(doc_text: str) -> dict[str, str]:
+    decl = mod.extract_json_fence(doc_text)
+    return {l["name"]: l["pin"].lstrip("v") for l in decl["layovers"]}
+
+
+def reachable_pyproject(repo_root: Path, rel: str) -> Path | None:
+    """Resolve a sibling read path; return Path when present else None."""
+    cand = (repo_root / rel).resolve()
+    return cand if cand.is_file() else None
 
 
 def test_parse_semver_strips_v_prefix():
@@ -248,3 +288,24 @@ def test_check_runs_unattended_and_reports_pin_latest_changed():
     for name in EXPECTED_LAYOVERS:
         line = next(ln for ln in out.splitlines() if ln.startswith(name))
         assert line.split()[-1] == "-"
+
+
+def test_declared_pins_match_the_real_pyproject_pins():
+    """The document's declared pin equals the value in the layover's own pyproject.
+
+    This is the WRITE-side guard for CFG-005: a mirror that goes stale (doc says
+    2.2.0 while every layover resolves v3.0.0) must fail here. The read is each
+    layover's own pyproject.toml, quoted below on failure.
+    """
+    doc_text = (REPO / "docs" / "layover-consumption.md").read_text(encoding="utf-8")
+    declared = declared_pin_map(doc_text)
+    failures = []
+    for name in EXPECTED_LAYOVERS:
+        cand = reachable_pyproject(REPO, PIN_READS[name].as_posix())
+        if cand is None:
+            failures.append(f"{name}: sibling pyproject unreachable from this runner")
+            continue
+        real = real_pin_from_pyproject(cand)
+        if declared[name] != real:
+            failures.append(f"{name}: doc declares {declared[name]} but {cand} pins v{real}")
+    assert not failures, "\n".join(failures)
