@@ -267,7 +267,7 @@ non-empty alias through `resolve_destinations()` emits a `DeprecationWarning`
 naming the removal version (4.0.0, DEC-003). `resolve_destinations` is an
 instance method on `RepoConfig`; it is not a network call and holds no
 organisation knowledge, deferring to DST-003's forge-neutral `resolve_destinations`
-entry point for the pure resolver.
+entry point for the pure resolver (see "Destination resolver (DST-003)" below).
 
 ## Layer 3 — `.ops.yaml` (DST-002)
 
@@ -306,6 +306,45 @@ told, not left believing the override is in force.
 
 `RepoConfig.merge_layer3(layer3)` applies a loaded Layer-3 `RepoConfig` over a
 Layer-2 one, implementing the precedence above.
+
+## Destination resolver (DST-003)
+
+`resolve_destinations(config, repo, *, repo_dir=None)` is the Layer-1
+destinations entry point: the pure resolver that lets a cross-org operator tool
+resolve a repository's destinations without a layer break. It lives in the
+unpromised submodule `ops_engine.modules.mirror` and is **not** a `contract`
+name (it is absent from the exports table above, exactly like the adjacent
+`MirrorDestinationResolution` and `MirrorDestinationError` names); it is
+documented here as the promised behaviour the operator tools rely on.
+
+- `config` is a typed `OpsEngineConfig` (Layer 2, already loaded). The org set
+  and the config object arrive at the call site; the function walks nothing and
+  holds no org-to-config mapping.
+- `repo` is the `org/repo` selector, split verbatim (case-sensitive, `/` split
+  once) into the org key and repo name.
+- The function performs **zero network calls** and imports no forge adapter. It
+  only reads the caller-supplied config object, the `repo` selector, and — when
+  `repo_dir` is supplied — a Layer-3 `.ops.yaml` at that directory.
+
+Resolution order, delegating to the config layer so the DST-002 precedence is
+implemented once:
+
+1. `config.get_repo_config(org, repo_name)` resolves the Layer-2 `RepoConfig`.
+2. If `repo_dir` is supplied, `load_ops_yaml(repo_dir)` is consulted and, when a
+   `.ops.yaml` is present, merged over the Layer-2 config via `merge_layer3`
+   (field-by-field override; lists replace). An absent `.ops.yaml` is the normal
+   case and changes nothing.
+3. `RepoConfig.resolve_destinations()` folds the destination list together with
+   the deprecated mirror aliases into the final `Destination` list.
+
+The v3.1.0 double match still applies to any destination whose forge declares
+an owner form. That equivalence lives in `MirrorHandler.resolve_destination`
+(`ops_engine.modules.mirror`) — the forge-neutral resolver whose case-sensitive
+double match (config path and the deprecated two-variable path) is unchanged and
+simply takes its inputs from whatever supplies them. `resolve_destinations` does
+not re-implement that check; it returns `Destination` objects whose
+`forge`/`repo` values are the inputs `resolve_destination` then verifies
+verbatim, case-sensitively, before any network call.
 
 ## Variable-name constants — deprecated
 
