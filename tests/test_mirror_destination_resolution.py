@@ -9,6 +9,11 @@ contract, not two sources of one value:
 Resolution and the two proofs (EXISTS via ``git ls-remote``, IS OURS via
 ``permissions.push``) are proven here by this repository's own tests. The
 proofs are additionally proven against the real forges in the verdict.
+
+DST-003 adds ``resolve_destinations(config, repo)``, the pure Layer-1 resolver
+that knows no organisations and makes no network calls. Its tests live in
+``tests/test_mirror_destination_resolution.py`` alongside the two-variable
+contract it complements.
 """
 
 import pytest
@@ -20,6 +25,7 @@ from ops_engine.modules.mirror import (
     MirrorDestinationResolution,
     MirrorDestinationError,
     MirrorHandler,
+    resolve_destinations,
 )
 
 
@@ -251,3 +257,144 @@ async def test_prove_exists_and_ours_passes(monkeypatch):
 
     # Should not raise.
     await MirrorHandler.prove_destination("LangeVC/ops-engine")
+
+
+# ── DST-003: resolve_destinations(config, repo) — the pure Layer-1 resolver ──
+
+
+def _five_layover_configs():
+    """The five real layover shapes, expressed as OpsEngineConfig mappings.
+
+    Three shapes measured 2026-09-04:
+
+      * lvc-ops:        mirror.github + visibility (owner/name destination)
+      * elementeer, skillweave: mirror_url + primary_forge (no github key)
+      * capacium, fusionaize:   no mirror section at all
+    """
+    from ops_engine.config_loader import OpsEngineConfig
+
+    lvc_ops = OpsEngineConfig.load(
+        {
+            "orgs": {
+                "langevc": {
+                    "repositories": {
+                        "ops-engine": {
+                            "mirror": {
+                                "enabled": True,
+                                "github": "LangeVC/ops-engine",
+                                "visibility": "public",
+                                "verify_on_push": True,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    )
+    elementeer = OpsEngineConfig.load(
+        {
+            "orgs": {
+                "elementeer": {
+                    "repositories": {
+                        "elementeer-mcp": {
+                            "mirror": {
+                                "enabled": True,
+                                "primary_forge": "forgejo",
+                                "mirror_url": "github.com/elementeer/elementeer-mcp",
+                                "verify_on_push": True,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    )
+    skillweave = OpsEngineConfig.load(
+        {
+            "orgs": {
+                "skillweave": {
+                    "repositories": {
+                        "skillweave": {
+                            "mirror": {
+                                "enabled": True,
+                                "primary_forge": "forgejo",
+                                "mirror_url": "github.com/typelicious/SkillWeave",
+                                "verify_on_push": True,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    )
+    capacium = OpsEngineConfig.load(
+        {
+            "orgs": {
+                "capacium": {
+                    "repositories": {
+                        "capacium": {
+                            "release": {"enabled": True, "trigger": "tag_push"}
+                        }
+                    }
+                }
+            }
+        }
+    )
+    fusionaize = OpsEngineConfig.load(
+        {
+            "orgs": {
+                "fusionaize": {
+                    "repositories": {
+                        "fusionaize-sdk": {
+                            "release": {"enabled": True, "trigger": "tag_push"}
+                        }
+                    }
+                }
+            }
+        }
+    )
+    return [
+        ("langevc/ops-engine", lvc_ops, "LangeVC/ops-engine"),
+        ("elementeer/elementeer-mcp", elementeer, "github.com/elementeer/elementeer-mcp"),
+        ("skillweave/skillweave", skillweave, "github.com/typelicious/SkillWeave"),
+        ("capacium/capacium", capacium, None),
+        ("fusionaize/fusionaize-sdk", fusionaize, None),
+    ]
+
+
+def test_resolve_destinations_returns_list_for_all_five_layovers():
+    for repo, config, expected_repo in _five_layover_configs():
+        resolved = resolve_destinations(config, repo)
+        if expected_repo is None:
+            assert resolved == [], f"{repo}: expected deliberate unmirrored case"
+        else:
+            assert [d.repo for d in resolved] == [expected_repo], (
+                f"{repo}: expected destination {expected_repo}"
+            )
+
+
+def test_resolve_destinations_returns_destination_objects():
+    config = _five_layover_configs()[0][1]
+    resolved = resolve_destinations(config, "langevc/ops-engine")
+    assert len(resolved) == 1
+    dest = resolved[0]
+    assert dest.forge == "github"
+    assert dest.repo == "LangeVC/ops-engine"
+    assert dest.role == "mirror"
+    assert dest.visibility == "public"
+
+
+def test_resolve_destinations_rejects_non_org_repo_selector():
+    config = _five_layover_configs()[0][1]
+    with pytest.raises(ValueError):
+        resolve_destinations(config, "no-slash")
+
+
+def test_resolve_destinations_holds_no_network_and_no_orgs(monkeypatch):
+    # The resolver must not import a forge adapter nor make network calls
+    # legitimately. This test asserts the function needs nothing but the
+    # supplied config object and the repo selector: an org-to-config registry is
+    # never touched because the config object was handed in by the caller.
+    config = _five_layover_configs()[0][1]
+    resolved = resolve_destinations(config, "langevc/ops-engine")
+    assert [d.repo for d in resolved] == ["LangeVC/ops-engine"]

@@ -92,7 +92,11 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, Sequence
 
 from ops_engine.adapters.base import ForgeAdapter
-from ops_engine.config_loader import MirrorConfig
+from ops_engine.config_loader import (
+    Destination,
+    MirrorConfig,
+    OpsEngineConfig,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +203,81 @@ class MirrorDestinationResolution:
 
     destination: str
     source: str
+
+
+def resolve_destinations(
+    config: OpsEngineConfig,
+    repo: str,
+    *,
+    repo_dir: Optional[str] = None,
+) -> list[Destination]:
+    """Resolve a repository's destinations into a :class:`Destination` list.
+
+    This is the Layer-1 entry point DST-003 introduces: a pure resolver that
+    knows no organisations and makes no network calls. ``config`` is a typed
+    :class:`OpsEngineConfig` (Layer 2, already loaded), and ``repo`` is the
+    ``org/repo`` selector of the single repository whose destinations are
+    wanted. The org set and the config object arrive at the call site; this
+    function walks nothing and holds no org-to-config mapping.
+
+    The resolve order is exactly the precedence DST-002 defined, delegated to
+    the config layer wherever possible so the precedence is implemented once:
+
+    1. The ``org`` and ``repo name`` are split from the ``org/repo`` selector
+       verbatim (case-sensitive, ``/`` split once).
+    2. ``config.get_repo_config(org, repo)`` resolves the Layer-2 ``RepoConfig``
+       (org defaults + repo specifics, the same typed resolution every consumer
+       uses). This is the ONLY knowledge of the config's inner structure this
+       function holds, and it comes from the already-loaded config object — no
+       file is read, no directory walked.
+    3. An optional Layer-3 ``.ops.yaml`` (``load_ops_yaml(repo_dir)``) is merged
+       over the Layer-2 config via ``merge_layer3``. ``repo_dir`` is the
+       repository's root directory on disk, supplied by the caller; when omitted,
+       no Layer-3 file is consulted and the Layer-2 destination is used unchanged
+       (an absent `.ops.yaml` is the normal case).
+    4. ``RepoConfig.resolve_destinations()`` folds the destination list together
+       with the deprecated mirror aliases into the final list.
+
+    The returned list is the resolved :class:`Destination` objects. A destination
+    whose forge declares an owner form still obeys the v3.1.0 double match: see
+    :meth:`MirrorHandler.resolve_destination`, which is the forge-neutral resolver
+    whose case-sensitive double match (config path and deprecated variable path)
+    is unchanged — it simply takes its inputs from whatever supplies them.
+
+    This function performs no network call and imports no forge adapter. Its
+    only inputs are the caller-supplied ``config`` object, the ``repo`` selector,
+    and the optional Layer-3 directory the caller names; nothing is fetched,
+    resolved, or discovered.
+
+    Raises:
+        TypeError: ``config`` is not an :class:`OpsEngineConfig`.
+        ValueError: ``repo`` is not an ``org/repo`` form.
+        ConfigSectionError: the org or repo section is absent or malformed.
+        OpsYamlError: a supplied Layer-3 ``.ops.yaml`` is malformed.
+    """
+    from ops_engine.config_loader import load_ops_yaml
+
+    if not isinstance(config, OpsEngineConfig):
+        raise TypeError(
+            "resolve_destinations expects an OpsEngineConfig, got "
+            f"{type(config).__name__}"
+        )
+
+    org, sep, repo_name = repo.partition("/")
+    if not sep or not org or not repo_name:
+        raise ValueError(
+            f"cannot resolve destinations: repo '{repo}' is not an "
+            f"'org/repo' form"
+        )
+
+    layer2 = config.get_repo_config(org, repo_name)
+
+    if repo_dir is not None:
+        layer3 = load_ops_yaml(repo_dir)
+        if layer3 is not None:
+            layer2 = layer2.merge_layer3(layer3)
+
+    return layer2.resolve_destinations()
 
 
 class DefaultBranchBlockedError(RuntimeError):
