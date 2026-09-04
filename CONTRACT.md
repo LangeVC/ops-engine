@@ -350,14 +350,16 @@ verbatim, case-sensitively, before any network call.
 
 `MIRROR_OWNER_VARIABLE` and `MIRROR_REPO_VARIABLE` live in the unpromised
 submodule `ops_engine.modules.mirror`. They hold the strings `GH_REPO_OWNER` and
-`GH_REPO` — the *single declaration* of the variable names — and
-`scripts/mirror-destination-audit.py` imports them rather than restating the
-strings (restatement is how the contract drifted). They are
+`GH_REPO`, the single declaration of the variable names. As of DST-004 no
+operator tool imports them: `scripts/mirror-destination-audit.py` and
+`scripts/mirror-destination-propose.py` take their org set as repeated `--config`
+paths and resolve each repository's mirror destination from the config layer via
+`resolve_destinations`, so the audit no longer restates the strings. They are
 **unpromised-but-internally-consumed**: they are not part of the public surface
 this contract guarantees, and a consumer outside this repository must not rely
 on them. Where the public methods above name a variable in their error text,
-that text is the human-facing contract; the constants are an implementation
-detail that the in-repo audit consumes so the strings stay declared once.
+that text is the human-facing contract; the constants are the implementation
+detail that keeps those method refusal messages truthful.
 
 **Deprecated in 3.2.0, removed in 4.0.0 (DEC-003).** The two-variable path these
 constants name is replaced by the config path: the Layer-2 `MirrorConfig.github`
@@ -369,7 +371,7 @@ Forgejo Actions variable store:** `GH_REPO_OWNER` (ORG scope) and `GH_REPO`
 equivalent. A consumer that still resolves a destination through these variables
 therefore depends on a Forgejo Actions variable store; the config path carries
 no such dependency. The constants may change or move in a minor bump, and the
-audit (which imports them) moves with them; at 4.0.0 both are removed.
+public methods' error text moves with them; at 4.0.0 the constants are removed.
 
 ## Test enforcement
 

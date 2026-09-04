@@ -58,13 +58,24 @@ Layer 3: .ops.yaml (per-repo overrides — optional)
 
 `ops-engine` has **no dependency** on any specific CI system, AI tool, or orchestration framework. The interface is the webhook. A `git push --tags` produces the same result regardless of what triggered it.
 
-**Exception — mirror destination.** As of 3.2.0 the mirror destination is
-resolved from the config layer (`MirrorConfig.github`), so the mirror feature no
-longer requires any CI-specific mechanism on its primary path. A *deprecated
-override* remains until 4.0.0 (DEC-003): the two actions variables
-`GH_REPO_OWNER` / `GH_REPO` are Forgejo Actions variables, so a consumer that
-resolves a destination through that legacy path depends on a Forgejo Actions
-variable store. That exception is removed at 4.0.0.
+**Exception — mirror destination.** As of 3.2.0 (DST-001/002/003) the mirror
+destination is resolved from the config layer (`MirrorConfig.github` →
+`Destination`, `resolve_destinations`), so on its primary path the mirror
+feature requires no CI-specific mechanism. As of DST-004 the cross-org operator
+tools (`scripts/mirror-destination-audit.py`, `scripts/mirror-destination-
+propose.py`) take the org set as repeated `--config` paths and resolve each
+repository's destination from that config — no Forgejo Actions variable is read
+on their primary path, which removed the last in-repo consumer of the two
+variable constants.
+
+The remaining, named exception is the deprecated **override** that a consumer of
+the library can still trigger, plus the live `.forgejo/workflows/mirror.yml`
+files, which still read `vars.*`: the two Actions variables `GH_REPO_OWNER` /
+`GH_REPO` are Forgejo Actions variables, so a consumer that resolves a
+destination through that legacy path depends on a Forgejo Actions variable
+store. Both are Forgejo-Actions-specific and are removed — the override at
+4.0.0 (DEC-003), the workflow reads by migrating onto the config destination —
+which returns the sentence fully true.
 
 ---
 
