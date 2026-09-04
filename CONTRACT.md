@@ -269,6 +269,44 @@ instance method on `RepoConfig`; it is not a network call and holds no
 organisation knowledge, deferring to DST-003's forge-neutral `resolve_destinations`
 entry point for the pure resolver.
 
+## Layer 3 — `.ops.yaml` (DST-002)
+
+Layer 3 is a per-repository override file named `.ops.yaml`, living at the
+repository root. It carries a `RepoConfig`-shaped mapping — the same shape as
+one `repositories.<repo>` entry of the Layer-2 org `config.yml`.
+
+`load_ops_yaml(repo_dir)` reads it. The loader and `OpsYamlError` live in the
+unpromised submodule `ops_engine.config_loader`; neither is added to the public
+surface above, so neither is a `contract` name in the machine-readable
+declaration.
+
+**Precedence — Layer 3 overrides Layer 2, field by field.** For each top-level
+`RepoConfig` field the `.ops.yaml` explicitly sets, the Layer-3 value wins; a
+field it leaves unset keeps the Layer-2 value.
+
+**A Layer-3 list REPLACES the Layer-2 list, never extends it.** This is true
+for `destinations`, `workflow_dispatches` and `dependency_triggers`. The reason
+is that a list field is a source of truth for a *set* the repo has, not an
+accumulator: extension would make the resolved set the union of two files, which
+a reader cannot compute without holding both files in hand, and would silently
+carry a Layer-2 destination the repo author believed they had overridden away.
+Replacement keeps every field equal to exactly what its most-local declaration
+stated. This decision is sealed by
+`tests/test_layer3_overrides.py::test_layer3_list_replaces_layer2`, which fails
+if the replace-vs-extend behaviour changes.
+
+**An absent `.ops.yaml` is the normal case.** `load_ops_yaml` returns `None`;
+the caller keeps the Layer-2 config unchanged. Most repositories carry no
+Layer-3 file.
+
+**A malformed `.ops.yaml` is a named refusal, never a silent fallback.**
+`load_ops_yaml` raises `OpsYamlError` naming the exact file. A silent fallback
+to Layer 2 is forbidden because an author who wrote a broken override must be
+told, not left believing the override is in force.
+
+`RepoConfig.merge_layer3(layer3)` applies a loaded Layer-3 `RepoConfig` over a
+Layer-2 one, implementing the precedence above.
+
 ## Variable-name constants — deprecated
 
 `MIRROR_OWNER_VARIABLE` and `MIRROR_REPO_VARIABLE` live in the unpromised
