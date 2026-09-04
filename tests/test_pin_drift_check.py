@@ -95,10 +95,21 @@ def test_parse_layovers_reads_declaration():
 
 def test_parse_contract_reads_names():
     text = (REPO / "CONTRACT.md").read_text(encoding="utf-8")
-    names = mod.parse_contract_names(text)
-    assert len(names) == 34
-    assert "MigrationRunner" in names
-    assert "QueueManager" in names
+    contract_names = mod.parse_contract_names(text)
+    source_names = mod.parse_all_from_source(
+        (REPO / "src" / "ops_engine" / "__init__.py").read_text(encoding="utf-8")
+    )
+    # The contract's size is not a property to pin — a contract legitimately
+    # grows. Pinning the count teaches the next author to bump a literal each
+    # time. The real invariant is that the decoded exports and the code's
+    # __all__ agree, so the parsed list is derived from the contract body and
+    # cross-checked against the source that must mirror it, never from a count.
+    assert set(contract_names) == source_names
+    assert "MigrationRunner" in contract_names
+    assert "QueueManager" in contract_names
+    # Non-trivial so an empty/truncated decode cannot silently pass.
+    assert len(contract_names) > 5
+    assert len(contract_names) == len(set(contract_names))
 
 
 def test_build_timeline_from_tagged_names():
