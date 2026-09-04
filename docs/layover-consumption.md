@@ -1,6 +1,6 @@
 # Layover Consumption Declaration
 
-Each org layover consumes `ops-engine`. A version pin (`@v2.0.0`) is not
+Each org layover consumes `ops-engine`. A version pin (`@v3.0.0`) is not
 checkable on its own: it does not say *what* the layover uses. This document
 declares, per layover, the **contract names** it consumes — resolution of the
 names listed in `CONTRACT.md` — placed next to the pin that the layover holds
@@ -25,7 +25,7 @@ layover entry carries its own `pin` (the version it resolves in
   "layovers": [
     {
       "name": "lvc-ops",
-      "pin": "2.2.0",
+      "pin": "3.0.0",
       "extra": null,
       "consumes": [
         "OpsEngineConfig",
@@ -43,7 +43,7 @@ layover entry carries its own `pin` (the version it resolves in
     },
     {
       "name": "capacium-ops",
-      "pin": "2.2.0",
+      "pin": "3.0.0",
       "extra": "postgres",
       "consumes": [
         "OpsEngineConfig",
@@ -64,7 +64,7 @@ layover entry carries its own `pin` (the version it resolves in
     },
     {
       "name": "elementeer-ops",
-      "pin": "2.2.0",
+      "pin": "3.0.0",
       "extra": null,
       "consumes": [
         "OpsEngineConfig",
@@ -82,7 +82,7 @@ layover entry carries its own `pin` (the version it resolves in
     },
     {
       "name": "fusionaize-ops",
-      "pin": "2.2.0",
+      "pin": "3.0.0",
       "extra": null,
       "consumes": [
         "OpsEngineConfig",
@@ -100,7 +100,7 @@ layover entry carries its own `pin` (the version it resolves in
     },
     {
       "name": "skillweave-ops",
-      "pin": "2.2.0",
+      "pin": "3.0.0",
       "extra": null,
       "consumes": [
         "OpsEngineConfig",
@@ -130,3 +130,7 @@ layover entry carries its own `pin` (the version it resolves in
   do.
 - Pins measured from each layover's `pyproject.toml` dependency line on
   2026-08-23.
+- Re-measured on 2026-09-04: all five layovers now resolve `ops-engine` at
+  `@v3.0.0`; the declaration previously carried the stale `2.2.0` (CFG-005). The
+  pins in this document are the values read from each layover's own
+  `pyproject.toml`, cross-checked by `tests/test_pin_drift_check.py`.
