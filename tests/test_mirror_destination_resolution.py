@@ -13,6 +13,7 @@ proofs are additionally proven against the real forges in the verdict.
 
 import pytest
 
+from ops_engine.config_loader import MirrorConfig
 from ops_engine.modules.mirror import (
     MIRROR_OWNER_VARIABLE,
     MIRROR_REPO_VARIABLE,
@@ -130,6 +131,73 @@ def test_many_to_one_owner_does_not_identify_canonical_org():
             gh_repo_owner="LangeVC", gh_repo=repo
         )
         assert resolved.destination == repo
+
+
+def test_resolves_destination_from_config_alone():
+    resolved = MirrorHandler.resolve_destination(
+        config=MirrorConfig(github="LangeVC/ops-engine")
+    )
+    assert resolved == MirrorDestinationResolution(
+        destination="LangeVC/ops-engine", source="config"
+    )
+
+
+def test_config_destination_used_verbatim_case_sensitive():
+    # The awkward operator corpus must resolve verbatim from config, never
+    # re-cased, exactly like the variable path's double-match guard demands.
+    for github in (
+        "elementeer/elementeer",
+        "fusionAIze/fusionAIze",
+        "Veeona-AI/veeona",
+    ):
+        resolved = MirrorHandler.resolve_destination(
+            config=MirrorConfig(github=github)
+        )
+        assert resolved.destination == github
+        assert resolved.source == "config"
+
+
+def test_config_wins_over_variables_when_both_supplied():
+    # Precedence: the config is primary and the variables are a deprecated
+    # override. A stale variable must not silently override a correct config.
+    resolved = MirrorHandler.resolve_destination(
+        config=MirrorConfig(github="LangeVC/ops-engine"),
+        gh_repo_owner="SomebodyElse",
+        gh_repo="SomebodyElse/ops-engine",
+    )
+    assert resolved.destination == "LangeVC/ops-engine"
+    assert resolved.source == "config"
+
+
+def test_variables_are_deprecated_override_when_config_empty():
+    # When the config carries no destination, the variable path is consulted.
+    resolved = MirrorHandler.resolve_destination(
+        config=MirrorConfig(github=""),
+        gh_repo_owner="Capacium",
+        gh_repo="Capacium/capacium",
+    )
+    assert resolved == MirrorDestinationResolution(
+        destination="Capacium/capacium", source="double match"
+    )
+
+
+def test_config_malformed_destination_refuses_before_network():
+    # A config.github that is not owner/name refuses — before any network call —
+    # naming the config field, not a variable.
+    with pytest.raises(MirrorDestinationError) as exc:
+        MirrorHandler.resolve_destination(config=MirrorConfig(github="no-slash"))
+    message = str(exc.value)
+    assert "mirror.github" in message
+    assert "owner/name" in message
+
+
+def test_no_config_and_no_variables_refuses_naming_variable():
+    # Neither source supplied: the refusal names the ORG-scope variable first,
+    # exactly as the variable path's check order requires.
+    with pytest.raises(MirrorDestinationError) as exc:
+        MirrorHandler.resolve_destination(config=MirrorConfig(github=""))
+    message = str(exc.value)
+    assert MIRROR_OWNER_VARIABLE in message
 
 
 @pytest.mark.asyncio

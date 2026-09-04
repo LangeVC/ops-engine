@@ -88,7 +88,7 @@ promised. Other methods on public classes are not signature-guarded here.
       "kind": "staticmethod",
       "args": [],
       "required_args": [],
-      "kwargs": ["gh_repo_owner", "gh_repo"],
+      "kwargs": ["config", "gh_repo_owner", "gh_repo"],
       "required_kwargs": []
     },
     {
@@ -160,7 +160,24 @@ methods on an existing public class, so they do not change the exports table
 above; a consumer that pins the current version is unaffected until it chooses
 to call them.
 
-The mirror destination is resolved from **two** Actions variables — the two
+The mirror destination is resolved from **two** sources in a fixed precedence,
+listed first to last:
+
+1. **Config (primary).** `MirrorConfig.github` (declared by CFG-001) is the
+   Layer-2 destination — a single `owner/name` string written by the layover
+   config. When non-empty it resolves the destination verbatim; its owner is
+   its own prefix. On success `source` is `"config"`.
+2. **Variables (deprecated override).** The two Actions variables below are
+   consulted only when the config carried no destination. On success `source`
+   is `"double match"`.
+
+**Precedence: the config wins.** When both a non-empty `config.github` and the
+variables are supplied, `config.github` is used. The variables are deprecated
+(removed in 4.0.0, DEC-003), and a stale variable must not silently override a
+correct config — otherwise the mapping would still live in the variable store
+this feature exists to retire.
+
+The deprecated variable path resolves from **two** Actions variables — the two
 halves of one contract, not two sources of one value:
 
 - `GH_REPO_OWNER` — **ORG scope**, the GitHub owner that owns the mirror
@@ -168,17 +185,21 @@ halves of one contract, not two sources of one value:
 - `GH_REPO` — **REPO scope**, the full `owner/repo` destination
   (e.g. `Capacium/capacium`).
 
-**Both are required.** There is no precedence between them and no fallback: an
-unset variable is a hard refusal, never a computed candidate.
+**Both are required** on the variable path. There is no precedence between them
+and no fallback: an unset variable is a hard refusal, never a computed
+candidate.
 
-- `MirrorHandler.resolve_destination(*, gh_repo_owner, gh_repo)` maps the two
-  variables to their contract halves and returns a
-  `MirrorDestinationResolution` (`destination`, `source`). It refuses — before
-  any network call — in this order: `gh_repo_owner` unset (naming the ORG-scope
-  variable), `gh_repo` unset (naming the REPO-scope variable), then a
-  **case-sensitive double match**: `gh_repo`'s owner prefix must equal
-  `gh_repo_owner` exactly (no lower/title/slug; owner and destination are used
-  verbatim, whitespace-stripped only). On success `source` is `"double match"`.
+- `MirrorHandler.resolve_destination(*, config, gh_repo_owner, gh_repo)`
+  resolves the destination. It refuses — before any network call — in this
+  order: the config path is tried first (`config.github` non-empty), then the
+  variable path: `gh_repo_owner` unset (naming the ORG-scope variable),
+  `gh_repo` unset (naming the REPO-scope variable), then a **case-sensitive
+  double match**: `gh_repo`'s owner prefix must equal `gh_repo_owner` exactly
+  (no lower/title/slug; owner and destination are used verbatim,
+  whitespace-stripped only). The config destination is likewise used verbatim
+  and case-sensitively — the awkward corpus (`elementeer`, `fusionAIze`,
+  `Veeona-AI`) resolves exactly, never re-cased. On success `source` is
+  `"config"` (config path) or `"double match"` (variable path).
 
 - `MirrorHandler.prove_destination(destination, *, token, api_base)` proves the
   destination with two independent proofs before any push: **EXISTS**
