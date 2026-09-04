@@ -55,13 +55,41 @@ them emits a DeprecationWarning for; they are served through module
 ``__getattr__`` so a consumer that trips either name is told the config-layer
 replacement. The strings stay declared once so the module's own refusal text and
 legacy consumers do not restate them.
+
+OME-008 visibility classification (additive on ``MirrorHandler``):
+
+Visibility is a question about what a ref's tree CARRIES, not what a push diff
+touched. ``classify_visibility`` classifies one file by CONTENT into ``product``
+or ``substrate``; ``substrate_files`` classifies a ref's full inventory and
+returns every substrate path. A planning-class file whose prose survives is
+substrate (never mirrored to a public destination); a schema, template,
+synthetic sample, or a file redacted to the neutral placeholder is product.
+
+OME-009 default-branch blocker (additive on ``MirrorHandler``):
+
+A refusal of the DEFAULT branch is a release blocker, and ``gate_ref`` says so
+instead of reporting a dropped ref that only surfaces two steps later as a
+different forge's hard-gate failure. ``Refusal.is_default`` distinguishes the
+two cases; ``refuse`` raises ``DefaultBranchBlockedError`` on the default-branch
+case. Nothing retries and nothing overrides a refusal — break-glass remains a
+deliberate operator action, never an automatic push of a ref the gate refused.
+
+OME-010 one rule, both paths (additive on ``MirrorHandler`` / ``Refusal``):
+
+A mirror ref receives the SAME verdict whether it reached the gate from a push
+EVENT or from a FULL-STATE sweep: one classification — ``classify_visibility``
+over the ref's carried tree — reached only through ``gate_ref``. The break-glass
+exact-ref push is OUT of the automatic gate but still judged via
+``MirrorHandler.release_override``, which requires a reason and is never applied
+by ``refuse`` (an operator-marked default-branch refusal still raises).
 """
 
 import asyncio
+import fnmatch
 import logging
 import warnings
-from dataclasses import dataclass
-from typing import Any, Optional
+from dataclasses import dataclass, field
+from typing import Any, Callable, Optional, Sequence
 
 from ops_engine.adapters.base import ForgeAdapter
 from ops_engine.config_loader import MirrorConfig
@@ -99,6 +127,54 @@ def __getattr__(name: str) -> str:
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
+# The path classes that may carry planning substrate. These are a CANDIDATE
+# filter, not the decision: a file is only inspected for substrate content when
+# its path falls into one of these classes. The decision itself is content-based
+# (see :meth:`MirrorHandler.classify_visibility`). The arms mirror the deployed
+# gate's BLOCKED_PATHS so a layover can feed the same candidate set, but here
+# they only narrow *where* content is measured — never the verdict.
+_VISIBILITY_CANDIDATE_GLOBS: tuple[str, ...] = (
+    ".skillweave/**",
+    "strategy.md",
+    "**/strategy.md",
+    "prd*.md",
+    "**/prd*.md",
+    "prd*.json",
+    "**/prd*.json",
+    "*.contract*",
+    "**/*.contract*",
+    "*contract*.md",
+    "**/*contract*.md",
+    "*proposal*.md",
+    "**/*proposal*.md",
+    "*.proposal*",
+    "**/*.proposal*",
+)
+
+
+@dataclass(frozen=True)
+class VisibilityConfig:
+    """Visibility classification thresholds for mirror push gating (OME-008).
+
+    Carries the neutral-placeholder and secret-redaction markers a redacted file
+    carries in place of real planning prose. A file whose non-structure content
+    collapses to these markers (or the literal secret-redaction token) carries no
+    IP and classifies as ``product``.
+
+    NOTE (CFG-006): OME-008 originally declared this model as
+    ``MirrorConfig.visibility`` in config_loader.py. CFG-001 subsequently claimed
+    the ``visibility`` field on ``MirrorConfig`` for the mirror destination's
+    ``public``/``private`` string. The two accepted behaviours share one field
+    name and cannot coexist; the classification config therefore lives here, on
+    the module, rather than on the config surface. See the CFG-006 verdict for the
+    recorded collision.
+    """
+
+    enabled: bool = field(default=False)
+    neutral_placeholder: str = field(default="Neutral placeholder wording")
+    secret_redaction_token: str = field(default="***REDACTED***")
+
+
 class MirrorDestinationError(RuntimeError):
     """The mirror destination could not be resolved or proven.
 
@@ -123,6 +199,90 @@ class MirrorDestinationResolution:
 
     destination: str
     source: str
+
+
+class DefaultBranchBlockedError(RuntimeError):
+    """The mirror's DEFAULT branch was refused and is now a release blocker.
+
+    Carries the full ``Refusal.message``, which names both the paths
+    responsible (the substrate that cannot be mirrored) AND the consequence:
+    the mirror's default branch is now behind, and every release depending on
+    it will be rejected on another forge. This is an alarm, not a log line —
+    the fail-visible distinction between "the gate works" (a feature branch
+    refused) and "every downstream release is stranded" (the default refused).
+    """
+
+
+@dataclass(frozen=True)
+class VisibilityDecision:
+    """The outcome of classifying one file's visibility (OME-008).
+
+    ``kind`` is ``"product"`` or ``"substrate"``. ``reason`` names the content
+    signal that produced the decision, so a blocked push can be audited:
+    ``"schema"``, ``"redacted"``, ``"template"``, ``"synthetic"``,
+    ``"planning prose"``, or ``"not a planning class"``.
+    """
+
+    path: str
+    kind: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class Refusal:
+    """A ref the visibility gate refuses (OME-009).
+
+    ``is_default`` marks the distinction this lane exists for:
+
+    * ``is_default=True``  — a RELEASE BLOCKER. The mirror's default branch is
+      now behind, and every release depending on it will be rejected on another
+      forge. This must be raised (``DefaultBranchBlockedError``), not logged.
+    * ``is_default=False`` — the gate working as intended: substrate on a
+      feature/topic branch is refused and nothing downstream is stranded.
+
+    ``substrate`` is the tuple of refused paths, in the ref's tree order.
+
+    ``override_reason`` is empty unless an OPERATOR has attested a break-glass
+    re-push of this exact ref via :meth:`MirrorHandler.release_override` (OME-010).
+    The automatic gate never sets it and never consults it: ``refuse`` raises on a
+    default-branch refusal identically whether or not the reason is present. It
+    exists only so the single rule the event and full-state paths share can also
+    record, in one place, that a human stepped OUT of the automatic gate for one
+    explicitly-named ref.
+    """
+
+    ref: str
+    is_default: bool
+    substrate: tuple[str, ...]
+    override_reason: Optional[str] = None
+
+    @property
+    def is_release_blocker(self) -> bool:
+        return self.is_default
+
+    @property
+    def message(self) -> str:
+        """A human-readable refusal, distinct for the two cases.
+
+        The default-branch form names BOTH the responsible paths and the
+        consequence; the non-default form stays the terse "refused here" the
+        gate already produced.
+        """
+        paths = "\n".join(f"  - {p}" for p in self.substrate)
+        if self.is_default:
+            return (
+                f"HARD GATE: refusing mirror of default branch '{self.ref}' — "
+                f"this is a RELEASE BLOCKER.\n"
+                f"The mirror's default branch is now BEHIND, and every release "
+                f"depending on it will be rejected on another forge.\n"
+                f"Responsible paths (substrate that cannot be mirrored):\n{paths}\n"
+                f"Break-glass is a deliberate operator action; nothing here "
+                f"retries or overrides this refusal."
+            )
+        return (
+            f"mirror gate refuses non-default branch '{self.ref}' "
+            f"(the gate working as intended):\n{paths}"
+        )
 
 
 class MirrorHandler:
@@ -340,6 +500,252 @@ class MirrorHandler:
                 f"REPOSITORY-level Actions variable {_MIRROR_REPO_VARIABLE} "
                 f"to a repository this token may write to."
             )
+
+    @staticmethod
+    def classify_visibility(
+        path: str,
+        *,
+        content: Optional[str] = None,
+        config: Optional[VisibilityConfig] = None,
+    ) -> VisibilityDecision:
+        """Classify one file as ``product`` or ``substrate`` by content (OME-008).
+
+        Visibility is a question about what a ref's tree CARRIES, not what a
+        push diff touched. A file is inspected only when its path falls into a
+        planning class (see ``_VISIBILITY_CANDIDATE_GLOBS``); the verdict within
+        that class is content, not name:
+
+        * a JSON schema (``$schema`` + object/properties) is ``product`` — a
+          shipped schema must never block;
+        * a redacted file (its prose replaced by the neutral placeholder, or by
+          the secret-redaction token) is ``product`` — it carries structure, not
+          intellectual property;
+        * a template or synthetic sample is ``product``;
+        * otherwise, a planning-class file whose prose survives is ``substrate``.
+
+        ``content`` is the file's full text. When ``content`` is omitted the
+        caller must supply it (a path alone cannot be classified); classification
+        without content is refused rather than guessed from the name.
+        """
+        if content is None:
+            raise MirrorDestinationError(
+                f"cannot classify visibility of '{path}': content is required. "
+                "A name is not intellectual property; only the text can decide "
+                "whether a planning-class file carries substrate."
+            )
+
+        cfg = config or VisibilityConfig()
+
+        if not MirrorHandler._matches_candidate(path):
+            return VisibilityDecision(path=path, kind="product", reason="not a planning class")
+
+        if MirrorHandler._is_json_schema(content):
+            return VisibilityDecision(path=path, kind="product", reason="schema")
+
+        if MirrorHandler._is_template(content):
+            return VisibilityDecision(path=path, kind="product", reason="template")
+
+        if MirrorHandler._is_synthetic(path, content):
+            return VisibilityDecision(path=path, kind="product", reason="synthetic")
+
+        if MirrorHandler._is_redacted(cfg, content):
+            return VisibilityDecision(path=path, kind="product", reason="redacted")
+
+        return VisibilityDecision(path=path, kind="substrate", reason="planning prose")
+
+    @staticmethod
+    def substrate_files(
+        paths: Sequence[str],
+        *,
+        read: Callable[[str], Optional[str]],
+        config: Optional[VisibilityConfig] = None,
+    ) -> list[VisibilityDecision]:
+        """Classify a ref's full tree and return every substrate file.
+
+        This is the state judgement: the caller supplies the ref's complete
+        file inventory (``git ls-tree -r`` on the ref) plus a ``read`` callback
+        that yields each file's content at that ref (``git show <ref>:<path>``).
+        Files outside a planning class are product and never inspected; every
+        planning-class file is classified by content and the substrate ones are
+        returned, so a ref whose tree carries planning material is refused even
+        when a push diff touched none of it.
+        """
+        decisions: list[VisibilityDecision] = []
+        for path in paths:
+            decision = MirrorHandler.classify_visibility(
+                path, content=read(path), config=config
+            )
+            if decision.kind == "substrate":
+                decisions.append(decision)
+        return decisions
+
+    @staticmethod
+    def gate_ref(
+        ref: str,
+        *,
+        default_branch: str = "main",
+        paths: Sequence[str],
+        read: Callable[[str], Optional[str]],
+        config: Optional[VisibilityConfig] = None,
+    ) -> Optional["Refusal"]:
+        """Refuse a ref whose tree carries substrate (OME-009; the ONE rule both
+        paths share, OME-010).
+
+        This is the single function a mirror gate feeds a candidate ref through,
+        however the ref arrived: a push EVENT just advanced it, or a FULL-STATE
+        sweep is re-judging every ref before a bulk sync. It classifies the ref's
+        FULL carried tree (``substrate_files`` → ``classify_visibility``) — the
+        same content rule exists once and is reached only here. Feeding a diff
+        instead of the carried tree is the OME-010 incident and is outside this
+        contract. Returns ``None`` when the ref is clean, or a ``Refusal`` naming
+        every refused path. ``is_default`` records whether ``ref`` equals
+        ``default_branch`` — the distinction between a refused feature branch
+        (the gate working) and a refused default branch (a release blocker).
+
+        This method CLASSIFIES and RETURNS; it does not raise and does not push.
+        It never overrides a refusal: the only output is a value the caller
+        inspects, and the only "action" any code here can take downstream is to
+        raise ``DefaultBranchBlockedError`` via :meth:`refuse`. The break-glass
+        exact-ref push is OUT of this automatic gate by design: the one sanctioned
+        way to step past a refusal is an operator's :meth:`release_override`,
+        which records a reason and is never applied by the gate itself. There is
+        no code path that pushes a refused ref.
+        """
+        substrate = MirrorHandler.substrate_files(paths, read=read, config=config)
+        if not substrate:
+            return None
+        return Refusal(
+            ref=ref,
+            is_default=(ref == default_branch),
+            substrate=tuple(d.path for d in substrate),
+        )
+
+    @staticmethod
+    def refuse(refusal: Optional["Refusal"]) -> None:
+        """Convert a default-branch refusal into visible failure (OME-009).
+
+        The fail-visible step: a ``None`` (clean ref) or a non-default
+        ``Refusal`` returns silently so the gate keeps its current behaviour —
+        a refused feature branch is logged, not an alarm. A default-branch
+        ``Refusal`` raises ``DefaultBranchBlockedError`` whose message names
+        the responsible paths AND the consequence. This is the ONLY action this
+        lane introduces, and it cannot push any ref: it either returns or
+        raises, never writes to a forge.
+
+        ``refuse`` deliberately NEVER consults ``override_reason``: an
+        operator-marked ``Refusal`` (OME-010 :meth:`release_override`) raises no
+        differently here, which is the invariant that keeps the break-glass OUT
+        of the automatic gate. A human acts on an ``override_reason`` in the
+        consuming workflow, where the single exact ref is pushed by name; nothing
+        in this module ever auto-pushes it.
+        """
+        if refusal is not None and refusal.is_default:
+            raise DefaultBranchBlockedError(refusal.message)
+
+    @staticmethod
+    def release_override(refusal: "Refusal", *, reason: str) -> "Refusal":
+        """Mark a refusal as an operator-attested break-glass re-push (OME-010).
+
+        The break-glass exact-ref push is OUT of the automatic gate, so this is
+        the ONE sanctioned way a refusal may carry an operator override. It
+        requires a non-empty ``reason`` (a gate with no way out gets bypassed,
+        which is worse than no gate) and returns a NEW ``Refusal`` — the original
+        frozen value is unchanged — whose ``override_reason`` records the reason.
+
+        This is an ATTESTATION OF INTENT ONLY, not an authorisation to push from
+        this module: ``refuse()`` ignores ``override_reason``, so a marked
+        default-branch refusal still raises. The automatic event and full-state
+        paths never call this; only a human action on a single exact ref does
+        (the workflow ``release_override`` path on one ref per dispatch). A bulk
+        full-state sweep stays un-overridable per ref.
+
+        Raises:
+            ValueError: ``reason`` is empty or whitespace-only.
+        """
+        reason = reason.strip()
+        if not reason:
+            raise ValueError(
+                "release_override requires a non-empty reason: a break-glass "
+                "re-push without a recorded reason is indistinguishable from "
+                "the leak it exists to escape."
+            )
+        return Refusal(
+            ref=refusal.ref,
+            is_default=refusal.is_default,
+            substrate=refusal.substrate,
+            override_reason=reason,
+        )
+
+    @staticmethod
+    def _matches_candidate(path: str) -> bool:
+        """True when ``path`` falls into a planning class (candidate, not verdict)."""
+        return any(fnmatch.fnmatch(path, g) for g in _VISIBILITY_CANDIDATE_GLOBS)
+
+    @staticmethod
+    def _is_json_schema(content: str) -> bool:
+        """A JSON-schema-shaped document (``$schema`` + object properties), not a
+        PRD instance. The shipped ``prd.schema.json`` is this shape and must
+        never block."""
+        return (
+            '"$schema"' in content
+            and '"type": "object"' in content
+            and '"properties"' in content
+        )
+
+    @staticmethod
+    def _is_template(content: str) -> bool:
+        """A template teaches structure; it carries section guidance, not a real
+        plan. Detected by structural-guidance markers, not the word 'template'."""
+        markers = (
+            "## Document Structure",
+            "**Purpose:**",
+            "**Content:**",
+        )
+        return sum(1 for m in markers if m in content) >= 2
+
+    @staticmethod
+    def _is_synthetic(path: str, content: str) -> bool:
+        """A synthetic sample/example declares itself as one rather than naming a
+        real work item. Detected by an explicit self-describing marker — in the
+        content (``corrected —``, ``a prd in the format``, ``sample``,
+        ``example``, ``demo``) or, for a test fixture, in its own name
+        (``-sample``, ``-example``). A fixture whose path declares ``sample`` is
+        by definition a sample; it carries no planning IP. Never an inferred
+        'looks fake' heuristic."""
+        head = content[:4096].lower()
+        content_markers = (
+            "corrected —",
+            "a prd in the format",
+            "sample",
+            "example",
+            "demo",
+        )
+        if any(m in head for m in content_markers):
+            return True
+        lower_path = path.lower()
+        return "-sample" in lower_path or "-example" in lower_path or "sample." in lower_path
+
+    @staticmethod
+    def _is_redacted(config: VisibilityConfig, content: str) -> bool:
+        """True when the content carries the ecosystem's redaction marker.
+
+        A redacted file has had its prose values replaced by the neutral
+        placeholder (SW152-025) or its secrets replaced by the literal
+        redaction token. A key dictionary (``lane``, ``criteria``, ``sequence``,
+        ``points``) is not IP; the prose is, and a file whose prose is gone is
+        ``product`` — structure deliberately retained so it still validates the
+        shipped schema. The same path carrying the original prose (unredacted,
+        on a tag or non-default branch) is ``substrate``.
+        """
+        if config.neutral_placeholder:
+            marker = config.neutral_placeholder.strip()
+            if marker and marker in content:
+                return True
+        if config.secret_redaction_token:
+            token = config.secret_redaction_token.strip()
+            if token and token in content:
+                return True
+        return False
 
     @staticmethod
     async def _repo_exists(remote: str) -> bool:
