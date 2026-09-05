@@ -2,16 +2,19 @@
 
 The workflow `.forgejo/workflows/forgejo-release.yml` posts the `## X.Y.Z`
 section of CHANGELOG.md as the release body and refuses a tag whose version has
-no section. This test proves both halves against the real CHANGELOG.md and the
-real extractor the workflow invokes (`ChangelogParser`), so a test here is a
-test of the write the workflow performs, not of a copy.
+no section. This test proves the write the workflow performs against the real
+CHANGELOG.md and the real workflow.
 
-The workflow runs `python3` with `sys.path.insert(0, "src")` and calls
-`ChangelogParser.extract_version_notes`, the same call path this test exercises.
-Nothing here touches `src/` or `pyproject.toml`: the parser already exists and
-is imported, as the workflow does.
+The parser half of the semantics is exercised through `ChangelogParser`, the
+library implementation imported below. Since REL-006 the workflow itself no
+longer imports it: the notes step embeds a stdlib-only copy of the same slicing
+logic so the release runner needs neither `yaml` nor `pydantic`. The
+workflow-half tests therefore assert on the workflow's data flow (the notes
+step reads CHANGELOG.md and never `git log`), not on which function or module
+implements it — pinning an extractor name is what REL-007 removed.
 """
 
+import re
 from pathlib import Path
 
 import pytest
@@ -40,12 +43,43 @@ def version_map():
 # --- Criterion 1: the workflow posts the CHANGELOG section, not commit log ---
 
 
-def test_workflow_extracts_changelog_not_git_log():
-    """The release body source is CHANGELOG.md, not `git log`."""
-    assert "CHANGELOG.md" in WORKFLOW_CONTENT
-    assert "extract_version_notes" in WORKFLOW_CONTENT
-    # The previous implementation built notes from commit subjects.
-    assert "git log" not in WORKFLOW_CONTENT
+def _release_notes_step(workflow_content: str) -> str:
+    """The release-notes step block: from its `- name:` line to the next step.
+
+    Behavioural assertions are scoped to this block so an unrelated part of the
+    workflow (a changelog mention elsewhere, a later step that does run git)
+    can neither satisfy nor trip them.
+    """
+    start = workflow_content.index("- name: Extract release notes from CHANGELOG")
+    remainder = workflow_content[start:]
+    end = re.search(r"^      - name: ", remainder, re.MULTILINE)
+    return remainder[: end.start()] if end else remainder
+
+
+def test_workflow_builds_notes_from_changelog_not_git_log():
+    """The release body is the CHANGELOG section for the tag, never `git log`.
+
+    This asserts behaviour, not an identifier. The previous version pinned the
+    extractor's function name (`extract_version_notes`); REL-006 replaced that
+    extractor with a stdlib-only inline copy and the pin broke on a legitimate
+    refactor. What must survive any refactor is the data flow, and that is what
+    is asserted here:
+
+      * the release-notes step reads CHANGELOG.md — the only source a section
+        can be sliced from. Any implementation must name the file it opens, so
+        this holds across a rename of the extractor, an import-vs-inline
+        change, or a stdlib swap (the REL-006 refactor kept it true).
+      * the release-notes step never runs `git log` — building the body from
+        commit subjects is the failure this workflow exists to prevent, and no
+        notes-from-changelog implementation needs git.
+
+    Both assertions are scoped to the notes step (see `_release_notes_step`), so
+    the first cannot be satisfied and the second cannot be tripped by an
+    unrelated part of the workflow file.
+    """
+    step = _release_notes_step(WORKFLOW_CONTENT)
+    assert "CHANGELOG.md" in step
+    assert "git log" not in step
 
 
 def test_310_notes_are_the_changelog_body():
