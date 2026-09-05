@@ -25,6 +25,17 @@ name: Mirror to GitHub
 # release). A tag the canonical side refused (missing CHANGELOG entry or a
 # non-conforming title) has no Forgejo release, so this mirror finds nothing to copy
 # and refuses with a named error rather than fabricating a GitHub release on its own.
+#
+# REL-009 — ordering, not a hope. forgejo-release.yml, this mirror, and release-gate
+# all trigger on the SAME `push: tags` event and run concurrently; Forgejo Actions
+# does not order separate workflow files, so this mirror used to query for a release
+# the canonical side was still building and died with NoForgejoReleaseError (three
+# release attempts failed this way). The dependent read below does not fire blind:
+# it polls the canonical release + four assets under a HARD bound before it touches
+# the GitHub mirror. On expiry (the release still does not exist after the bound
+# elapses) the SAME named refusal fires — a real absence is never turned into a
+# silent success. The bound is enumerated in the step; the job-level
+# `timeout-minutes` is a second, independent ceiling so no wait is unbounded.
 on:
   push:
     branches: ["**"]
@@ -33,6 +44,7 @@ on:
 jobs:
   mirror:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: https://github.com/actions/checkout@v4
         with:
@@ -61,18 +73,45 @@ jobs:
           GH_API="https://api.github.com"
           GH_REPO="LangeVC/ops-engine"
 
-          # 1. Fetch the canonical Forgejo release. It exists only if the
-          #    canonical side accepted the tag (title gate passed, CHANGELOG
-          #    entry present). A missing release means the canonical side
-          #    refused — there is nothing to mirror, and we must not invent a
-          #    GitHub release for a tag the gate already rejected.
-          REL="$(curl -fsSL \
-            "${FORGEJO_API}/repos/${FORGEJO_REPO}/releases/tags/${TAG}" \
-            -H "Authorization: token ${GITHUB_TOKEN}")" || {
+          # 1. Wait for the canonical Forgejo release to become fully published,
+          #    under a HARD bound. forgejo-release.yml creates the release object
+          #    and uploads the four assets as later steps in the SAME job as the
+          #    build, so a mirror that fires on the same `push: tags` arrives while
+          #    the release is still being built. We poll for the release object
+          #    AND all four assets rather than assume the release exists yet.
+          #
+          #    Bound: ATTEMPTS x SLEEP, then a NAMED refusal — never a silent pass.
+          #    A release that genuinely never appears (the canonical side refused
+          #    the tag on title/CHANGELOG grounds) still fires NoForgejoReleaseError,
+          #    only after the bound instead of instantly.
+          RELEASE_WAIT_ATTEMPTS=40
+          RELEASE_WAIT_SLEEP=15
+          asset_count=0
+          attempt=1
+          REL=""
+          while [ "$attempt" -le "$RELEASE_WAIT_ATTEMPTS" ]; do
+            if REL="$(curl -fsSL \
+              "${FORGEJO_API}/repos/${FORGEJO_REPO}/releases/tags/${TAG}" \
+              -H "Authorization: token ${GITHUB_TOKEN}" 2>/dev/null)"; then
+              REL_ID_TMP="$(printf '%s' "$REL" | jq -r '.id' 2>/dev/null)"
+              ASSETS_TMP="$(curl -fsSL \
+                "${FORGEJO_API}/repos/${FORGEJO_REPO}/releases/${REL_ID_TMP}/assets" \
+                -H "Authorization: token ${GITHUB_TOKEN}" 2>/dev/null)" || ASSETS_TMP="[]"
+              asset_count="$(printf '%s' "$ASSETS_TMP" | jq 'length' 2>/dev/null)"
+              if [ "${asset_count:-0}" -ge 4 ]; then
+                break
+              fi
+            fi
+            echo "waiting for the canonical release ${TAG}: attempt ${attempt}/${RELEASE_WAIT_ATTEMPTS} (release assets present: ${asset_count:-0})"
+            attempt=$((attempt + 1))
+            sleep "$RELEASE_WAIT_SLEEP"
+          done
+
+          if [ "${asset_count:-0}" -lt 4 ]; then
             echo "::error::NoForgejoReleaseError: no canonical Forgejo release exists for tag ${TAG}." >&2
             echo "::error::The canonical side refused the tag (title gate or CHANGELOG gate); no GitHub release is created." >&2
             exit 1
-          }
+          fi
 
           REL_ID="$(printf '%s' "$REL" | jq -r '.id')"
           REL_NAME="$(printf '%s' "$REL" | jq -r '.name')"
