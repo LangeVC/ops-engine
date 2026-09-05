@@ -161,7 +161,11 @@ def test_two_builds_from_same_tree_are_byte_identical(tmp_path):
 def test_workflow_documents_one_command_sequence_for_four_assets():
     """The single build step names all four assets: wheel, sdist, SHA256SUMS,
     SBOM."""
-    assert "python3 -m build --sdist --wheel" in WORKFLOW_CONTENT
+    # REL-008 — the build runs inside the step's own venv, so the command is
+    # `python -m build`, not a bare `python3 -m build`. The assertion keeps the
+    # semantic: one `build --sdist --wheel` sequence produces both archives.
+    assert "-m build --sdist --wheel" in WORKFLOW_CONTENT
+    assert "python3 -m venv" in WORKFLOW_CONTENT
     assert "sha256sum" in WORKFLOW_CONTENT
     assert "SHA256SUMS" in WORKFLOW_CONTENT
     assert "sbom.cdx.json" in WORKFLOW_CONTENT

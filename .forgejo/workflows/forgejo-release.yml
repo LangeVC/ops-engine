@@ -140,10 +140,29 @@ jobs:
           set -euo pipefail
 
           export SOURCE_DATE_EPOCH=1700000000
-          python3 -m pip install --quiet "build" "hatchling==1.32.0"
+
+          # REL-008 — the build toolchain installs into an isolated venv, never
+          # the runner's system Python. `ubuntu-latest` (and the Forgejo runner
+          # image) marks its system interpreter PEP 668 externally managed, so
+          # `python3 -m pip install ...` against it dies with
+          # `error: externally-managed-environment`. A venv is the escape hatch
+          # pip itself honours: `check_externally_managed()` returns immediately
+          # under `running_under_virtualenv()` (sys.prefix != base_prefix), so
+          # the install below is permitted while the system interpreter stays
+          # untouched.
+          #
+          # Chosen over the alternatives:
+          #   * `--break-system-packages` — defeats the protection PEP 668
+          #     exists for, on a shared image we do not control; a later job or
+          #     a consumer-installed package can then collide silently.
+          #   * `pipx run build` — assumes `pipx` is present on the runner,
+          #     trading one tool assumption for another; `python3 -m venv` is
+          #     stdlib, guaranteed on any CPython >= 3.3.
+          python3 -m venv .release-venv
+          .release-venv/bin/python -m pip install --quiet "build" "hatchling==1.32.0"
 
           # 1 + 2: the wheel and the sdist, from the same source tree.
-          python3 -m build --sdist --wheel
+          .release-venv/bin/python -m build --sdist --wheel
 
           # 3: SHA256SUMS over exactly the two archives, keyed by bare
           #    basename. The assets are published and downloaded flat (the
