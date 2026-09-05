@@ -9,9 +9,6 @@ Covers the three criteria of this lane:
 3. One configured convention renders the identical name on Forgejo and GitHub.
 """
 
-import hashlib
-import json
-import re
 import subprocess
 import sys
 import textwrap
@@ -203,47 +200,6 @@ def _run_py(source: str, *args: str, env=None) -> subprocess.CompletedProcess:
     )
 
 
-def _build_four_assets(out: Path) -> None:
-    """Run the REL-002 build sequence to produce the four release assets."""
-    import os
-
-    env = dict(os.environ)
-    env["SOURCE_DATE_EPOCH"] = "1700000000"
-    subprocess.run(
-        [sys.executable, "-m", "build", "--sdist", "--wheel", "--outdir", str(out)],
-        cwd=REPO_ROOT,
-        env=env,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    wheel = next(out.glob("*.whl"))
-    sdist = next(out.glob("*.tar.gz"))
-    subprocess.run(
-        ["sha256sum", wheel.name, sdist.name],
-        cwd=out,
-        check=True,
-        text=True,
-        stdout=(out / "SHA256SUMS").open("w"),
-    )
-    # sbom.cdx.json — the same minimal derivation the workflow runs.
-    (out / "sbom.cdx.json").write_text(
-        json.dumps(
-            {
-                "bomFormat": "CycloneDX",
-                "specVersion": "1.5",
-                "version": 1,
-                "metadata": {"component": {"name": "ops-engine", "version": "3.1.0"}},
-                "components": [],
-            },
-            indent=2,
-            sort_keys=True,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-
 class TestReleaseTitleGate:
     """Criterion 3: a non-conforming title is rejected with a named error, and
     no release object is created on either side."""
@@ -284,73 +240,68 @@ class TestReleaseTitleGate:
 
 
 class TestMirrorCreatesGitHubRelease:
-    """Criteria 1, 2, 4: byte-identical assets, no second build, stated order."""
+    """Criteria 1, 2, 4: byte-identical assets, no second build, stated order.
 
-    def _verifier_source(self) -> str:
-        return _extract_py_block(MIRROR_CONTENT, "VERIFY_ASSETS_PY")
+    REL-010 — the topology changed. The GitHub release is no longer derived by
+    mirror.yml from a network download; forgejo-release.yml builds the four
+    assets once and publishes them to BOTH forges from its own workspace. The
+    mirror is now git-ref push only. These tests assert that split: no download
+    anywhere, no second build, and the single ordered publish path.
+    """
 
-    def test_mirror_has_no_build_step(self):
-        """Criterion 2: the mirror never rebuilds — no build/resolver invocations."""
+    def test_no_workflow_downloads_a_release_asset(self):
+        """Criterion 1 (REL-010): no workflow fetches a release asset over the
+        network. The prior design had mirror.yml and release-gate.yml download
+        .browser_download_url assets; those downloads are gone."""
+        assert "browser_download_url" not in FORGEJO_RELEASE_CONTENT
+        assert "browser_download_url" not in MIRROR_CONTENT
+        # mirror.yml no longer curls the Forgejo release API at all.
+        assert "releases/tags" not in MIRROR_CONTENT
+        assert "releases/\"${REL_ID}\"/assets" not in MIRROR_CONTENT
+
+    def test_forgejo_release_publishes_to_both_forges_from_workspace(self):
+        """Criterion 1 (REL-010): forgejo-release.yml uploads the four assets to
+        the GitHub mirror from its own workspace (`--data-binary "@$asset"`), with
+        no download step between build and upload."""
+        assert "uploads.github.com" in FORGEJO_RELEASE_CONTENT
+        assert "GH_MIRROR_TOKEN" in FORGEJO_RELEASE_CONTENT
+        assert "--data-binary \"@${asset}\"" in FORGEJO_RELEASE_CONTENT or "--data-binary \"@{asset}\"" in FORGEJO_RELEASE_CONTENT
+
+    def test_mirror_is_git_push_only(self):
+        """Criterion 3 (REL-010): mirror.yml keeps exactly its force-push and
+        loses the release logic entirely — no release API, no build, no SBOM."""
+        assert "git push --force" in MIRROR_CONTENT
         assert "python3 -m build" not in MIRROR_CONTENT
         assert "pip install" not in MIRROR_CONTENT
-        assert "sbom.cdx.json" not in MIRROR_CONTENT.split("VERIFY_ASSETS_PY")[0]
-        # The mirror downloads and uploads; it does not run a build backend.
-        assert "curl" in MIRROR_CONTENT
-        assert "upload" in MIRROR_CONTENT or "uploads.github.com" in MIRROR_CONTENT
+        assert "sbom.cdx.json" not in MIRROR_CONTENT
+        assert "api.github.com/repos" not in MIRROR_CONTENT
+        assert "RELEASE_WAIT" not in MIRROR_CONTENT
 
-    def test_mirror_verifier_accepts_byte_identical_assets(self, tmp_path):
-        """Criterion 1 (real run): the four assets verify against SHA256SUMS and
-        every file's SHA256 is printed so both sides can be compared."""
-        assets = tmp_path / "assets"
-        assets.mkdir()
-        _build_four_assets(assets)
-        r = _run_py(self._verifier_source(), str(assets))
-        assert r.returncode == 0, r.stdout + r.stderr
-        assert "verified 2 of 4 assets" in r.stdout, r.stdout
-        # All four files are listed with their digests.
-        for name in ("SHA256SUMS", "sbom.cdx.json"):
-            assert f"asset {name} sha256=" in r.stdout
-
-    def test_mirror_verifier_fails_on_diverged_byte_red_proof(self, tmp_path):
-        """Criterion 1 (red proof): a single flipped byte in a downloaded asset
-        fails the SHA256 comparison with a named error and non-zero exit."""
-        assets = tmp_path / "assets"
-        assets.mkdir()
-        _build_four_assets(assets)
-        wheel = next(assets.glob("*.whl"))
-        blob = bytearray(wheel.read_bytes())
-        blob[0] ^= 0xFF
-        wheel.write_bytes(bytes(blob))
-        r = _run_py(self._verifier_source(), str(assets))
-        assert r.returncode != 0, r.stdout + r.stderr
-        assert "AssetHashMismatchError" in r.stderr, r.stderr
+    def test_no_polling_loops_remain(self):
+        """Criterion 3 (REL-010): both polling loops are gone — RELEASE_WAIT_* in
+        mirror.yml and SBOM_WAIT_* in release-gate.yml."""
+        assert "RELEASE_WAIT" not in MIRROR_CONTENT
+        assert "SBOM_WAIT" not in MIRROR_CONTENT
 
     def test_producer_and_verifier_agree_on_checksum_path_shape(self):
         """Criterion 1 (REWORK): the producer's SHA256SUMS must be keyed by BARE
-        basename, because the verifier resolves each entry against the flat
-        /tmp/release-assets/ dir (no dist/ subdir). A leading `dist/` would make
-        the verifier look for /tmp/release-assets/dist/... and abort with
-        MissingAssetError before any GitHub release is created."""
+        basename, so a consumer can `sha256sum -c` it against the flat published
+        assets (no dist/ subdir). A leading `dist/` would break the flat verify."""
         # The producer runs `(cd dist && sha256sum *.whl *.tar.gz) > SHA256SUMS`,
         # which names each archive by basename, not `dist/....`.
         assert "(cd dist && sha256sum *.whl *.tar.gz) > SHA256SUMS" in FORGEJO_RELEASE_CONTENT
         assert "sha256sum dist/*.whl dist/*.tar.gz > SHA256SUMS" not in FORGEJO_RELEASE_CONTENT
 
-    def test_mirror_refuses_when_no_canonical_release(self):
-        """Criterion 3/4 chain: a missing Forgejo release is a named error and
-        never fabricates a GitHub release."""
-        assert "NoForgejoReleaseError" in MIRROR_CONTENT
-
-    def test_mirror_orders_forgejo_before_github(self):
-        """Criterion 4: the Forgejo release is built and published first; the
-        GitHub release is a derivative created only afterwards, so a GitHub-side
-        failure leaves the Forgejo release fully published."""
-        # The mirror is one workflow triggered by a tag; forgejo-release.yml is
-        # the canonical creator. Assert the mirror treats Forgejo as the source
-        # it downloads from, and GitHub as the target it uploads to.
-        assert "releases/tags/${TAG}" in MIRROR_CONTENT
-        assert "https://api.github.com" in MIRROR_CONTENT
-        assert "already fully published" in MIRROR_CONTENT
-        # The GitHub release name/body are copied from the Forgejo release, so
-        # the title the gate approved is what GitHub carries verbatim.
-        assert "REL_NAME" in MIRROR_CONTENT and "REL_BODY" in MIRROR_CONTENT
+    def test_forgejo_release_is_published_before_github(self):
+        """Criterion 4: the Forgejo release is created and fully uploaded first;
+        the GitHub release is derived afterwards, from the same workspace bytes,
+        so a GitHub-side failure leaves the Forgejo release fully published."""
+        # Create Release precedes Create GitHub release in the one workflow.
+        forgejo_idx = FORGEJO_RELEASE_CONTENT.index("Create Release")
+        gh_idx = FORGEJO_RELEASE_CONTENT.index("Create GitHub release")
+        assert forgejo_idx < gh_idx
+        # A GitHub-side failure states the Forgejo release is already published.
+        assert "already fully published" in FORGEJO_RELEASE_CONTENT
+        # The GitHub release name/body are the gated title and notes, not
+        # re-fetched from Forgejo.
+        assert "RELEASE_NAME" in FORGEJO_RELEASE_CONTENT

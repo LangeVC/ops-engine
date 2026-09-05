@@ -23,14 +23,12 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = REPO_ROOT / ".forgejo" / "workflows" / "forgejo-release.yml"
-RELEASE_GATE = REPO_ROOT / ".forgejo" / "workflows" / "release-gate.yml"
 CONSTRAINTS = REPO_ROOT / "constraints.txt"
 PYPROJECT = REPO_ROOT / "pyproject.toml"
 
 SOURCE_DATE_EPOCH = "1700000000"
 
 WORKFLOW_CONTENT = WORKFLOW.read_text(encoding="utf-8")
-RELEASE_GATE_CONTENT = RELEASE_GATE.read_text(encoding="utf-8")
 CONSTRAINTS_CONTENT = CONSTRAINTS.read_text(encoding="utf-8")
 
 
@@ -261,38 +259,40 @@ def test_sbom_lists_exactly_the_pinned_set(tmp_path):
 
 # --- REL-003: an OSV gate over the SBOM, so it is a check and not a document --
 #
-# The gate lives in .forgejo/workflows/release-gate.yml as an `osv-gate` job
-# that runs after the version gate. It scans sbom.cdx.json (one of REL-002's
-# four assets) with osv-scanner and refuses the release above a stated severity
-# floor. The decision is made by an inline evaluator in the workflow, over the
-# JSON osv-scanner emits; those bytes are what this section tests. The test
-# executes the LITERAL evaluator block contained in the committed workflow, so
-# a change to the gate's decision code that is not mirrored here turns this
-# section red — the workflow text is the contract, not a copy of it.
+# The gate lives in .forgejo/workflows/forgejo-release.yml. It scans
+# sbom.cdx.json (one of REL-002's four assets) with osv-scanner and refuses the
+# release above a stated severity floor, BEFORE any release object is created.
+# The decision is made by an inline evaluator in the workflow, over the JSON
+# osv-scanner emits; those bytes are what this section tests. The test executes
+# the LITERAL evaluator block contained in the committed workflow, so a change
+# to the gate's decision code that is not mirrored here turns this section red —
+# the workflow text is the contract, not a copy of it.
 #
-# The evaluator is pure and offline: given an osv-scanner JSON result it prints
-# a verdict and exits non-zero only when some finding's CVSS base score meets or
-# exceeds the floor. No network is needed to test the decision; the scanner is
-# exercised live separately (see the red/green proofs in the verdict).
+# REL-010 — the evaluator lives in forgejo-release.yml now, not
+# release-gate.yml. It scans the SBOM the same job builds, in its own workspace,
+# rather than re-downloading a release asset over the network. The evaluator is
+# pure and offline: given an osv-scanner JSON result it prints a verdict and
+# exits non-zero only when some finding's CVSS base score meets or exceeds the
+# floor.
 
 
 def _osv_evaluator_source() -> str:
-    """Extract the osv-scanner evaluator Python from release-gate.yml verbatim.
+    """Extract the osv-scanner evaluator Python from forgejo-release.yml verbatim.
 
-    The evaluator is the block between the `python3 - <<'PY'` marker and the
-    matching `PY` terminator. Inside the YAML it is indented as block-scalar
-    content; the runner de-indents it before execution, so we textwrap.dedent to
-    the same shape.
+    The evaluator is the block between the `python3 - <<'OSV_GATE_PY'` marker and
+    the matching `OSV_GATE_PY` terminator. Inside the YAML it is indented as
+    block-scalar content; the runner de-indents it before execution, so we
+    textwrap.dedent to the same shape.
     """
-    lines = RELEASE_GATE_CONTENT.splitlines()
+    lines = WORKFLOW_CONTENT.splitlines()
     start = end = None
     for i, line in enumerate(lines):
-        if "<<'PY'" in line:
+        if "<<'OSV_GATE_PY'" in line:
             start = i
-        if start is not None and line.strip() == "PY" and i > start:
+        if start is not None and line.strip() == "OSV_GATE_PY" and i > start:
             end = i
             break
-    assert start is not None and end is not None, "osv evaluator PY block not found"
+    assert start is not None and end is not None, "osv evaluator OSV_GATE_PY block not found"
     return textwrap.dedent("\n".join(lines[start + 1 : end]) + "\n")
 
 
@@ -340,16 +340,16 @@ def _osv_result(package_findings: list[tuple[str, str, str]]) -> dict:
 
 
 def test_release_gate_runs_osv_scanner_over_the_sbom():
-    """release-gate.yml invokes osv-scanner against sbom.cdx.json."""
-    assert "osv-gate" in RELEASE_GATE_CONTENT
-    assert "osv-scanner" in RELEASE_GATE_CONTENT
-    assert "sbom.cdx.json" in RELEASE_GATE_CONTENT
+    """forgejo-release.yml invokes osv-scanner against sbom.cdx.json."""
+    assert "osv-gate" in WORKFLOW_CONTENT
+    assert "osv-scanner" in WORKFLOW_CONTENT
+    assert "sbom.cdx.json" in WORKFLOW_CONTENT
     # A stable release tag must carry REL-002's SBOM; absence is a named failure.
-    assert "NoSbomToScanError" in RELEASE_GATE_CONTENT
-    assert "Exit code" in RELEASE_GATE_CONTENT or "sys.exit" in RELEASE_GATE_CONTENT
+    assert "NoSbomToScanError" in WORKFLOW_CONTENT
+    assert "sys.exit" in WORKFLOW_CONTENT
     # The scanner binary is pinned so the tool that decides the release is a fixed
     # version rather than whatever is latest.
-    assert "2.5.1" in RELEASE_GATE_CONTENT
+    assert "2.5.1" in WORKFLOW_CONTENT
 
 
 def test_osv_floor_is_stated_and_defended_in_the_workflow():
@@ -358,8 +358,8 @@ def test_osv_floor_is_stated_and_defended_in_the_workflow():
     assert 'FLOOR = 7.0' in _osv_evaluator_source()
     # ... and the prose up top states the same floor and defends the choice against
     # the two failure modes PRD 8 names (never fires / disabled within a month).
-    assert "CVSS base score" in RELEASE_GATE_CONTENT
-    assert "HIGH" in RELEASE_GATE_CONTENT and "CRITICAL" in RELEASE_GATE_CONTENT
+    assert "CVSS base score" in WORKFLOW_CONTENT
+    assert "HIGH" in WORKFLOW_CONTENT and "CRITICAL" in WORKFLOW_CONTENT
 
 
 def test_osv_gate_consumes_a_real_sbom_asset():
@@ -367,7 +367,16 @@ def test_osv_gate_consumes_a_real_sbom_asset():
     # The scanner input is a fixed path to REL-002's release asset name, and the
     # gate's decision code only reads the scan JSON — it contains no code that
     # would synthesize a component list of its own.
-    assert "--sbom=sbom.cdx.json" in RELEASE_GATE_CONTENT
+    assert "--sbom=sbom.cdx.json" in WORKFLOW_CONTENT
+
+
+def test_osv_gate_runs_before_release_creation():
+    """REL-010: the OSV scan runs BEFORE any release object exists. The
+    osv-gate step precedes the Create Release step, so a failing scan aborts the
+    job before a release is created on either forge."""
+    gate_idx = WORKFLOW_CONTENT.index("Gate the SBOM against OSV")
+    create_idx = WORKFLOW_CONTENT.index("Create Release")
+    assert gate_idx < create_idx
 
 
 # Criterion 2 (red proof) and 3 (green proof) — the evaluator's decision is

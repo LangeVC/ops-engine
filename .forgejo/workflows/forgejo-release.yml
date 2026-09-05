@@ -22,10 +22,10 @@ jobs:
       # REL-004 — the release title is a GATE, not an agreement. The name must
       # be exactly "Ops Engine vX.Y.Z"; a tag whose rendered title does not
       # conform is refused here with a named error, before any release object
-      # exists on either forge. The gate runs on the canonical side only; the
-      # GitHub release is a byte-for-byte derivative of this one (see
-      # mirror.yml), so a title that fails here can never produce a GitHub
-      # release either.
+      # exists on either forge. The gate runs before any release object; the
+      # GitHub release is a byte-for-byte derivative of this one, published from
+      # this same job's workspace below, so a title that fails here can never
+      # produce a GitHub release either.
       - name: Gate the release title
         id: title
         env:
@@ -179,13 +179,11 @@ jobs:
           "$RELEASE_VENV/bin/python" -m build --sdist --wheel
 
           # 3: SHA256SUMS over exactly the two archives, keyed by bare
-          #    basename. The assets are published and downloaded flat (the
-          #    uploads use `basename "$asset"` and the mirror saves each to
-          #    /tmp/release-assets/<name>), so the checksum file must name
-          #    each archive by basename alone — a leading `dist/` would make
-          #    the mirror's verifier look for /tmp/release-assets/dist/...,
-          #    which never exists (MissingAssetError before any GitHub
-          #    release). `(cd dist && sha256sum ...)` emits basenames.
+          #    basename. The four assets are published flat on both forges (the
+          #    uploads use `basename "$asset"`), so the checksum file must name
+          #    each archive by basename alone — a leading `dist/` would make a
+          #    consumer's `sha256sum -c` fail against the flat download.
+          #    `(cd dist && sha256sum ...)` emits basenames.
           (cd dist && sha256sum *.whl *.tar.gz) > SHA256SUMS
 
           # 4: the SBOM, CycloneDX 1.5, listing exactly the pinned packages in
@@ -238,6 +236,102 @@ jobs:
           PY
 
           ls -la dist SHA256SUMS sbom.cdx.json
+
+      # REL-010 — the OSV scan runs over the SBOM this build just produced, in
+      # this job's own workspace, BEFORE any release object exists on either
+      # forge. It used to live in a separate workflow (release-gate.yml) that
+      # could not see the build's output, so it polled for the release and
+      # re-downloaded sbom.cdx.json over the network — a second acquisition of
+      # the exact bytes written a step earlier. That re-fetch is gone: the
+      # scanner reads sbom.cdx.json from the workspace, so the gate is a check
+      # over the build's own output, and a failing scan aborts the job before
+      # any release object is created on either forge.
+      #
+      # Floor: CVSS base score 7.0 (HIGH and CRITICAL) blocks the release.
+      # Rationale (PRD 8): a floor set too high never fires, so it is a green
+      # that lies; a floor set too low blocks every release and is disabled
+      # within a month. HIGH/CRITICAL are the classes a release should not
+      # ship; MEDIUM and LOW are surfaced but tolerated. The floor is one
+      # constant the evaluator reads; the prose here states the same floor and
+      # defends the choice against the two failure modes.
+      - name: Gate the SBOM against OSV
+        run: |
+          set -euo pipefail
+
+          # The SBOM is an input this gate consumes, not a file this gate
+          # fabricates. A stable release tag must carry REL-002's SBOM; its
+          # absence is a named failure, never a silent green.
+          if [[ ! -f "sbom.cdx.json" ]]; then
+            echo "::error::NoSbomToScanError: sbom.cdx.json missing. The reproducible build must have emitted it. Nothing was scanned, so nothing is approved." >&2
+            exit 1
+          fi
+
+          # osv-scanner is pinned with its published SHA256 rather than a bare
+          # redirect, so the tool that decides the release is the version this
+          # gate was written against and nothing newer silently.
+          scanner_version=2.5.1
+          sha=f9f25499a2c8cc367b3af45df2ea7eeca7fbccceab9c35079968f4b3652194be
+          url="https://github.com/google/osv-scanner/releases/download/v${scanner_version}/osv-scanner_linux_amd64"
+          curl -fsSL -o /tmp/osv-scanner "$url"
+          printf '%s  %s\n' "$sha" "/tmp/osv-scanner" | sha256sum -c - >/dev/null
+          chmod +x /tmp/osv-scanner
+
+          echo "osv-gate: scanning sbom.cdx.json against OSV (scanner ${scanner_version})"
+          echo "osv-gate: floor = CVSS base score 7.0 (HIGH/CRITICAL blocks; MEDIUM/LOW surfaced below)."
+
+          # The gate's decision is made over the JSON osv-scanner emits, so the
+          # exit code below is the gate's, not the scanner's habit of exiting
+          # non-zero on ANY finding.
+          /tmp/osv-scanner scan --sbom=sbom.cdx.json --format=json 2>/dev/null \
+            > /tmp/osv-scan.json
+          OSV_SCAN_JSON=/tmp/osv-scan.json python3 - <<'OSV_GATE_PY'
+          import json
+          import os
+          import sys
+
+          FLOOR = 7.0  # CVSS base score; must match the prose floor above.
+          with open(os.environ["OSV_SCAN_JSON"], encoding="utf-8") as fh:
+              data = json.load(fh)
+          findings = 0
+          worst = 0.0
+          rows = []
+          for res in data.get("results", []):
+              for pkg in res.get("packages", []):
+                  name = (pkg.get("package") or {}).get("name", "unknown")
+                  for group in pkg.get("groups", []):
+                      ids = group.get("ids", [])
+                      raw = group.get("max_severity")
+                      score = None
+                      if raw:
+                          try:
+                              score = float(raw)
+                          except (TypeError, ValueError):
+                              score = None
+                      findings += 1
+                      if score is not None:
+                          worst = max(worst, score)
+                          rows.append((name, ";".join(ids[:2]), score))
+                      else:
+                          rows.append((name, ";".join(ids[:2]), None))
+
+          print(f"osv-gate: {findings} advisories; highest CVSS base score {worst:g}; floor {FLOOR:g}")
+          for name, ids, score in sorted(rows):
+              if score is None:
+                  print(f"osv-gate:   {name:<36} {ids}  (no CVSS base score published)")
+              else:
+                  verdict = "BLOCK" if score >= FLOOR else "OK"
+                  print(f"osv-gate:   {verdict:<5} {name:<36} {score:g}  {ids}")
+
+          print("osv-gate: NOT covered: advisories published AFTER this scan (the OSV database is", end=" ")
+          print("itself a snapshot); and unpinned transitive resolution at the consumer's install", end=" ")
+          print("time (LVC-249) is out of scope of this SBOM, which pins only the build set.")
+
+          if worst >= FLOOR:
+              print(f"osv-gate: RELEASE REFUSED (highest {worst:g} >= floor {FLOOR:g})")
+              sys.exit(1)
+          print("osv-gate: RELEASE PERMITTED")
+          sys.exit(0)
+          OSV_GATE_PY
 
       - name: Create Release
         env:
@@ -300,3 +394,74 @@ jobs:
           done
 
           echo "All four assets uploaded."
+
+      # REL-010 — one build, two publication targets, from the SAME workspace.
+      # The four assets built above are uploaded to the GitHub mirror directly,
+      # byte-for-byte, with no download in between. This was previously
+      # mirror.yml's job: it fetched the Forgejo release over the network and
+      # re-uploaded the bytes (REL-004) — a re-acquisition of the exact
+      # artifacts this job had written a step earlier. That download is gone;
+      # the uploads below read dist/, SHA256SUMS and sbom.cdx.json straight from
+      # the workspace, so the Forgejo release and the GitHub release carry the
+      # same four bytes by construction.
+      #
+      # Ordering and partial failure: the Forgejo release is created atomically
+      # first (create + upload all four assets under `set -euo pipefail` above).
+      # Only afterwards is the GitHub release derived, from the same bytes. If
+      # the GitHub side fails, the Forgejo release is already fully published —
+      # nothing here mutates it — and the mirror is merely behind (drift), never
+      # a half-published Forgejo release.
+      - name: Create GitHub release
+        id: gh_release
+        env:
+          GH_MIRROR_TOKEN: ${{ secrets.GH_MIRROR_TOKEN }}
+          NOTES: "${{ steps.notes.outputs.notes }}"
+          RELEASE_NAME: "${{ steps.title.outputs.release_name }}"
+        run: |
+          set -euo pipefail
+
+          TAG_NAME="${{ github.event.inputs.tag_name || github.ref_name }}"
+          GH_API="https://api.github.com"
+          GH_REPO="LangeVC/ops-engine"
+
+          GH_PAYLOAD="$(jq -n \
+            --arg tag_name "$TAG_NAME" \
+            --arg name "${RELEASE_NAME}" \
+            --arg body "${NOTES}" \
+            '{tag_name: $tag_name, name: $name, body: $body, draft: false, prerelease: false}')"
+
+          GH_REL="$(curl -fsSL -X POST "${GH_API}/repos/${GH_REPO}/releases" \
+            -H "Authorization: token ${GH_MIRROR_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "${GH_PAYLOAD}")" || {
+            echo "::error::GitHubReleaseError: failed to create the GitHub release for ${TAG_NAME}." >&2
+            echo "::error::The Forgejo release is already fully published; nothing here mutates it. The mirror is behind (drift)." >&2
+            exit 1
+          }
+          echo "release_id=$(printf '%s' "$GH_REL" | jq -r '.id')" >> "$GITHUB_OUTPUT"
+          echo "Created GitHub release for $TAG_NAME."
+
+      - name: Upload assets to GitHub
+        env:
+          GH_MIRROR_TOKEN: ${{ secrets.GH_MIRROR_TOKEN }}
+          GH_RELEASE_ID: "${{ steps.gh_release.outputs.release_id }}"
+        run: |
+          set -euo pipefail
+
+          GH_REPO="LangeVC/ops-engine"
+
+          for asset in dist/*.whl dist/*.tar.gz SHA256SUMS sbom.cdx.json; do
+            aname="$(basename "$asset")"
+            echo "Uploading ${aname} to GitHub release ${GH_RELEASE_ID}..."
+            curl -fsSL -X POST \
+              "https://uploads.github.com/repos/${GH_REPO}/releases/${GH_RELEASE_ID}/assets?name=${aname}" \
+              -H "Authorization: token ${GH_MIRROR_TOKEN}" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary "@${asset}" >/dev/null || {
+              echo "::error::GitHubUploadError: upload of ${aname} failed." >&2
+              echo "::error::Forgejo release is unaffected; GitHub release ${GH_RELEASE_ID} is partial and must be cleaned up by the operator." >&2
+              exit 1
+            }
+          done
+
+          echo "All four assets uploaded to GitHub."
