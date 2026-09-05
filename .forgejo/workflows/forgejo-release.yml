@@ -64,15 +64,49 @@ jobs:
           set -euo pipefail
 
           NOTES="$(python3 - "$TAG_NAME" <<'PY'
+          import re
           import sys
-          sys.path.insert(0, "src")
-          from ops_engine.utils.changelog_parser import ChangelogParser
+
+          # REL-006 — stdlib-only notes extractor. The previous extractor did
+          # `from ops_engine.utils.changelog_parser import ChangelogParser`,
+          # which runs ops_engine/__init__.py and transitively imports
+          # config_loader.py -> `import yaml` / `import pydantic`. Neither is
+          # present on the bare runner image, so the release job died with
+          # `ModuleNotFoundError: No module named 'yaml'` — it only ever passed
+          # on developer machines. The regex and extraction below are a
+          # byte-for-byte faithful copy of ChangelogParser, using only `re` and
+          # `sys`, so nothing outside the stdlib is needed and there is no
+          # install step to fail.
+          HEADER_PATTERN = re.compile(
+              r"^##\s+"
+              r"(?:\[)?(?:[\w-]+\s+)?v?"
+              r"(\d+\.\d+\.\d+(?:[-.\w]*)?)"
+              r"(?:\])?"
+              r".*$",
+              re.MULTILINE,
+          )
 
           tag = sys.argv[1]
           version = tag.lstrip("v")
           with open("CHANGELOG.md", encoding="utf-8") as fh:
               content = fh.read()
-          notes = ChangelogParser.extract_version_notes(content, version)
+          matches = list(HEADER_PATTERN.finditer(content))
+          target_match = None
+          target_idx = -1
+          for idx, m in enumerate(matches):
+              if m.group(1) == version:
+                  target_match = m
+                  target_idx = idx
+                  break
+          if target_match is None:
+              notes = ""
+          else:
+              start = target_match.end()
+              if target_idx + 1 < len(matches):
+                  end = matches[target_idx + 1].start()
+              else:
+                  end = len(content)
+              notes = content[start:end].strip()
           if not notes:
               sys.stderr.write(
                   "MissingChangelogEntryError: no '## %s' section in CHANGELOG.md; "
