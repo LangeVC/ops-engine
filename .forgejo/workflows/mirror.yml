@@ -7,6 +7,24 @@ name: Mirror to GitHub
 # GitHub's default branch (which GitHub refuses, failing the job) and any
 # GitHub-managed branch such as gh-pages. Pushing only ${GITHUB_REF} keeps the mirror
 # in sync and leaves those untouched. Unified pattern (see lvc-ops/docs/release-flow.md).
+#
+# REL-004 — a tag publish is ONE build, TWO publication targets. The reproducible
+# build (REL-002) runs once, on this canonical side, inside forgejo-release.yml, and
+# its four assets live on the Forgejo release. This mirror does NOT build anything:
+# it downloads those four assets from the Forgejo release and re-uploads them
+# byte-for-byte to the GitHub release. There is no second build, so the two releases
+# cannot carry diverging artifacts; the SHA256 of each file is identical on both
+# sides by construction, and the wheel + sdist digests are checked against the
+# SHA256SUMS the canonical side published.
+#
+# Ordering and partial failure: the Forgejo release is created atomically first
+# (create + upload all four assets under `set -euo pipefail` in forgejo-release.yml).
+# Only afterwards does this mirror derive the GitHub release. If this GitHub side
+# fails, the Forgejo release is already FULLY published — nothing here mutates it —
+# and the mirror is merely behind (a drift the operator sees, not a half-published
+# release). A tag the canonical side refused (missing CHANGELOG entry or a
+# non-conforming title) has no Forgejo release, so this mirror finds nothing to copy
+# and refuses with a named error rather than fabricating a GitHub release on its own.
 on:
   push:
     branches: ["**"]
@@ -25,3 +43,122 @@ jobs:
         run: |
           remote="https://x-access-token:${GH_MIRROR_TOKEN}@github.com/LangeVC/ops-engine.git"
           git push --force "$remote" "+${GITHUB_REF}:${GITHUB_REF}"
+
+      # For a tag, mirror the release object and its four assets. No build runs
+      # here — the download is the whole mechanism.
+      - name: Mirror the release and its four assets to GitHub
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_MIRROR_TOKEN: ${{ secrets.GH_MIRROR_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          TAG="${{ github.ref_name }}"
+          FORGEJO_API="${GITHUB_API_URL}"
+          FORGEJO_REPO="${GITHUB_REPOSITORY}"
+          GH_API="https://api.github.com"
+          GH_REPO="LangeVC/ops-engine"
+
+          # 1. Fetch the canonical Forgejo release. It exists only if the
+          #    canonical side accepted the tag (title gate passed, CHANGELOG
+          #    entry present). A missing release means the canonical side
+          #    refused — there is nothing to mirror, and we must not invent a
+          #    GitHub release for a tag the gate already rejected.
+          REL="$(curl -fsSL \
+            "${FORGEJO_API}/repos/${FORGEJO_REPO}/releases/tags/${TAG}" \
+            -H "Authorization: token ${GITHUB_TOKEN}")" || {
+            echo "::error::NoForgejoReleaseError: no canonical Forgejo release exists for tag ${TAG}." >&2
+            echo "::error::The canonical side refused the tag (title gate or CHANGELOG gate); no GitHub release is created." >&2
+            exit 1
+          }
+
+          REL_ID="$(printf '%s' "$REL" | jq -r '.id')"
+          REL_NAME="$(printf '%s' "$REL" | jq -r '.name')"
+          REL_BODY="$(printf '%s' "$REL" | jq -r '.body')"
+
+          # 2. Download the four assets from the Forgejo release verbatim.
+          ASSETS="$(curl -fsSL \
+            "${FORGEJO_API}/repos/${FORGEJO_REPO}/releases/${REL_ID}/assets" \
+            -H "Authorization: token ${GITHUB_TOKEN}")"
+
+          mkdir -p /tmp/release-assets
+          printf '%s\n' "$ASSETS" \
+            | jq -r '.[] | [.name, .browser_download_url] | @tsv' \
+            | while IFS=$'\t' read -r aname aurl; do
+                curl -fsSL -o "/tmp/release-assets/${aname}" \
+                  -H "Authorization: token ${GITHUB_TOKEN}" "$aurl"
+              done
+
+          # 3. Verify the downloaded archives are byte-identical to the digests
+          #    the canonical side published in SHA256SUMS (criterion 1: compare
+          #    the SHA256 of each file on both sides), and print every digest so
+          #    the two sides can be read off the run.
+          python3 - /tmp/release-assets <<'VERIFY_ASSETS_PY'
+          import hashlib
+          import sys
+          from pathlib import Path
+
+          d = Path(sys.argv[1])
+          sums = {}
+          for line in (d / "SHA256SUMS").read_text(encoding="utf-8").splitlines():
+              digest, name = line.split()
+              sums[name] = digest
+
+          missing = [n for n in sums if not (d / n).exists()]
+          if missing:
+              sys.stderr.write("MissingAssetError: %s not downloaded\n" % ", ".join(missing))
+              sys.exit(2)
+
+          for name, expect in sums.items():
+              got = hashlib.sha256((d / name).read_bytes()).hexdigest()
+              if got != expect:
+                  sys.stderr.write(
+                      "AssetHashMismatchError: %s sha256 %s != expected %s\n"
+                      % (name, got, expect)
+                  )
+                  sys.exit(3)
+
+          for f in sorted(d.iterdir()):
+              if f.is_file():
+                  print("asset %s sha256=%s" % (f.name, hashlib.sha256(f.read_bytes()).hexdigest()))
+          print("verified %d of %d assets against the canonical SHA256SUMS"
+                % (len(sums), len(list(d.iterdir()))))
+          VERIFY_ASSETS_PY
+
+          # 4. Create the GitHub release with the same title and body, then
+          #    upload the same four assets. This is pure distribution of the
+          #    bytes already verified above — no build, no resolver, no SBOM
+          #    generator.
+          GH_PAYLOAD="$(jq -n \
+            --arg tag_name "${TAG}" \
+            --arg name "${REL_NAME}" \
+            --arg body "${REL_BODY}" \
+            '{tag_name: $tag_name, name: $name, body: $body, draft: false, prerelease: false}')"
+
+          GH_REL="$(curl -fsSL -X POST "${GH_API}/repos/${GH_REPO}/releases" \
+            -H "Authorization: token ${GH_MIRROR_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "${GH_PAYLOAD}")" || {
+            echo "::error::GitHubReleaseError: failed to create the GitHub release for ${TAG}." >&2
+            echo "::error::The Forgejo release is already fully published; nothing here mutates it. The mirror is behind (drift)." >&2
+            exit 1
+          }
+          GH_REL_ID="$(printf '%s' "$GH_REL" | jq -r '.id')"
+
+          for asset in /tmp/release-assets/*; do
+            aname="$(basename "$asset")"
+            echo "Uploading ${aname} to GitHub release ${GH_REL_ID}..."
+            curl -fsSL -X POST \
+              "https://uploads.github.com/repos/${GH_REPO}/releases/${GH_REL_ID}/assets?name=${aname}" \
+              -H "Authorization: token ${GH_MIRROR_TOKEN}" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary "@${asset}" >/dev/null || {
+              echo "::error::GitHubUploadError: upload of ${aname} failed." >&2
+              echo "::error::Forgejo release is unaffected; GitHub release ${GH_REL_ID} is partial and must be cleaned up by the operator." >&2
+              exit 1
+            }
+          done
+
+          echo "Mirrored release ${TAG} and its four assets to GitHub."

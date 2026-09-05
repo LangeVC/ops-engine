@@ -19,6 +19,38 @@ jobs:
         with:
           fetch-depth: 0
 
+      # REL-004 — the release title is a GATE, not an agreement. The name must
+      # be exactly "Ops Engine vX.Y.Z"; a tag whose rendered title does not
+      # conform is refused here with a named error, before any release object
+      # exists on either forge. The gate runs on the canonical side only; the
+      # GitHub release is a byte-for-byte derivative of this one (see
+      # mirror.yml), so a title that fails here can never produce a GitHub
+      # release either.
+      - name: Gate the release title
+        id: title
+        env:
+          TAG_NAME: "${{ github.event.inputs.tag_name || github.ref_name }}"
+        run: |
+          set -euo pipefail
+          RELEASE_NAME="Ops Engine ${TAG_NAME}"
+          python3 - "${RELEASE_NAME}" <<'TITLE_GATE_PY'
+          import re
+          import sys
+
+          NAME_RE = re.compile(r"^Ops Engine v[0-9]+\.[0-9]+\.[0-9]+$")
+          name = sys.argv[1]
+          if not NAME_RE.match(name):
+              sys.stderr.write(
+                  "ReleaseTitleError: release name %r does not match the "
+                  "required convention ^Ops Engine v[0-9]+\\.[0-9]+\\.[0-9]+$. "
+                  "Refusing before any release object exists on either forge.\n"
+                  % name
+              )
+              sys.exit(2)
+          sys.stdout.write("title gate: %r conforms\n" % name)
+          TITLE_GATE_PY
+          echo "release_name=${RELEASE_NAME}" >> "$GITHUB_OUTPUT"
+
       # The release body is the CHANGELOG entry for this version, not commit
       # subjects. A tag whose version has no `## X.Y.Z` section fails here,
       # before any release object exists. ChangelogParser understands both
@@ -79,8 +111,15 @@ jobs:
           # 1 + 2: the wheel and the sdist, from the same source tree.
           python3 -m build --sdist --wheel
 
-          # 3: SHA256SUMS over exactly the two archives.
-          sha256sum dist/*.whl dist/*.tar.gz > SHA256SUMS
+          # 3: SHA256SUMS over exactly the two archives, keyed by bare
+          #    basename. The assets are published and downloaded flat (the
+          #    uploads use `basename "$asset"` and the mirror saves each to
+          #    /tmp/release-assets/<name>), so the checksum file must name
+          #    each archive by basename alone — a leading `dist/` would make
+          #    the mirror's verifier look for /tmp/release-assets/dist/...,
+          #    which never exists (MissingAssetError before any GitHub
+          #    release). `(cd dist && sha256sum ...)` emits basenames.
+          (cd dist && sha256sum *.whl *.tar.gz) > SHA256SUMS
 
           # 4: the SBOM, CycloneDX 1.5, listing exactly the pinned packages in
           # constraints.txt — never `pip freeze`, which would record the build
@@ -137,6 +176,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NOTES: "${{ steps.notes.outputs.notes }}"
+          RELEASE_NAME: "${{ steps.title.outputs.release_name }}"
         run: |
           set -euo pipefail
 
@@ -144,7 +184,7 @@ jobs:
 
           PAYLOAD=$(jq -n \
             --arg tag_name "$TAG_NAME" \
-            --arg name "$TAG_NAME" \
+            --arg name "${RELEASE_NAME}" \
             --arg body "${NOTES}" \
             '{tag_name: $tag_name, name: $name, body: $body, draft: false, prerelease: false}')
 
