@@ -325,6 +325,17 @@ class TestMirrorCreatesGitHubRelease:
         assert r.returncode != 0, r.stdout + r.stderr
         assert "AssetHashMismatchError" in r.stderr, r.stderr
 
+    def test_producer_and_verifier_agree_on_checksum_path_shape(self):
+        """Criterion 1 (REWORK): the producer's SHA256SUMS must be keyed by BARE
+        basename, because the verifier resolves each entry against the flat
+        /tmp/release-assets/ dir (no dist/ subdir). A leading `dist/` would make
+        the verifier look for /tmp/release-assets/dist/... and abort with
+        MissingAssetError before any GitHub release is created."""
+        # The producer runs `(cd dist && sha256sum *.whl *.tar.gz) > SHA256SUMS`,
+        # which names each archive by basename, not `dist/....`.
+        assert "(cd dist && sha256sum *.whl *.tar.gz) > SHA256SUMS" in FORGEJO_RELEASE_CONTENT
+        assert "sha256sum dist/*.whl dist/*.tar.gz > SHA256SUMS" not in FORGEJO_RELEASE_CONTENT
+
     def test_mirror_refuses_when_no_canonical_release(self):
         """Criterion 3/4 chain: a missing Forgejo release is a named error and
         never fabricates a GitHub release."""

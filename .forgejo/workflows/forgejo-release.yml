@@ -111,8 +111,15 @@ jobs:
           # 1 + 2: the wheel and the sdist, from the same source tree.
           python3 -m build --sdist --wheel
 
-          # 3: SHA256SUMS over exactly the two archives.
-          sha256sum dist/*.whl dist/*.tar.gz > SHA256SUMS
+          # 3: SHA256SUMS over exactly the two archives, keyed by bare
+          #    basename. The assets are published and downloaded flat (the
+          #    uploads use `basename "$asset"` and the mirror saves each to
+          #    /tmp/release-assets/<name>), so the checksum file must name
+          #    each archive by basename alone — a leading `dist/` would make
+          #    the mirror's verifier look for /tmp/release-assets/dist/...,
+          #    which never exists (MissingAssetError before any GitHub
+          #    release). `(cd dist && sha256sum ...)` emits basenames.
+          (cd dist && sha256sum *.whl *.tar.gz) > SHA256SUMS
 
           # 4: the SBOM, CycloneDX 1.5, listing exactly the pinned packages in
           # constraints.txt — never `pip freeze`, which would record the build
