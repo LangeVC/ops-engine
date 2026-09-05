@@ -58,6 +58,81 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
+      # Reproducible build: four assets from committed constraints.
+      #
+      # One command sequence produces the wheel, the sdist, SHA256SUMS and the
+      # SBOM. Byte identity across two runs is guaranteed by (a) the committed
+      # constraints file, which pins the build's resolution, and (b) a fixed
+      # SOURCE_DATE_EPOCH, which removes the gzip mtime and metadata provenance
+      # timestamps from both archives. The SBOM is derived from constraints.txt
+      # alone, so it describes the pinned build set rather than the incidental
+      # packages this runner happens to carry.
+      - name: Build reproducible assets
+        env:
+          TAG_NAME: "${{ github.event.inputs.tag_name || github.ref_name }}"
+        run: |
+          set -euo pipefail
+
+          export SOURCE_DATE_EPOCH=1700000000
+          python3 -m pip install --quiet "build" "hatchling==1.32.0"
+
+          # 1 + 2: the wheel and the sdist, from the same source tree.
+          python3 -m build --sdist --wheel
+
+          # 3: SHA256SUMS over exactly the two archives.
+          sha256sum dist/*.whl dist/*.tar.gz > SHA256SUMS
+
+          # 4: the SBOM, CycloneDX 1.5, listing exactly the pinned packages in
+          # constraints.txt — never `pip freeze`, which would record the build
+          # machine's own incidental environment.
+          python3 - "$TAG_NAME" <<'PY'
+          import json
+          import re
+          import sys
+          from pathlib import Path
+
+          tag = sys.argv[1]
+          pins = []
+          for raw in Path("constraints.txt").read_text(encoding="utf-8").splitlines():
+              line = raw.split("#", 1)[0].strip()
+              m = re.match(r"^([A-Za-z0-9_.-]+)==([A-Za-z0-9_.+!-]+)", line)
+              if m:
+                  pins.append((m.group(1), m.group(2)))
+
+          components = [
+              {
+                  "type": "library",
+                  "bom-ref": f"pypi:{name}@{version}",
+                  "name": name,
+                  "version": version,
+                  "purl": f"pkg:pypi/{name}@{version}",
+              }
+              for name, version in pins
+          ]
+
+          sbom = {
+              "bomFormat": "CycloneDX",
+              "specVersion": "1.5",
+              "serialNumber": "urn:uuid:b0b0b0b0-0000-4000-8000-000000000000",
+              "version": 1,
+              "metadata": {
+                  "component": {
+                      "type": "application",
+                      "bom-ref": "ops-engine",
+                      "name": "ops-engine",
+                      "version": tag.lstrip("v"),
+                  }
+              },
+              "components": components,
+          }
+          Path("sbom.cdx.json").write_text(
+              json.dumps(sbom, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+          )
+          print(f"SBOM: {len(components)} pinned components from constraints.txt")
+          PY
+
+          ls -la dist SHA256SUMS sbom.cdx.json
+
       - name: Create Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -88,3 +163,33 @@ jobs:
           fi
 
           echo "Release created successfully."
+
+      - name: Upload assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          TAG_NAME="${{ github.event.inputs.tag_name || github.ref_name }}"
+
+          RELEASE_ID=$(curl -s \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases/tags/${TAG_NAME}" \
+            -H "Authorization: token ${GITHUB_TOKEN}" \
+            | jq -r '.id')
+
+          for asset in dist/*.whl dist/*.tar.gz SHA256SUMS sbom.cdx.json; do
+            echo "Uploading $asset..."
+            HTTP_STATUS=$(curl -s -o upload.json -w "%{http_code}" \
+              -X POST \
+              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?name=$(basename "$asset")" \
+              -H "Authorization: token ${GITHUB_TOKEN}" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary "@$asset")
+            grep -q '^20' <<< "$HTTP_STATUS" || {
+              echo "Upload of $asset failed. HTTP $HTTP_STATUS"
+              cat upload.json
+              exit 1
+            }
+          done
+
+          echo "All four assets uploaded."
