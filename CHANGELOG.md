@@ -2,68 +2,57 @@
 
 ## 3.2.0
 
-The mirror destination leaves the Forgejo Actions variable store and returns to the config layer,
-where it had been declared all along. The forge becomes a **value** in a destinations list instead
-of a key name, so a GitHub-only or GitLab adopter can express a destination for the first time.
-And releases now carry files that can be verified.
+The mirror destination is now declared in your configuration as a list, and every release ships
+files that can be verified.
 
-Why a minor bump: nothing promised in 3.1.0 is removed. `MIRROR_OWNER_VARIABLE` and
-`MIRROR_REPO_VARIABLE` are deprecated with a `DeprecationWarning` naming 4.0.0 as the removal
-version; the variable path still works until then. No layover pins 3.1.0, so the surface that
-changed shape had no consumers.
+### Mirror destinations are now a list
 
-### The destination is a list, and the forge is a value (LVC-248)
+A mirror destination is expressed as a `destinations` list whose entries carry a `forge`, `repo`,
+`role`, and `visibility`. The forge is a value inside each entry instead of part of the key name,
+so a configuration that mirrors only to GitHub (or only to GitLab) can express a destination for
+the first time.
 
 ```yaml
 destinations:
   - forge: github          # github | forgejo | gitlab | local
-    repo: LangeVC/ops-engine
+    repo: your-org/your-repo
     role: mirror
     visibility: public
 ```
 
-Three competing shapes existed across the five layovers and all three migrate: `mirror.github`
-plus per-repo `visibility` (lvc-ops), `mirror_url` plus `primary_forge` (elementeer, skillweave),
-and no mirror section at all (capacium, fusionaize — now carrying an explicit decision rather than
-an unrecorded absence). `mirror.github`, `mirror_url` and `primary_forge` remain as deprecated
-aliases that resolve into the list.
+Nothing promised in 3.1.0 is removed: the earlier forms still resolve into this list, but each is
+deprecated and will be removed in 4.0.0.
 
-Owners are used verbatim. `elementeer` stays lowercase while `capacium` is capitalised,
-`fusionaize` becomes `fusionAIze` and `veeona` becomes `Veeona-AI`; the workflow's double match is
-a case-sensitive string compare, so any normalisation would break the preflight it feeds.
+- `mirror.github` (with `mirror.visibility`)
+- `mirror_url` (with `mirror.primary_forge`)
+- a `mirror` section that sets neither
 
-### Layer 3 exists (LVC-248)
+Resolving any of them, or importing the `MIRROR_OWNER_VARIABLE` / `MIRROR_REPO_VARIABLE`
+constants, emits a `DeprecationWarning` naming 4.0.0 as the removal version. The earlier
+variable-based override keeps working until then.
 
-`.ops.yaml` appeared in the README architecture diagram and in no file anywhere. It now has a
-loader, a precedence over Layer 2 that is stated and defended in `CONTRACT.md` and gated by a
-test, an absent file as the proven normal case, and a named refusal for a malformed one.
+### Per-repository overrides now load
 
-### `resolve_destinations` is a pure Layer 1 function (LVC-248)
+The `.ops.yaml` per-repository override file is now read. It takes precedence over the
+organisation-level configuration; an absent file is the normal case, and a malformed one is
+refused with a named error instead of being ignored.
 
-`MirrorHandler.resolve_destinations(config, repo)` reads Layer 2 and Layer 3 and returns the
-destination list. It performs no network call — proven by execution under a socket guard, not by
-grepping for a network library — and holds no organisation knowledge. ops-engine is the template;
-it does not know your organisations. A cross-org tool is an operator act, and the org set arrives
-at the call site.
+### Resolution is pure, and the tools read configuration
 
-### The operator tools read config, not a CI variable store (LVC-248)
+Resolving a destination reads your configuration and makes no network request, and it carries no
+built-in assumptions about any particular organisation. The command-line tools that audit and
+propose mirror destinations now read their targets from configuration files, so they no longer
+depend on any CI provider's variable store.
 
-`mirror-destination-audit.py` and `mirror-destination-propose.py` take repeated `--config` paths
-and resolve through the pure function. Neither imports the deprecated constants any more, which
-removes the dependency on one CI system's variable store from the mirror feature — the dependency
-the README's own promise forbids.
+### Configuration fields are no longer silently dropped
 
-### The destination contract from 3.1.0, corrected where it was stale (LVC-247)
+Mirror fields you write that were previously ignored are now declared and respected during
+loading, rather than being discarded.
 
-`MirrorConfig` now declares the fields the layover configs actually write; three of them were
-being dropped silently by pydantic. `docs/layover-consumption.md` declared pin 2.2.0 for all five
-layovers while every `pyproject.toml` pinned `@v3.0.0` — `pin-drift-check` read the document, so
-its report was a fiction. Both are fixed and gated.
+### Releases ship verifiable files
 
-### Releases carry files (LVC-250)
-
-Every tagged release now publishes four assets to the canonical forge **and** to the GitHub
-mirror, from one build:
+Every tagged release now publishes four files to the primary forge and to its GitHub mirror, from
+one build:
 
 ```
 ops_engine-X.Y.Z-py3-none-any.whl
@@ -72,20 +61,9 @@ SHA256SUMS
 ops_engine-X.Y.Z.cdx.json        (CycloneDX SBOM)
 ```
 
-The build is reproducible against a committed `constraints.txt`; two builds of one tag produce
-byte-identical artifacts. Consumer-side dependency resolution is deliberately unchanged and is
-tracked separately.
-
-Release notes are the CHANGELOG entry for that version — this text — and a tag whose version has
-no entry **fails the release**. Notes were previously assembled from commit subjects.
-
-An OSV scan runs against the SBOM and fails the release above a stated severity threshold, which
-is what makes the SBOM a check rather than a document. What the gate does not cover is named in
-the workflow.
-
-Release titles are gated to `Ops Engine vX.Y.Z`. The GitHub releases for v3.1.0 and v2.1.4, which
-had tags but no release object, have been backfilled; 2.1.3 and 2.1.4 carry no changelog entry and
-their bodies say so rather than reconstructing a history from commits.
+The build is reproducible against a committed constraints file: two builds of one tag produce
+byte-identical artifacts. The SBOM is scanned against a vulnerability database, and the release
+fails above a stated severity threshold. Consumer-side dependency resolution is unchanged.
 
 ## 3.1.0
 
