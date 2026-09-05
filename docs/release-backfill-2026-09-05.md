@@ -27,8 +27,10 @@ are written through the GitHub REST API (`gh`), not through the git `github` rem
 
 - Lane branch: `chore/REL-005-backfill-github-releases`
 - Base SHA: `018bb92` (`langevc/ops-engine main`)
-- Pushed tip SHA on the canonical forge: `cb64cfad56d7a5f97af1fb0190f4df3466275919`
-  (fetched again after the push and confirmed equal to the local branch head).
+- Pushed on the canonical forge to `origin/chore/REL-005-backfill-github-releases`.
+  The authoritative pushed-tip SHA (re-fetched and confirmed equal to the branch head at the
+  time the lane closed) is recorded in the REL-005 lane verdict, `REL-005.md`, not embedded in
+  this document — embedding the tip hex here would go stale on the very commit that records it.
 
 ## Read / write surfaces
 
