@@ -27,7 +27,7 @@ are written through the GitHub REST API (`gh`), not through the git `github` rem
 
 - Lane branch: `chore/REL-005-backfill-github-releases`
 - Base SHA: `018bb92` (`langevc/ops-engine main`)
-- Pushed tip SHA on the canonical forge: `cc98c3a18de57c2bb7bd35d0173f8b6453cfdb23`
+- Pushed tip SHA on the canonical forge: `cb64cfad56d7a5f97af1fb0190f4df3466275919`
   (fetched again after the push and confirmed equal to the local branch head).
 
 ## Read / write surfaces
