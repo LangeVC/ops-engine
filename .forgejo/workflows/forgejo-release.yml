@@ -158,11 +158,25 @@ jobs:
           #   * `pipx run build` — assumes `pipx` is present on the runner,
           #     trading one tool assumption for another; `python3 -m venv` is
           #     stdlib, guaranteed on any CPython >= 3.3.
-          python3 -m venv .release-venv
-          .release-venv/bin/python -m pip install --quiet "build" "hatchling==1.32.0"
+          #
+          # REL-008 rework — the venv is created OUTSIDE the source tree, in a
+          # `mktemp -d` directory under $TMPDIR. When it lived inside the
+          # checkout (`.release-venv`), `python -m build --sdist` swept the whole
+          # venv into the tarball — 708 of 816 sdist members were
+          # `.release-venv/*`, and pyvenv.cfg embedded the build machine's
+          # absolute path (`command = <interp> -m venv /ABS/WORKTREE/.release-venv`).
+          # SOURCE_DATE_EPOCH clamps tar mtimes but cannot normalise that path
+          # string, so two runners building the identical tree produced sdists
+          # differing by exactly that line (2016603 vs 2016606 bytes): the sdist
+          # was not reproducible. A venv under $TMPDIR is never inside the tree
+          # hatchling packages, so no future artifact can sweep it in regardless
+          # of hatchling's file selection — a stronger guarantee than an exclude.
+          RELEASE_VENV="$(mktemp -d)/release-venv"
+          python3 -m venv "$RELEASE_VENV"
+          "$RELEASE_VENV/bin/python" -m pip install --quiet "build" "hatchling==1.32.0"
 
           # 1 + 2: the wheel and the sdist, from the same source tree.
-          .release-venv/bin/python -m build --sdist --wheel
+          "$RELEASE_VENV/bin/python" -m build --sdist --wheel
 
           # 3: SHA256SUMS over exactly the two archives, keyed by bare
           #    basename. The assets are published and downloaded flat (the

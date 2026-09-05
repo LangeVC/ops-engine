@@ -155,6 +155,23 @@ def test_two_builds_from_same_tree_are_byte_identical(tmp_path):
         assert _sha256(a) == _sha256(b), f"sdist differs: {a.name}"
 
 
+def test_build_venv_lives_outside_the_source_tree():
+    """REL-008 rework — the build venv must be created outside the checkout.
+
+    When the venv lived inside the tree as ``.release-venv``, ``python -m build
+    --sdist`` swept the whole venv into the tarball, along with the build
+    machine's absolute path baked into its pyvenv.cfg. Two runners at different
+    absolute paths then produced sdists differing by exactly that path line, so
+    the sdist was not byte-identical. The venv is now created via ``mktemp -d``
+    under $TMPDIR, outside the tree hatchling packages, so no artifact can sweep
+    it in regardless of hatchling's file selection.
+    """
+    # The in-tree venv creation command must not appear anywhere in the workflow.
+    assert "python3 -m venv .release-venv" not in WORKFLOW_CONTENT
+    # The outside-the-tree mechanism must be present.
+    assert "$(mktemp -d)/release-venv" in WORKFLOW_CONTENT
+
+
 # --- Criterion 2: all four assets from one documented command sequence --------
 
 
