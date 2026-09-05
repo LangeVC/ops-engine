@@ -159,17 +159,17 @@ Criterion 2 met.
 
 ## Acceptance criterion 3 — tag and published_at unchanged for every touched release
 
-Every touched release = the five edited for title (v2.1.0, v2.1.1, v2.1.2, v2.1.3, v2.0.0)
-plus the two new creates (v3.1.0, v2.1.4). For the five title-edited releases the tag and
-`published_at` must be unchanged, and for each we state whether the body was filled or left
-alone and why:
+Every touched release = the five edited for title (v2.1.0, v2.1.1, v2.1.2, v2.1.3, v2.0.0) plus the
+two new creates (v3.1.0, v2.1.4), plus, in the REL-005 rework, v2.1.3's body. For every touched
+release the tag and `published_at` must be unchanged, and for each we state whether the body was
+filled or left alone and why:
 
 | tag | tag before/after | published_at before/after | body outcome | why |
 |-----|------------------|---------------------------|--------------|-----|
 | v2.1.0 | v2.1.0 / v2.1.0 | 2026-06-04T18:56:14Z unchanged | left alone | body already carries the genuine `## [2.1.0]` CHANGELOG content; only the title prefix was wrong |
 | v2.1.1 | v2.1.1 / v2.1.1 | 2026-06-04T19:04:42Z unchanged | left alone | body already carries the genuine `## [2.1.1]` CHANGELOG content |
 | v2.1.2 | v2.1.2 / v2.1.2 | 2026-06-04T19:07:59Z unchanged | left alone | body already carries the genuine `## [2.1.2]` CHANGELOG content |
-| v2.1.3 | v2.1.3 / v2.1.3 | 2026-06-07T14:13:34Z unchanged | left alone | body is the pre-existing terse stub "Release v2.1.3"; CHANGELOG has no 2.1.3 entry to source a body from, and rewriting would risk invention (criterion 4). The title was the only defect in scope |
+| v2.1.3 | v2.1.3 / v2.1.3 | 2026-06-07T14:13:34Z unchanged | REWORKED (body set to gap statement) | originally left as the pre-existing stub "Release v2.1.3"; the REL-005 REWORK verdict required stating the changelog gap exactly as v2.1.4 does, with the version named 2.1.3 |
 | v2.0.0 | v2.0.0 / v2.0.0 | 2026-05-25T14:03:23Z unchanged | left alone | body already carries genuine release content; only the title prefix was wrong |
 
 Live comparison (catches any accidental tag or published_at shift during the edits):
@@ -206,10 +206,56 @@ Criterion 3 met.
   entry for 2.1.4**. The changelog's versioned headings jump from `## [2.1.2] — 2026-06-04`
   to `## 2.2.0`; 2.1.3 and 2.1.4 are both absent. This body deliberately states the gap
   instead of reconstructing changes from commit history."
-- Title-edited releases: no body was rewritten (bodies preserved, see criterion 3), so no
+- Title-edited releases that already carried genuine CHANGELOG content (v2.1.0, v2.1.1,
+  v2.1.2, v2.0.0) had no body rewritten (bodies preserved, see criterion 3), so no
   reconstruction could occur there.
+- v2.1.3 body (REWORK, REL-005 review): in the original lane its stub "Release v2.1.3" was
+  left alone. The review required stating the changelog gap exactly as v2.1.4 does, with the
+  version named 2.1.3. The body was set to that gap statement (below, criterion REL-005-RW);
+  it states the gap, it reconstructs no history.
 
 Criterion 4 met.
+
+---
+
+## REL-005 rework — v2.1.3 body states the changelog gap
+
+The single review finding returned a REWORK: v2.1.3's body was the stub "Release v2.1.3" and
+did not state the changelog gap, where the operator instruction applied to 2.1.3 and 2.1.4
+alike. The fix set v2.1.3's body to the gap statement in the same wording used for v2.1.4,
+with the version named 2.1.3.
+
+Before (live, pre-edit):
+
+```
+tag         : v2.1.3
+published_at: 2026-06-07T14:13:34Z
+title       : Ops Engine v2.1.3
+body        : "Release v2.1.3"
+```
+
+After (live, the edit with `gh release edit --title "Ops Engine v2.1.3"` kept the title and
+tag; `published_at` remains 2026-06-07T14:13:34Z):
+
+```
+tag         : v2.1.3                              UNCHANGED
+published_at: 2026-06-07T14:13:34Z                 UNCHANGED
+title       : Ops Engine v2.1.3                    UNCHANGED
+body        : "Backfill of the v2.1.3 GitHub release.
+
+This tag exists and this release object is published, but `CHANGELOG.md`
+contains **no entry for 2.1.3**. The changelog's versioned headings jump from
+`## [2.1.2] — 2026-06-04` to `## 2.2.0`; 2.1.3 and 2.1.4 are both absent. This
+body deliberately states the gap instead of reconstructing changes from
+commit history. The release wraps the git tag `v2.1.3` without inventing a
+feature summary."
+```
+
+Post-rework stub re-check over all nine releases (live re-read of every body, tested against
+the exact stub form `^Release v[0-9]+\.[0-9]+\.[0-9]+$`): no remaining body matches — v2.1.3
+was the only stub. v3.0.0's "Ops Engine v3.0.0 Release" is not the bare stub form.
+
+REL-005 rework met.
 
 ---
 
@@ -221,8 +267,7 @@ Criterion 4 met.
   GitHub releases is out of the acceptance scope for REL-005 (existence + body + title) and
   is not gated by any criterion here; it would need the canonical asset bytes and is left
   as a functional / release-publishing concern, not a metadata backfill.
-- v2.1.3's released body is the pre-existing terse stub "Release v2.1.3"; it neither
-  reconstructs history nor states a changelog gap. `CHANGELOG.md` also lacks a 2.1.3 entry
-  (same live grep above). Rewriting that body would require sourcing content the changelog
-  does not provide and was deliberately avoided (criterion 4); the title (criterion 2) was
-  the only defect corrected for v2.1.3.
+- v2.1.3's stub body "Release v2.1.3" was the single REL-005 review REWORK defect; it is
+  resolved in the rework (see the "REL-005 rework" section above) by setting the body to the
+  same gap statement as v2.1.4 with the version named 2.1.3. No v2.1.3 body content was
+  invented.
