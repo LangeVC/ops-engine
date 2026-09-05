@@ -34,6 +34,9 @@ tracked_pyo=$(git ls-files | grep -c '\.pyo$' || true)
 grep -qF '__pycache__/' .gitignore || fail "2: .gitignore does not cover '__pycache__/'"
 grep -qF '*.py[cod]' .gitignore  || fail "2: .gitignore does not cover '*.py[cod]'"
 grep -qF '*.egg-info/' .gitignore || fail "2: .gitignore does not cover '*.egg-info/'"
+# .pytest_cache must also be ignored: a full pytest run writes it, and a gate
+# that leaves it untracked mistimes the "clean tree" check below.
+grep -qF '.pytest_cache/' .gitignore || fail "2: .gitignore does not cover '.pytest_cache/'"
 
 # --- 3. fresh clone: no tracked pyc, test run leaves the tree clean -----------
 TMP="$(mktemp -d)"

@@ -2,6 +2,8 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
+.pytest_cache/
+.benchmarks/
 
 # SkillWeave planning artifacts — IP, never in a public-mirrored repo
 .skillweave/
