@@ -373,6 +373,33 @@ therefore depends on a Forgejo Actions variable store; the config path carries
 no such dependency. The constants may change or move in a minor bump, and the
 public methods' error text moves with them; at 4.0.0 the constants are removed.
 
+## Release notes address an external reader (REL-011)
+
+The release description a tag posts (the CHANGELOG entry for that version,
+sliced out by the notes step of `.forgejo/workflows/forgejo-release.yml`) is a
+document addressed at an **external** reader: operators of other repositories,
+not the team that wrote the release. `scripts/release_notes_audience_gate.py`
+enforces that audience. It reads the extracted notes and refuses, with a named
+error that quotes each offending token and the line it appears on, any note
+that carries an internal ticket reference (`[A-Z]{2,5}-[0-9]+`, e.g.
+`LVC-248`). The refusal exits non-zero and the workflow runs the gate on the
+extracted notes **before** any release object is created, so a failing gate
+fails the release run.
+
+The gate is **stdlib-only** and never imports `ops_engine` (REL-006): the bare
+release runner carries neither yaml nor pydantic, so nothing outside the
+standard library may execute there, and the gate's own tests likewise import
+nothing outside the standard library.
+
+`--forbid-file` is optional and supplies organisation-supplied vocabulary
+terms, one per line, that are withheld from an external reader. ops-engine
+ships **no** organisation vocabulary, so the release workflow never passes the
+flag: an absent forbid file is the proven normal case, and the gate then checks
+internal ticket references alone. A forbid file that is present but malformed
+(a line that is not a single whitespace-free term, or a path that does not
+resolve) is a named refusal (`ForbiddenVocabularyError`), never a silent skip
+that would release without the vocabulary the organisation chose.
+
 ## Test enforcement
 
 `tests/test_public_surface.py` asserts, at CI time, that this declaration and
