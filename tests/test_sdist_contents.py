@@ -17,7 +17,7 @@
 # The allowlist names the top-level components a consumer of a source
 # distribution needs to rebuild the wheel: the package under src/ and the
 # metadata hatchling force-includes (pyproject.toml, README, LICENSE, the VCS
-# exclusion file). Wait-list: any OTHER top-level entry makes the test fail.
+# exclusion file). Any OTHER top-level entry makes the test fail.
 #
 # It requires a Python on PATH that can `python3 -m build` (as the suite's
 # existing shell build checks already do). If the module is missing the test
