@@ -10,9 +10,20 @@ name: Release gate
 # and re-download the sbom.cdx.json asset over the network (REL-009), a second
 # acquisition of bytes the build had already produced. That scan now runs
 # inside forgejo-release.yml over the SBOM the same build produced, BEFORE any
-# release object is created. This file keeps only the version gate, which
-# consumes no release asset and carries no ordering dependency, so there
-# is nothing here to poll for.
+# release object is created. This file keeps only the boundary and version
+# gates, which consume no release asset and carry no ordering dependency, so
+# there is nothing here to poll for.
+#
+# ADP-009 — the destination boundary runs here. The destination a release
+# reaches must come from the config layer (.ops.yaml), never from a user-defined
+# CI variable (vars.*) and never from a hardcoded forge repository or API host in
+# a workflow under .forgejo/. scripts/ci_variable_boundary_gate.py is that gate:
+# it scans every workflow below .forgejo and refuses, with a named error, the two
+# shapes that took a destination outside the config layer. Secrets (credentials,
+# not destinations) and Forgejo-provided event context (github.* — the event, not
+# a user variable store) are permitted. A deliberately reintroduced destination
+# therefore fails THIS build at tag time, before the release step in
+# forgejo-release.yml can publish anywhere.
 on:
   push:
     tags: ["v*"]
@@ -22,6 +33,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: https://github.com/actions/checkout@v4
+      - name: Refuse a forge destination outside the config layer
+        run: |
+          set -euo pipefail
+          python3 scripts/ci_variable_boundary_gate.py --dir .forgejo
       - name: Check tag against the declared version
         run: |
           set -euo pipefail

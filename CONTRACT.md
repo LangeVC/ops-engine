@@ -328,6 +328,61 @@ are workflow-layer strings, not new public surface: `load_ops_yaml`,
 `OpsYamlError`, and `RepoConfig` remain the unpromised-but-documented names of
 `ops_engine.config_loader` described above.
 
+The **git mirror** is the other consumer of that same destination list, and it
+was the next place to bypass the config layer. A mirror's push remote is a
+destination like any release target, so it is read from the committed `.ops.yaml`
+and never restated as a literal in the workflow layer. `.forgejo/workflows/mirror.yml`
+resolves the github destination (`destinations` entries whose `forge` is
+`github`) out of `.ops.yaml` and constructs its push remote from that value plus
+the `GH_MIRROR_TOKEN` secret; a missing github destination is a named refusal
+(`MirrorDestinationBoundaryError`), never a silent Forgejo-only mirror.
+
+### Destination boundary (ADP-009)
+
+The destination must come from the config layer; this section fixes *where a
+workflow under `.forgejo/` may and may not take it from*. These two shapes are
+refused, because each took a destination out of the config layer and back into a
+place a person edits without a review or a single source of truth:
+
+- **a user-defined CI variable as a destination.** `vars.<NAME>` is the CI
+  system's repo-/org-level *variable store* — user-managed, unreviewed data. A
+  destination rendered into `vars.RELEASE_DESTINATIONS` and read back out (the
+  pre-ADP-008 regression, ADP-004) carried the destination exactly there.
+- **a hardcoded repository or API host.** A literal `HOST/OWNER/REPO` (with or
+  without a trailing `.git`) or a forge API URL that names the target by value
+  instead of reading it from `.ops.yaml`. The pre-ADP-008 release workflow
+  reached for the Actions variable; the mirror workflow hardcoded
+  `github.com/LangeVC/ops-engine` as its push remote. Both are the shape refused
+  here.
+
+What is **not** refused, because it is not in either shape:
+
+- **Secrets are not destinations.** `secrets.<NAME>` carries a *credential* (a
+  token), never the repository it authenticates to. The token stays in the
+  credential store; only the repository it pushes to moves into the config
+  layer. Refusing `secrets.GH_MIRROR_TOKEN` would be refusing nothing to do with
+  a destination and would be switched off within a fortnight.
+- **Forgejo-provided event context is not a user variable store.**
+  `github.repository`, `github.ref_name`, `github.server_url` identify the run
+  the runner was given; they are the *event*, not user-managed variables, and a
+  destination workflow is allowed to read them. The distinction this line draws
+  is deliberately between `secrets.*`/`github.*` (permitted inputs) and
+  `vars.*` (the user variable store a destination must not ride in).
+- **tool-fetch suppliers.** A destination workflow still downloads tool bytes
+  — `actions/checkout` fetches a released action, `google/osv-scanner` fetches a
+  released binary. Those suppliers are not a release or mirror the workflow
+  produces, and the handful are whitelisted as committed tuples in the gate.
+
+`scripts/ci_variable_boundary_gate.py` enforces the boundary. It is **stdlib-only**
+and never imports `ops_engine` (REL-006). It scans every workflow under
+`.forgejo/` and refuses any file naming either refused shape, reporting the
+file, the 1-based line, and the offending token. It is wired into
+`.forgejo/workflows/release-gate.yml`, which runs it over the tree before the
+version gate, so a workflow that reintroduces a destination by value fails the
+release gate build at tag time — before `forgejo-release.yml`'s release step can
+publish to a destination nobody reviewed. `mirror.yml` both reads its destination
+from the config layer and is covered by the same gate.
+
 ## Destination resolver (DST-003)
 
 `resolve_destinations(config, repo, *, repo_dir=None)` is the Layer-1
