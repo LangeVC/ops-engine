@@ -124,6 +124,43 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
+      # REL-011 — the release body is addressed at an EXTERNAL reader. A tag
+      # whose extracted notes carry an internal ticket reference
+      # ([A-Z]{2,5}-[0-9]+, e.g. LVC-248) names the team that wrote the
+      # release, not the consumer the body is for; the notes step above
+      # already refuses a tag whose version has no changelog section, and this
+      # step refuses a section that still talks in internal tickets. The gate
+      # runs BEFORE any release object is created on either forge, so a
+      # failing gate fails the release run. The gate is a committed stdlib-only
+      # script that imports nothing outside the standard library (REL-006: the
+      # bare runner has neither yaml nor pydantic).
+      #
+      # The code-and-number shape cannot tell an internal project code from an
+      # external identifier: CVE advisory ids, RFC/ISO numbers, PEP-8, gRPC
+      # and ordinary technical prose (UTF-8, SHA-256, TLS-1.3, HTTP-2,
+      # AES-256) all share it, and no denylist of universal prefixes is ever
+      # complete. The engine therefore classifies nothing by shape: it refuses
+      # a ticket-shaped token only when its prefix is among the prefixes THIS
+      # step declares via --ticket-prefixes. The engine ships no organisation
+      # vocabulary — but this repository is a LangeVC repository, so this
+      # workflow (the config layer) declares LangeVC's tracker prefixes below
+      # and this repository's own notes stay gated. A layover that copies this
+      # workflow adapts that one line to its own organisation's prefixes.
+      # ops-engine ships no withheld-vocabulary forbid file, so --forbid-file
+      # is absent — an absent forbid file is the proven normal case.
+      - name: Gate the release notes for an external audience
+        env:
+          NOTES: "${{ steps.notes.outputs.notes }}"
+        run: |
+          set -euo pipefail
+          NOTES_FILE="$(mktemp)"
+          PREFIXES_FILE="$(mktemp)"
+          trap 'rm -f "$NOTES_FILE" "$PREFIXES_FILE"' EXIT
+          printf '%s\n' "$NOTES" > "$NOTES_FILE"
+          printf '%s\n' LVC OME CORE LNF DST REL CFG FFR > "$PREFIXES_FILE"
+          python3 scripts/release_notes_audience_gate.py \
+            --ticket-prefixes "$PREFIXES_FILE" "$NOTES_FILE"
+
       # Reproducible build: four assets from committed constraints.
       #
       # One command sequence produces the wheel, the sdist, SHA256SUMS and the

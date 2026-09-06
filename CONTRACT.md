@@ -373,6 +373,61 @@ therefore depends on a Forgejo Actions variable store; the config path carries
 no such dependency. The constants may change or move in a minor bump, and the
 public methods' error text moves with them; at 4.0.0 the constants are removed.
 
+## Release notes address an external reader (REL-011)
+
+The release description a tag posts (the CHANGELOG entry for that version,
+sliced out by the notes step of `.forgejo/workflows/forgejo-release.yml`) is a
+document addressed at an **external** reader: operators of other repositories,
+not the team that wrote the release. `scripts/release_notes_audience_gate.py`
+enforces that audience. It reads the extracted notes and refuses, with a named
+error that quotes each offending token and the line it appears on, any note
+that carries an internal ticket reference whose prefix the caller has declared
+via `--ticket-prefixes`. The refusal exits non-zero and the workflow runs the
+gate on the extracted notes **before** any release object is created, so a
+failing gate fails the release run.
+
+**The engine classifies no prefix by itself.** The code-and-number shape
+`[A-Z]{2,5}-[0-9]+` is shared by an internal ticket reference and by
+identifiers the external reader legitimately needs — a CVE advisory id, an RFC
+or ISO number, PEP-8, gRPC, and ordinary technical prose (`UTF-8`, `SHA-256`,
+`TLS-1.3`, `HTTP-2`, `AES-256`). The shape alone cannot tell an internal project
+code from an external identifier, and no deny-list of universal prefixes is
+ever sound, because that set is open-ended (`UTF`, `SHA`, `TLS`, `HTTP`, `SSL`,
+`AES`, `RSA`, `IEEE`, `PNG`, `JPEG`, ...). So the gate does not attempt the
+classification: a shape match is refused only when its prefix is among the
+prefixes the caller supplies as `--ticket-prefixes`.
+
+`--ticket-prefixes` is optional and supplies the organisation's own tracker
+prefixes, one per line, each an uppercase `[A-Z]{2,5}` token. ops-engine is the
+template and ships **no** organisation vocabulary, so with no `--ticket-prefixes`
+and no `--forbid-file` the gate refuses **nothing** — an organisation that
+supplies no vocabulary gets no vocabulary check. That is the correct default,
+not a hole. This repository's own release workflow *does* supply it: because
+ops-engine is a LangeVC repository, `.forgejo/workflows/forgejo-release.yml`
+declares LangeVC's tracker prefixes (`LVC`, `OME`, `CORE`, `LNF`, `DST`, `REL`,
+`CFG`, `FFR`) and this repository's own notes therefore stay gated. A layover
+that adopts the workflow adapts that prefix list to its own organisation; the
+vocabulary always arrives from the workflow (the config layer), never from the
+engine. A `--ticket-prefixes` file that is NAMED but missing or malformed (a
+line that is not one uppercase 2-5 letter token) is a named refusal, never a
+silent skip that would release without the tracker prefixes the organisation
+chose.
+
+`--forbid-file` is optional and supplies organisation-supplied *withheld*
+vocabulary terms, one per line — product names and project codenames that must
+not reach an external reader — alongside the prefix set. ops-engine ships no
+such terms, so the release workflow never passes the flag. `--forbid-file` and
+`--ticket-prefixes` are independent: an organisation may run either alone, both
+together, or neither. A forbid file that is present but malformed (a line that
+is not a single whitespace-free term, or a path that does not resolve) is a
+named refusal (`ForbiddenVocabularyError`), never a silent skip that would
+release without the vocabulary the organisation chose.
+
+The gate is **stdlib-only** and never imports `ops_engine` (REL-006): the bare
+release runner carries neither yaml nor pydantic, so nothing outside the
+standard library may execute there, and the gate's own tests likewise import
+nothing outside the standard library.
+
 ## Test enforcement
 
 `tests/test_public_surface.py` asserts, at CI time, that this declaration and
