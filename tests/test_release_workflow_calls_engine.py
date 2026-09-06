@@ -81,12 +81,12 @@ def test_no_forge_destination_literal_in_the_release_workflow():
 
 
 def test_publish_block_resolves_destinations_from_config():
-    """The publish block builds an OpsEngineConfig from the RELEASE_DESTINATIONS
-    variable and the Forgejo-provided repository identity, then resolves
-    destinations through the engine's Layer-1 resolver."""
+    """The publish block reads the committed .ops.yaml via load_ops_yaml and
+    materialises a typed OpsEngineConfig from it; no Actions variable and no
+    destination literal survive in the workflow layer (ADP-008)."""
     block = _publish_block()
-    assert "RELEASE_DESTINATIONS" in block
-    assert "resolve_destinations" in block
+    assert "load_ops_yaml" in block
+    assert "RELEASE_DESTINATIONS" not in block
     assert "OpsEngineConfig.load" in block
     assert "github.repository" in WORKFLOW_CONTENT or "FORGEJO_REPOSITORY" in block
 

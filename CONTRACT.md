@@ -307,6 +307,27 @@ told, not left believing the override is in force.
 `RepoConfig.merge_layer3(layer3)` applies a loaded Layer-3 `RepoConfig` over a
 Layer-2 one, implementing the precedence above.
 
+### Release destination as a committed file (ADP-008)
+
+`load_ops_yaml` has exactly one consumer and that consumer is the release
+workflow: `.forgejo/workflows/forgejo-release.yml` reads the committed `.ops.yaml`
+at the repository root and resolves **both** the canonical Forgejo destination
+and the mirror from it. No destination, forge repository, or API host is a
+literal in the workflow layer, and no `vars.*` Actions variable is read. This
+reverses the `vars.RELEASE_DESTINATIONS` regression (ADP-004), which moved the
+destination out of the config layer into one CI system's variable store, against
+the standing operator decision LVC-247/248 exists to implement.
+
+The dangerous half of that regression — an unset variable resolving to `[]` and
+a release publishing to the canonical forge only while reporting success — is
+closed by named refusal in the workflow: a **missing** `.ops.yaml` is refused as
+`MissingOpsYamlError`, an **empty** destinations list as
+`MissingReleaseDestinationsError`, and a **malformed** file already refuses as
+`OpsYamlError` from `load_ops_yaml` itself. None of these exits zero. The names
+are workflow-layer strings, not new public surface: `load_ops_yaml`,
+`OpsYamlError`, and `RepoConfig` remain the unpromised-but-documented names of
+`ops_engine.config_loader` described above.
+
 ## Destination resolver (DST-003)
 
 `resolve_destinations(config, repo, *, repo_dir=None)` is the Layer-1
