@@ -9,6 +9,15 @@ team that wrote the release. A body that names an internal ticket reference
 this gate refuses it with a named error that quotes each offending token and
 the line it appears on, exiting non-zero BEFORE any release object exists.
 
+The shape scan is not the whole story: a token whose prefix is a *universal
+external identifier class* (``CVE``, ``RFC``, ``ISO``, ``PEP``, ``RPC``) has the
+same code-and-number shape but is prose the external reader legitimately needs
+— a security fix must be announced by its CVE id, a standard by its RFC or ISO
+number. Those classes are universal, not organisational, so excluding them in
+Layer 1 is legitimate. ops-engine is the template and knows no org, so no
+project ticket code is allowlisted here: an organisation's own ticket prefixes
+are Layer-2 vocabulary and travel via ``--forbid-file``.
+
 The gate is stdlib-only and never imports ``ops_engine`` (REL-006): the bare
 release runner carries neither yaml nor pydantic, so nothing outside the
 standard library may execute here.
@@ -33,6 +42,17 @@ import sys
 from pathlib import Path
 
 INTERNAL_TICKET_RE = re.compile(r"[A-Z]{2,5}-[0-9]+")
+
+# Universal external identifier classes whose code-and-number form is shape-
+# identical to an internal ticket reference. A release note announcing a
+# security fix names its CVE; a standards citation names an RFC, an ISO format,
+# a PEP, or an RPC (gRPC) protocol. Refusing those as "internal ticket
+# references" would mislabel exactly the disclosure the external reader needs,
+# so a match whose prefix is one of these universal classes is NOT an author's
+# tracker reference. These classes are universal, not organisational: the set
+# stays here (Layer 1) only because it holds no org knowledge, while an
+# organisation's own ticket prefixes (LVC, OME, ...) travel via --forbid-file.
+EXTERNAL_IDENTIFIER_PREFIXES = frozenset(("CVE", "RFC", "ISO", "PEP", "RPC"))
 
 GREEN_LINE = (
     "release-notes audience gate: PASS - the release description names no "
@@ -70,6 +90,9 @@ def _find_offences(notes, forbid_terms):
     offences = set()
     for lineno, line in enumerate(notes.splitlines(), start=1):
         for match in INTERNAL_TICKET_RE.finditer(line):
+            prefix = match.group(0).split("-", 1)[0]
+            if prefix in EXTERNAL_IDENTIFIER_PREFIXES:
+                continue
             offences.add((lineno, match.group(0), "internal"))
         for term in forbid_terms:
             if term in line:

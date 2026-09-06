@@ -386,6 +386,17 @@ that carries an internal ticket reference (`[A-Z]{2,5}-[0-9]+`, e.g.
 extracted notes **before** any release object is created, so a failing gate
 fails the release run.
 
+The code-and-number shape is not the whole story: a token whose prefix is a
+**universal external identifier class** (`CVE`, `RFC`, `ISO`, `PEP`, `RPC`)
+has the same shape but is prose the external reader legitimately needs — a
+security fix must be announced by its CVE id, a standards citation names an
+RFC, an ISO format, a PEP, or an RPC (gRPC) protocol. The gate excludes those
+classes before the internal-ticket refusal, so announcing a security advisory
+by its CVE id, or citing an RFC, still passes. Those classes are universal, not
+organisational: ops-engine is the template and knows no org, so no *project*
+ticket code is allowlisted in the gate; an organisation's own ticket prefixes
+are Layer-2 vocabulary that arrives via `--forbid-file`.
+
 The gate is **stdlib-only** and never imports `ops_engine` (REL-006): the bare
 release runner carries neither yaml nor pydantic, so nothing outside the
 standard library may execute there, and the gate's own tests likewise import

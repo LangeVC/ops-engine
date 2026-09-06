@@ -112,6 +112,32 @@ def test_internal_ticket_reference_is_refused_red_proof():
     assert "line %d" % _line_of(TICKETED_NOTES, "LVC-250") in r.stderr
 
 
+def test_external_identifier_prose_passes():
+    """GREEN PROOF for the rework finding: a CVE id, an RFC number, an ISO
+    format string, and an RPC protocol number are shape-identical to an
+    internal ticket reference but are prose the EXTERNAL reader legitimately
+    needs (a security fix must be announced by its CVE id; a standards
+    citation names an RFC/ISO/PEP/RPC). Each must PASS — exit 0 — not be
+    mislabelled the author's tracker.
+
+    This is deliberately a pure Layer-1 scan (no --forbid-file): the exclusion
+    lives in the gate, not in an org vocabulary. ops-engine is the template and
+    knows no org; CVE/RFC/ISO/PEP/RPC are universal identifier classes, so they
+    are excluded in Layer 1, while an organisation's own ticket prefixes must
+    keep flowing through --forbid-file from Layer 2.
+    """
+    notes = (
+        "This release fixes CVE-2026-12345, a severity-9 advisory in the SBOM "
+        "scanner, adopts RFC-5322 date formatting, ships an ISO-8601 timestamp, "
+        "follows PEP-8, and drops RPC-2 (gRPC-2) framing.\n"
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write(tmp, notes)
+        r = _run_gate(path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "PASS" in r.stdout
+
+
 # --- Criterion 2: optional --forbid-file, absent = normal, malformed = named -
 
 

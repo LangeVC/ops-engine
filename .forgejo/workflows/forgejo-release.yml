@@ -129,7 +129,11 @@ jobs:
       # ([A-Z]{2,5}-[0-9]+, e.g. LVC-248) names the team that wrote the
       # release, not the consumer the body is for; the notes step above
       # already refuses a tag whose version has no changelog section, and this
-      # step refuses a section that still talks in internal tickets. The gate
+      # step refuses a section that still talks in internal tickets. A token
+      # whose prefix is a universal external identifier class (CVE, RFC, ISO,
+      # PEP, RPC) has the same shape but is prose the external reader needs —
+      # a security fix announced by its CVE id must not be refused
+      # (REL-011 rework) — so the gate excludes those classes first. The gate
       # runs BEFORE any release object is created on either forge, so a
       # failing gate fails the release run. The gate is a committed stdlib-only
       # script that imports nothing outside the standard library (REL-006: the
