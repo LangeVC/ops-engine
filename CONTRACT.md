@@ -346,6 +346,36 @@ not re-implement that check; it returns `Destination` objects whose
 `forge`/`repo` values are the inputs `resolve_destination` then verifies
 verbatim, case-sensitively, before any network call.
 
+## Adapter factory (ADP-002)
+
+The adapter factory lives in the unpromised submodule `ops_engine.adapters.factory`
+and is **not** a `contract` name (it is absent from the exports table above,
+exactly like the `resolve_destinations` entry point it completes). It is the
+second half of the Layer-1 destinations seam: `resolve_destinations` turns a
+config object into a `Destination` list; the factory turns that list into
+constructed adapters.
+
+- `adapter_for(destination, *, token="", webhook_secret="", base_url="")` maps
+  one `Destination` to the matching `ForgeAdapter` by the `forge` value:
+  `"github"` yields `GithubAdapter`, `"forgejo"` yields `ForgejoAdapter`.
+  `token` and `webhook_secret` are caller-supplied credentials; `base_url` is the
+  Forgejo instance address and is caller input (unused for GitHub). The factory
+  holds a forge-name-to-adapter mapping and nothing else: no organisation name is
+  held and no network call is made — nothing is fetched, discovered, or hardcoded.
+
+- An unrecognised `forge` value raises `UnknownForgeError` naming the value and
+  the supported set. This is a refusal, never a fallback: the factory will not
+  silently produce a GitHub adapter for a destination that named another forge.
+
+- `adapters_for(destinations, *, ...)` maps a destination list to an adapter
+  list. An empty destination list is the normal, deliberate "unmirrored" case and
+  maps to an empty adapter list — never a crash.
+
+`UnknownForgeError` is a name in the internal submodule `ops_engine.adapters.factory`
+and is therefore unpromised by this contract, like the other submodule names; the
+behaviour above is documented as the promised semantics the release module
+(ADP-003) relies on.
+
 ## Variable-name constants — deprecated
 
 `MIRROR_OWNER_VARIABLE` and `MIRROR_REPO_VARIABLE` live in the unpromised
