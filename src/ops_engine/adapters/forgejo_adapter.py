@@ -18,11 +18,6 @@ RETRY_DELAYS = [1.0, 2.0, 4.0]
 
 class ForgejoAdapter(ForgeAdapter):
     def __init__(self, base_url: str, token: str, webhook_secret: str):
-        if not webhook_secret:
-            raise ValueError(
-                "refusing to start: no webhook_secret configured; an unsigned "
-                "ingress accepts every payload"
-            )
         self.base_url = base_url.rstrip("/")
         self.token = token
         self.webhook_secret = webhook_secret
@@ -89,6 +84,11 @@ class ForgejoAdapter(ForgeAdapter):
         }
 
     def _verify_signature(self, headers: dict[str, str], payload: bytes) -> None:
+        if not self.webhook_secret:
+            raise ValueError(
+                "refusing to parse webhook: no webhook_secret configured; an "
+                "unsigned ingress accepts every payload"
+            )
         sig_header = headers.get("x-forgejo-signature") or headers.get("x-gitea-signature", "")
         if not sig_header:
             raise ValueError("missing webhook signature header")

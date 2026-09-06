@@ -10,8 +10,9 @@ Two ways past the gate, both fixed in both adapters:
 
 1. A request without a signature header is refused — absence of proof is not
    proof, even when the secret is correctly configured.
-2. A service with no configured secret refuses to verify rather than accepting
-   everything.
+2. A service with no configured secret refuses to verify at the ingress rather
+   than accepting everything (ADP-006: construction still succeeds so that
+   publication, which never parses a webhook, needs no secret).
 
 And when the secret IS configured and a signature IS present, the correct
 signature must still be accepted and a wrong one refused.
@@ -113,11 +114,13 @@ async def test_wrongly_signed_payload_is_refused():
 
 
 @pytest.mark.asyncio
-async def test_no_configured_secret_refuses_to_start():
-    """A service with no configured secret refuses to start rather than
-    accepting everything."""
+async def test_no_configured_secret_refuses_at_ingress_not_at_start():
+    """A service with no configured secret may start (to publish, which never
+    parses a webhook), but refuses to parse a webhook rather than accepting
+    everything (ADP-006 moved the guard from the constructor to the ingress)."""
+    adapter = _forgejo_adapter("")
     with pytest.raises(ValueError, match="secret"):
-        _forgejo_adapter("")
+        await adapter.parse_webhook({"x-forgejo-signature": "deadbeef"}, _payload())
 
 
 # --- GitHub: the second adapter, the same gate ------------------------------
@@ -157,10 +160,13 @@ async def test_github_wrongly_signed_payload_is_refused():
         await adapter.parse_webhook(headers, payload)
 
 
-def test_github_no_configured_secret_refuses_to_start():
-    """A GitHub service with no configured secret refuses to start."""
+@pytest.mark.asyncio
+async def test_github_no_configured_secret_refuses_at_ingress_not_at_start():
+    """A GitHub service with no configured secret may start but refuses to parse
+    a webhook (ADP-006 moved the guard to the ingress)."""
+    adapter = _github_adapter("")
     with pytest.raises(ValueError, match="secret"):
-        _github_adapter("")
+        await adapter.parse_webhook({"x-hub-signature-256": "sha256=deadbeef"}, _github_payload())
 
 
 # --- Network binding: reachable only from the Docker network ----------------
