@@ -1,5 +1,37 @@
 # Changelog
 
+## 3.3.0
+
+The adapter factory no longer rejects the default, so publishing a release needs no webhook
+secret it would never read. The release workflow now publishes through that same path, and the
+source distribution ships exactly the package.
+
+### Constructing an adapter no longer needs a webhook secret
+
+The two forge adapters guarded the webhook secret in their constructor, so building an adapter —
+for publication, which never parses a webhook — refused to run without a secret it would never
+use. The guard now lives in the signature check, the one place per adapter that actually reads
+the secret: an adapter constructs without one, while an unsigned incoming webhook is still
+refused.
+
+### The release workflow calls the engine to publish
+
+The release workflow no longer reimplements publication with a sequence of API calls. It hands
+the built release and its assets to the engine's release handler, which creates the release and
+attaches every artifact to each configured destination. The mirror API host and repository are
+no longer written as fixed values in the workflow; destinations are resolved from configuration.
+
+### The source distribution ships exactly the package
+
+A tagged release's source archive previously swept in the repository's neighbouring directories.
+It now lists precisely which files it publishes, and a regression test fails the build if a stray
+top-level entry is added back.
+
+### Housekeeping
+
+The release module's factory maps a destination's forge to its adapter, and refuses an unknown
+forge with a named error instead of guessing.
+
 ## 3.2.0
 
 The mirror destination is now declared in your configuration as a list, and every release ships
