@@ -58,7 +58,7 @@ one build:
 ops_engine-X.Y.Z-py3-none-any.whl
 ops_engine-X.Y.Z.tar.gz
 SHA256SUMS
-ops_engine-X.Y.Z.cdx.json        (CycloneDX SBOM)
+sbom.cdx.json        (CycloneDX SBOM)
 ```
 
 The build is reproducible against a committed constraints file: two builds of one tag produce
