@@ -376,6 +376,17 @@ and is therefore unpromised by this contract, like the other submodule names; th
 behaviour above is documented as the promised semantics the release module
 (ADP-003) relies on.
 
+### Webhook secret boundary (ADP-006)
+
+The `webhook_secret` is a credential read in exactly one place per adapter — the
+HMAC check inside `parse_webhook` — never in the constructor. An adapter therefore
+constructs with an empty `webhook_secret` (the factory's and release module's own
+default) and can run the publication path, which never parses a webhook, without a
+secret. The ingress guard is NOT weakened: `parse_webhook` on an adapter whose
+`webhook_secret` is empty raises `ValueError` naming the missing secret, so an
+unsigned ingress still refuses every payload. That refusal lives where the secret
+is used, not where it is not.
+
 ## Release publication to every destination (ADP-003)
 
 `ReleaseHandler.publish_release(...)` is the release module's publication entry
