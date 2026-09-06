@@ -233,20 +233,24 @@ class TestReleaseTitleGate:
         create_idx = FORGEJO_RELEASE_CONTENT.index("Create Release")
         assert gate_idx < create_idx
 
-    def test_forgejo_release_name_uses_gated_title(self):
-        """The Create Release payload names the gated title, not the bare tag."""
-        assert "RELEASE_NAME" in FORGEJO_RELEASE_CONTENT
-        assert '--arg name "${RELEASE_NAME}"' in FORGEJO_RELEASE_CONTENT
+    def test_forgejo_release_name_comes_from_the_name_template(self):
+        """The release name the engine renders is the gated convention, not the
+        bare tag: the workflow passes a name_template that names the product
+        prefix, and the engine renders it against the tag (criterion 1 of
+        FFR-200-4)."""
+        assert "NAME_TEMPLATE" in FORGEJO_RELEASE_CONTENT
+        assert "Ops Engine {tag_name}" in FORGEJO_RELEASE_CONTENT
 
 
 class TestMirrorCreatesGitHubRelease:
-    """Criteria 1, 2, 4: byte-identical assets, no second build, stated order.
+    """Criteria 1, 2, 4: one build, published by the engine, no download.
 
-    REL-010 — the topology changed. The GitHub release is no longer derived by
-    mirror.yml from a network download; forgejo-release.yml builds the four
-    assets once and publishes them to BOTH forges from its own workspace. The
-    mirror is now git-ref push only. These tests assert that split: no download
-    anywhere, no second build, and the single ordered publish path.
+    REL-010 established one build published to both forges from the same
+    workspace; ADP-004 moves that publication into the engine
+    (ReleaseHandler.publish_release), which resolves destinations from config
+    instead of hardcoding the mirror. These tests assert the split: no download
+    anywhere, no second build, the mirror is git-ref push only, and the
+    destination reaches the engine from config rather than a literal.
     """
 
     def test_no_workflow_downloads_a_release_asset(self):
@@ -259,13 +263,15 @@ class TestMirrorCreatesGitHubRelease:
         assert "releases/tags" not in MIRROR_CONTENT
         assert "releases/\"${REL_ID}\"/assets" not in MIRROR_CONTENT
 
-    def test_forgejo_release_publishes_to_both_forges_from_workspace(self):
-        """Criterion 1 (REL-010): forgejo-release.yml uploads the four assets to
-        the GitHub mirror from its own workspace (`--data-binary "@$asset"`), with
-        no download step between build and upload."""
-        assert "uploads.github.com" in FORGEJO_RELEASE_CONTENT
+    def test_forgejo_release_publishes_to_both_forges_via_the_engine(self):
+        """Criterion 1 (ADP-004): forgejo-release.yml no longer uploads to a
+        forge with curl. It hands the built assets to the engine, which creates
+        the release and attaches every asset on every destination — no
+        hardcoded upload host and no download step between build and publish."""
+        assert "publish_release" in FORGEJO_RELEASE_CONTENT
         assert "GH_MIRROR_TOKEN" in FORGEJO_RELEASE_CONTENT
-        assert "--data-binary \"@${asset}\"" in FORGEJO_RELEASE_CONTENT or "--data-binary \"@{asset}\"" in FORGEJO_RELEASE_CONTENT
+        # The hardcoded mirror upload host is gone from the release workflow.
+        assert "uploads." not in FORGEJO_RELEASE_CONTENT
 
     def test_mirror_is_git_push_only(self):
         """Criterion 3 (REL-010): mirror.yml keeps exactly its force-push and
@@ -292,16 +298,13 @@ class TestMirrorCreatesGitHubRelease:
         assert "(cd dist && sha256sum *.whl *.tar.gz) > SHA256SUMS" in FORGEJO_RELEASE_CONTENT
         assert "sha256sum dist/*.whl dist/*.tar.gz > SHA256SUMS" not in FORGEJO_RELEASE_CONTENT
 
-    def test_forgejo_release_is_published_before_github(self):
-        """Criterion 4: the Forgejo release is created and fully uploaded first;
-        the GitHub release is derived afterwards, from the same workspace bytes,
-        so a GitHub-side failure leaves the Forgejo release fully published."""
-        # Create Release precedes Create GitHub release in the one workflow.
-        forgejo_idx = FORGEJO_RELEASE_CONTENT.index("Create Release")
-        gh_idx = FORGEJO_RELEASE_CONTENT.index("Create GitHub release")
-        assert forgejo_idx < gh_idx
-        # A GitHub-side failure states the Forgejo release is already published.
-        assert "already fully published" in FORGEJO_RELEASE_CONTENT
-        # The GitHub release name/body are the gated title and notes, not
-        # re-fetched from Forgejo.
-        assert "RELEASE_NAME" in FORGEJO_RELEASE_CONTENT
+    def test_mirror_destination_comes_from_config_not_a_literal(self):
+        """Criterion 4 (ADP-004): the mirror destination is declared in the
+        config layer (the RELEASE_DESTINATIONS Actions variable), not as a
+        forge repository literal in the workflow. The engine resolves it via
+        resolve_destinations."""
+        assert "RELEASE_DESTINATIONS" in FORGEJO_RELEASE_CONTENT
+        assert "resolve_destinations" in FORGEJO_RELEASE_CONTENT
+        # No owner/repo destination literal and no API-host literal remain.
+        assert "GH_REPO=" not in FORGEJO_RELEASE_CONTENT
+        assert "GH_API=" not in FORGEJO_RELEASE_CONTENT

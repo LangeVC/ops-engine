@@ -370,135 +370,161 @@ jobs:
           sys.exit(0)
           OSV_GATE_PY
 
+      # ADP-004 — the workflow calls the ENGINE to publish; it no longer
+      # reimplements publication. The four curl steps that used to POST each
+      # forge's release API (Create Release / Upload assets / Create GitHub
+      # release / Upload assets to GitHub) are gone: they hardcoded the mirror
+      # forge's API and upload hosts and the mirror repository name as shell
+      # literals. The engine (`ReleaseHandler.publish_release`) creates the
+      # release and attaches every artifact on EVERY destination resolved from
+      # config — one build, published outward, nothing re-downloaded (REL-010),
+      # with a partial publication reported rather than swallowed.
+      #
+      # Destination resolution: the canonical Forgejo destination is this
+      # repository itself (`github.repository`) keyed against the runner's own
+      # base URL (`github.server_url`) — both Forgejo-provided, no literal. Any
+      # mirror destination is declared in the repository-level `vars.
+      # RELEASE_DESTINATIONS` Actions variable as a YAML list of {forge, repo}
+      # entries — the config layer, not a literal in this file.
+      #
+      # Two forges carry two different credentials, and the adapter factory's
+      # single-token form cannot serve them, so the workflow constructs the
+      # adapters itself and passes them through `publish_release`'s `adapters`
+      # injection point (destination resolution still always runs). Each
+      # adapter refuses to construct without a non-empty webhook secret — a
+      # signed ingress must refuse unsigned payloads — so the organisation's
+      # webhook secrets are supplied to satisfy that constructor contract even
+      # though publication never touches a webhook.
       - name: Create Release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: "${{ github.event.inputs.tag_name || github.ref_name }}"
           NOTES: "${{ steps.notes.outputs.notes }}"
-          RELEASE_NAME: "${{ steps.title.outputs.release_name }}"
+          NAME_TEMPLATE: "Ops Engine {tag_name}"
+          FORGEJO_REPOSITORY: "${{ github.repository }}"
+          FORGEJO_BASE_URL: "${{ github.server_url }}"
+          FORGEJO_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          FORGEJO_WEBHOOK_SECRET: "${{ secrets.FORGEJO_WEBHOOK_SECRET }}"
+          GH_MIRROR_TOKEN: "${{ secrets.GH_MIRROR_TOKEN }}"
+          GH_MIRROR_WEBHOOK_SECRET: "${{ secrets.GH_MIRROR_WEBHOOK_SECRET }}"
+          RELEASE_DESTINATIONS: "${{ vars.RELEASE_DESTINATIONS }}"
         run: |
           set -euo pipefail
 
-          TAG_NAME="${{ github.event.inputs.tag_name || github.ref_name }}"
+          # The four assets live split across the repository (dist/*.whl and
+          # dist/*.tar.gz) and the workspace root (SHA256SUMS and
+          # sbom.cdx.json). The engine attaches whatever files sit in ONE
+          # directory, so stage them flat here: the SHA256SUMS is keyed by
+          # bare basename (the build step ran `(cd dist && sha256sum ...)`),
+          # so a consumer's `sha256sum -c` still verifies the flat publish.
+          mkdir -p release-assets
+          cp dist/*.whl dist/*.tar.gz SHA256SUMS sbom.cdx.json release-assets/
 
-          PAYLOAD=$(jq -n \
-            --arg tag_name "$TAG_NAME" \
-            --arg name "${RELEASE_NAME}" \
-            --arg body "${NOTES}" \
-            '{tag_name: $tag_name, name: $name, body: $body, draft: false, prerelease: false}')
+          # The engine is installed into an isolated venv OUTSIDE the source
+          # tree (REL-008: an in-tree venv is swept into the sdist and breaks
+          # byte-for-byte reproducibility).
+          ENGINE_VENV="$(mktemp -d)/engine-venv"
+          python3 -m venv "$ENGINE_VENV"
+          "$ENGINE_VENV/bin/python" -m pip install --quiet -r constraints.txt -e .
 
-          echo "Creating Forgejo release for $TAG_NAME..."
+          "$ENGINE_VENV/bin/python" - <<'PUBLISH_PY'
+          import asyncio
+          import os
+          import sys
 
-          HTTP_STATUS=$(curl -s -o response.json -w "%{http_code}" \
-            -X POST "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases" \
-            -H "Authorization: token ${GITHUB_TOKEN}" \
-            -H "Content-Type: application/json" \
-            -d "$PAYLOAD")
+          import yaml
 
-          if [ "$HTTP_STATUS" != "201" ]; then
-            echo "Failed to create release. HTTP $HTTP_STATUS"
-            cat response.json
-            exit 1
-          fi
+          from ops_engine.adapters.forgejo_adapter import ForgejoAdapter
+          from ops_engine.adapters.github_adapter import GithubAdapter
+          from ops_engine.config_loader import OpsEngineConfig
+          from ops_engine.modules.mirror import resolve_destinations
+          from ops_engine.modules.release import ReleaseHandler
 
-          echo "Release created successfully."
+          repo = os.environ["FORGEJO_REPOSITORY"]
+          tag_name = os.environ["TAG_NAME"]
+          release_notes = os.environ["NOTES"]
+          name_template = os.environ["NAME_TEMPLATE"]
+          forgejo_base_url = os.environ["FORGEJO_BASE_URL"]
 
-      - name: Upload assets
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
+          # Mirror destinations come from the RELEASE_DESTINATIONS config
+          # variable; the canonical Forgejo destination is this repository.
+          raw_destinations = os.environ.get("RELEASE_DESTINATIONS", "").strip()
+          mirror_destinations = (
+              yaml.safe_load(raw_destinations) if raw_destinations else []
+          ) or []
 
-          TAG_NAME="${{ github.event.inputs.tag_name || github.ref_name }}"
+          org, _, repo_name = repo.partition("/")
+          config = OpsEngineConfig.load(
+              {
+                  "orgs": {
+                      org: {
+                          "repositories": {
+                              repo_name: {
+                                  "destinations": [
+                                      {
+                                          "forge": "forgejo",
+                                          "repo": repo,
+                                          "role": "release",
+                                      }
+                                  ]
+                                  + mirror_destinations
+                              }
+                          }
+                      }
+                  }
+              }
+          )
 
-          RELEASE_ID=$(curl -s \
-            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases/tags/${TAG_NAME}" \
-            -H "Authorization: token ${GITHUB_TOKEN}" \
-            | jq -r '.id')
+          destinations = resolve_destinations(config, repo)
 
-          for asset in dist/*.whl dist/*.tar.gz SHA256SUMS sbom.cdx.json; do
-            echo "Uploading $asset..."
-            HTTP_STATUS=$(curl -s -o upload.json -w "%{http_code}" \
-              -X POST \
-              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?name=$(basename "$asset")" \
-              -H "Authorization: token ${GITHUB_TOKEN}" \
-              -H "Content-Type: application/octet-stream" \
-              --data-binary "@$asset")
-            grep -q '^20' <<< "$HTTP_STATUS" || {
-              echo "Upload of $asset failed. HTTP $HTTP_STATUS"
-              cat upload.json
-              exit 1
-            }
-          done
+          async def main():
+              adapters = []
+              for destination in destinations:
+                  if destination.forge == "forgejo":
+                      adapters.append(
+                          ForgejoAdapter(
+                              base_url=forgejo_base_url,
+                              token=os.environ["FORGEJO_TOKEN"],
+                              webhook_secret=os.environ["FORGEJO_WEBHOOK_SECRET"],
+                          )
+                      )
+                  elif destination.forge == "github":
+                      adapters.append(
+                          GithubAdapter(
+                              token=os.environ["GH_MIRROR_TOKEN"],
+                              webhook_secret=os.environ[
+                                  "GH_MIRROR_WEBHOOK_SECRET"
+                              ],
+                          )
+                      )
+                  else:
+                      print(
+                          "::error::UnknownForgeError: destination "
+                          f"{destination.forge} has no adapter here"
+                      )
+                      sys.exit(1)
 
-          echo "All four assets uploaded."
+              report = await ReleaseHandler.publish_release(
+                  config,
+                  repo,
+                  tag_name,
+                  release_notes,
+                  "release-assets",
+                  name_template=name_template,
+                  adapters=adapters,
+              )
 
-      # REL-010 — one build, two publication targets, from the SAME workspace.
-      # The four assets built above are uploaded to the GitHub mirror directly,
-      # byte-for-byte, with no download in between. This was previously
-      # mirror.yml's job: it fetched the Forgejo release over the network and
-      # re-uploaded the bytes (REL-004) — a re-acquisition of the exact
-      # artifacts this job had written a step earlier. That download is gone;
-      # the uploads below read dist/, SHA256SUMS and sbom.cdx.json straight from
-      # the workspace, so the Forgejo release and the GitHub release carry the
-      # same four bytes by construction.
-      #
-      # Ordering and partial failure: the Forgejo release is created atomically
-      # first (create + upload all four assets under `set -euo pipefail` above).
-      # Only afterwards is the GitHub release derived, from the same bytes. If
-      # the GitHub side fails, the Forgejo release is already fully published —
-      # nothing here mutates it — and the mirror is merely behind (drift), never
-      # a half-published Forgejo release.
-      - name: Create GitHub release
-        id: gh_release
-        env:
-          GH_MIRROR_TOKEN: ${{ secrets.GH_MIRROR_TOKEN }}
-          NOTES: "${{ steps.notes.outputs.notes }}"
-          RELEASE_NAME: "${{ steps.title.outputs.release_name }}"
-        run: |
-          set -euo pipefail
+              published = ", ".join(report.published) or "(none)"
+              failed = ", ".join(report.failed) or "(none)"
+              print(f"published destinations: {published}")
+              print(f"failed destinations:    {failed}")
+              if report.failed:
+                  # A partial publication is a REPORTED failure, never a silent
+                  # success: the run goes red so the operator sees the drift.
+                  print(
+                      "::error::PartialPublicationError: the release was not "
+                      "published to every destination; failed: " + failed
+                  )
+                  sys.exit(1)
 
-          TAG_NAME="${{ github.event.inputs.tag_name || github.ref_name }}"
-          GH_API="https://api.github.com"
-          GH_REPO="LangeVC/ops-engine"
-
-          GH_PAYLOAD="$(jq -n \
-            --arg tag_name "$TAG_NAME" \
-            --arg name "${RELEASE_NAME}" \
-            --arg body "${NOTES}" \
-            '{tag_name: $tag_name, name: $name, body: $body, draft: false, prerelease: false}')"
-
-          GH_REL="$(curl -fsSL -X POST "${GH_API}/repos/${GH_REPO}/releases" \
-            -H "Authorization: token ${GH_MIRROR_TOKEN}" \
-            -H "Content-Type: application/json" \
-            -d "${GH_PAYLOAD}")" || {
-            echo "::error::GitHubReleaseError: failed to create the GitHub release for ${TAG_NAME}." >&2
-            echo "::error::The Forgejo release is already fully published; nothing here mutates it. The mirror is behind (drift)." >&2
-            exit 1
-          }
-          echo "release_id=$(printf '%s' "$GH_REL" | jq -r '.id')" >> "$GITHUB_OUTPUT"
-          echo "Created GitHub release for $TAG_NAME."
-
-      - name: Upload assets to GitHub
-        env:
-          GH_MIRROR_TOKEN: ${{ secrets.GH_MIRROR_TOKEN }}
-          GH_RELEASE_ID: "${{ steps.gh_release.outputs.release_id }}"
-        run: |
-          set -euo pipefail
-
-          GH_REPO="LangeVC/ops-engine"
-
-          for asset in dist/*.whl dist/*.tar.gz SHA256SUMS sbom.cdx.json; do
-            aname="$(basename "$asset")"
-            echo "Uploading ${aname} to GitHub release ${GH_RELEASE_ID}..."
-            curl -fsSL -X POST \
-              "https://uploads.github.com/repos/${GH_REPO}/releases/${GH_RELEASE_ID}/assets?name=${aname}" \
-              -H "Authorization: token ${GH_MIRROR_TOKEN}" \
-              -H "Content-Type: application/octet-stream" \
-              --data-binary "@${asset}" >/dev/null || {
-              echo "::error::GitHubUploadError: upload of ${aname} failed." >&2
-              echo "::error::Forgejo release is unaffected; GitHub release ${GH_RELEASE_ID} is partial and must be cleaned up by the operator." >&2
-              exit 1
-            }
-          done
-
-          echo "All four assets uploaded to GitHub."
+          asyncio.run(main())
+          PUBLISH_PY
