@@ -311,25 +311,30 @@ def test_declared_pins_match_the_real_pyproject_pins():
     layover's own pyproject.toml, quoted below on failure.
 
     The read is only possible where the sibling organisation checkouts are
-    present (the developer worktree). On a clean clone they are not reachable,
-    so the test skips with a named reason rather than failing: a fresh clone
-    cannot be expected to carry the five layover organisations next door.
+    present (the developer worktree). Reachability is decided per name: a
+    sibling that is not checked out on this runner is degraded individually,
+    while every reachable sibling is still asserted for drift. Only when none
+    of the five layovers is reachable (a clean clone) does the whole test skip
+    with a named reason — a fresh clone cannot be expected to carry the layover
+    organisations next door.
     """
     doc_text = (REPO / "docs" / "layover-consumption.md").read_text(encoding="utf-8")
     declared = declared_pin_map(doc_text)
-    unreachable = sorted(
-        name
+    reachable = {
+        name: cand
         for name in EXPECTED_LAYOVERS
-        if reachable_pyproject(REPO, PIN_READS[name].as_posix()) is None
-    )
-    if unreachable:
+        if (cand := reachable_pyproject(REPO, PIN_READS[name].as_posix())) is not None
+    }
+    if not reachable:
         pytest.skip(
             "sibling organisation checkouts not reachable from this clone: "
-            + ", ".join(unreachable)
+            + ", ".join(sorted(EXPECTED_LAYOVERS))
         )
     failures = []
     for name in EXPECTED_LAYOVERS:
-        cand = reachable_pyproject(REPO, PIN_READS[name].as_posix())
+        cand = reachable.get(name)
+        if cand is None:
+            continue
         real = real_pin_from_pyproject(cand)
         if declared[name] != real:
             failures.append(f"{name}: doc declares {declared[name]} but {cand} pins v{real}")
