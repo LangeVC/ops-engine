@@ -102,10 +102,17 @@ def test_sdist_is_an_allowlist_not_a_sweep() -> None:
 def test_sdist_packages_the_committed_source() -> None:
     members = _sdist_members()
     archived = {_repo_relative(m) for m in members if _top_entry(m) == "src"}
-    committed = {
-        str(p.relative_to(REPO_ROOT)) for p in (REPO_ROOT / "src").rglob("*")
-        if p.is_file()
-    }
+    # The source of truth for "what must ship" is the git index, not the
+    # filesystem: a pytest run generates __pycache__/.pyc bytecode under src/
+    # (gitignored, never committed) that must NOT be counted as missing when
+    # the sdist correctly excludes it.
+    tracked = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "ls-files", "src"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    committed = {p for p in tracked if p}
     missing = sorted(committed - archived)
     assert not missing, (
         "sdist is missing committed package files; a source distribution "
