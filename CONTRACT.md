@@ -389,6 +389,18 @@ What is **not** refused, because it is not in either shape:
   — `actions/checkout` fetches a released action, `google/osv-scanner` fetches a
   released binary. Those suppliers are not a release or mirror the workflow
   produces, and the handful are whitelisted as committed tuples in the gate.
+- **comment text is documentation, not a destination.** A forge host or
+  repository that appears only in a YAML comment is a note *about* the
+  workflow, never a reach the workflow executes, so the gate skips the comment
+  portion of each line (everything from a `#` that is outside a `${{ }}`
+  expression or a quoted scalar and sits at the start of the line or after
+  whitespace) before any rule runs. `mirror.yml`'s resolver already skips `#`
+  comment lines the same way; two readers of one tree must agree on what a
+  comment is, and a gate that failed on documentation text would be switched
+  off within a fortnight. Skipping a comment cannot hide a live destination:
+  a destination inside `${{ }}`, inside a quoted URL, or as an unquoted
+  literal is still scanned even on a line that also carries a comment, because
+  only the comment portion is removed.
 
 `scripts/ci_variable_boundary_gate.py` enforces the boundary. It is **stdlib-only**
 and never imports `ops_engine` (REL-006). It scans every workflow under

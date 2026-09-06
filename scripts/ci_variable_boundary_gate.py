@@ -36,6 +36,17 @@ What is NOT refused — these are separate from the two shapes:
   variable store, and is permitted. ``github.*`` identifies the run; ``vars.*``
   carries user-managed data.
 
+* *comment text is documentation, never a destination.* A forge host or
+  repository that appears only in a YAML comment is a note about the workflow,
+  not a reach the workflow executes, so it is skipped — exactly as the
+  ``mirror.yml`` resolver skips ``#`` comment lines. The scan removes the
+  comment portion of each line (from a ``#`` that is outside a ``${{ }}``
+  expression or a quoted scalar and is at the start of the line or preceded by
+  whitespace) before any rule runs. A destination in an executable position —
+  inside ``${{ }}``, inside a quoted URL, or an unquoted literal — is still
+  scanned even on a line that also carries a comment, so skipping a comment can
+  never hide a live destination.
+
 * *tool-fetch suppliers.* A destination workflow still downloads tooling from a
   supply host (``actions/checkout`` fetches a released action, the OSV scanner
   fetches a released binary). Those are bytes the build consumes, not a release
@@ -127,6 +138,65 @@ _SCP_PATH = re.compile(
 )
 
 
+def _scan_line(line):
+    """Return the executable portion of one workflow line, comment text removed.
+
+    A YAML comment begins at a ``#`` that is at the start of the line or
+    preceded by whitespace, and is NOT inside a quoted scalar or a ``${{ }}``
+    expression — a ``#`` in those positions is content (a URL fragment, a
+    literal in an expression), never a comment marker. Everything from a
+    comment marker to the end of the line is documentation the workflow runner
+    never executes, so no visitor below may refuse on it; mirror.yml's own
+    resolver skips ``#`` comment lines the same way, and two readers of one
+    tree must agree on what a comment is.
+
+    Quoted scalars are walked with their escapes (``\\`` in double quotes,
+    ``''`` in single quotes) so a destination inside a quoted URL stays
+    visible even when the same line carries a comment after it.
+    """
+    n = len(line)
+    i = 0
+    while i < n:
+        ch = line[i]
+        if ch == "'":
+            i += 1
+            while i < n:
+                if line[i] == "'":
+                    if i + 1 < n and line[i + 1] == "'":
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+        elif ch == '"':
+            i += 1
+            while i < n:
+                if line[i] == "\\":
+                    i += 2
+                    continue
+                if line[i] == '"':
+                    i += 1
+                    break
+                i += 1
+        elif ch == "$" and line.startswith("{{", i + 1):
+            i += 3
+            depth = 1
+            while i < n and depth:
+                if line.startswith("{{", i):
+                    depth += 1
+                    i += 2
+                elif line.startswith("}}", i):
+                    depth -= 1
+                    i += 2
+                else:
+                    i += 1
+        elif ch == "#" and (i == 0 or line[i - 1].isspace()):
+            return line[:i]
+        else:
+            i += 1
+    return line
+
+
 def _is_tool_supplier(path_token):
     """True when a HOST/OWNER/REPO literal is a whitelisted tool-supplier fetch.
 
@@ -187,6 +257,7 @@ def _scan_text(path, text):
     """Return a sorted list of (path, lineno, token, kind) offences in one file."""
     offences = []
     for lineno, line in enumerate(text.splitlines(), start=1):
+        line = _scan_line(line)
         for ln, token in _vis_vars_offence(line, lineno):
             offences.append((path, ln, token, "ci-variable"))
         for ln, token in _vis_api_host_offence(line, lineno):

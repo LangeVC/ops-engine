@@ -191,6 +191,116 @@ jobs:
           curl -X POST "https://api.github.com/repos/LangeVC/ops-engine/releases"
 """
 
+# --- F4: destination/API-host shapes that appear ONLY in a YAML comment. -----
+#
+# A comment is documentation, never a reach the workflow executes, so a token
+# that lives only in a comment must pass the gate. The real hazard is live in
+# this tree: mirror.yml:3 documents the mirror as `GitHub (LangeVC/ops-engine)`
+# and passes today only because the phrasing avoids the host form; a reword to
+# `github.com/LangeVC/ops-engine` used to break the build. The gate now skips
+# the comment portion of a line before scanning, matching mirror.yml's own
+# resolver, which `continue`s on `#` comment lines.
+
+# The reviewer's F4 shape: a documentation comment naming the mirror repository
+# in HOST/OWNER/REPO form, reached by nothing.
+COMMENT_DESTINATION = """\
+name: Documentation only
+on:
+  push:
+    tags: ["v*"]
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    steps:
+      - name: A step that reaches no forge repository
+        run: echo hi
+      # mirror: https://github.com/LangeVC/ops-engine
+"""
+
+# The reviewer's F4 api-host shape: an API host named twice, both times only in
+# a documentation comment about rate limits.
+COMMENT_API_HOST = """\
+name: Documentation only
+on:
+  push:
+    tags: ["v*"]
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    steps:
+      - name: A step that calls no forge API
+        run: echo hi
+      # api.github.com rate limits are documented at api.github.com
+"""
+
+# The scp transport form appearing only in a comment.
+COMMENT_SCP = """\
+name: Documentation only
+on:
+  push:
+    tags: ["v*"]
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    steps:
+      - name: A step that pushes over no ssh transport
+        run: echo hi
+      # git@github.com:LangeVC/ops-engine.git was the pre-ADP-008 ssh transport
+"""
+
+# The live hazard, made concrete: mirror.yml's header comment, reworded to name
+# the mirror in HOST/OWNER/REPO form. Before comment-awareness this failed the
+# build; the workflow reaches nothing the comment names.
+COMMENT_MIRROR_HAZARD = """\
+name: Mirror to GitHub
+# Forgejo (git.langevc.com) is canonical. GitHub (github.com/LangeVC/ops-engine)
+# is a read-only mirror. Force-push ONLY the ref that triggered this run.
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+"""
+
+# --- Do-not-overcorrect: a live destination on a comment-carrying line. -------
+#
+# Skipping a comment must never hide a real destination: a token inside a
+# quoted URL or a ${{ }} expression is executable even when the line also ends
+# in a comment, and must still be refused.
+
+REFUSED_HARDCODE_WITH_COMMENT = """\
+name: Regression
+on:
+  push:
+    branches: ["**"]
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Push to the mirror
+        env:
+          GH_MIRROR_TOKEN: ${{ secrets.GH_MIRROR_TOKEN }}
+        run: |
+          git push --force "https://x-access-token:${GH_MIRROR_TOKEN}@github.com/LangeVC/ops-engine.git"  # mirror target
+"""
+
+REFUSED_VARS_WITH_COMMENT = """\
+name: Regression
+on:
+  push:
+    tags: ["v*"]
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Render destinations
+        run: echo "RELEASE_DESTINATIONS=${{ vars.RELEASE_DESTINATIONS }}"  # regression
+"""
+
 
 def _write_intmp(tmp, text, name="workflow.yml"):
     path = Path(tmp) / name
@@ -329,6 +439,72 @@ def test_forge_api_url_naming_the_target_is_refused():
     assert r.returncode == 1, r.stdout + r.stderr
     assert "DestinationBoundaryError" in r.stderr
     assert "api.github.com" in r.stderr
+
+
+# --- Criterion 4 (F4): comment text is documentation, not a destination. ------
+
+
+def test_comment_only_destination_mention_passes():
+    """A destination-shaped token that appears ONLY in a YAML comment is a
+    documentation mention, never a reach the workflow executes, so the gate
+    must not refuse it. (Reviewer F4 shape: `# mirror: https://github.com/
+    LangeVC/ops-engine`.)"""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_intmp(tmp, COMMENT_DESTINATION)
+        r = _scan_file(path)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_comment_only_api_host_mention_passes():
+    """An API host named only inside a YAML comment (twice, in a note about
+    rate limits) is documentation text and must pass. (Reviewer F4 shape.)"""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_intmp(tmp, COMMENT_API_HOST)
+        r = _scan_file(path)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_comment_only_scp_mention_passes():
+    """The scp transport form appearing only in a comment is documentation and
+    must pass, exactly like the http(s) and api-host forms."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_intmp(tmp, COMMENT_SCP)
+        r = _scan_file(path)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_reworded_mirror_header_comment_passes():
+    """The live hazard, made concrete: mirror.yml's own header comment names the
+    mirror repository only inside a comment. Reworded to the HOST/OWNER/REPO
+    form the gate refuses in an executable position, the file must still pass —
+    the comment names nothing the workflow reaches."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_intmp(tmp, COMMENT_MIRROR_HAZARD)
+        r = _scan_file(path)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_destination_in_quotes_on_comment_line_is_still_refused():
+    """Do-not-overcorrect: a live destination inside a quoted remote on a line
+    that ALSO carries a comment is executable and must still be refused. Only
+    the comment portion is skipped."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_intmp(tmp, REFUSED_HARDCODE_WITH_COMMENT)
+        r = _scan_file(path)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "DestinationBoundaryError" in r.stderr
+    assert "github.com/LangeVC/ops-engine.git" in r.stderr
+
+
+def test_vars_reference_on_comment_line_is_still_refused():
+    """Do-not-overcorrect: a vars.* reference inside a ${{ }} expression on a
+    line that also carries a comment is executable and must still be refused."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_intmp(tmp, REFUSED_VARS_WITH_COMMENT)
+        r = _scan_file(path)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "CiVariableBoundaryError" in r.stderr
+    assert "vars.RELEASE_DESTINATIONS" in r.stderr
 
 
 # --- Criterion 3: mirror reads config, whole tree passes, wired in CI --------
@@ -536,6 +712,7 @@ def test_contract_documents_the_permitted_set():
     assert "Secrets are not destinations" in contract
     assert "Forgejo-provided event context is not a user variable store" in contract
     assert "tool-fetch suppliers" in contract
+    assert "comment text is documentation" in contract
     assert "ci_variable_boundary_gate.py" in contract
 
 
