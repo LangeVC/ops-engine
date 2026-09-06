@@ -51,6 +51,21 @@ class ForgeAdapter(ABC):
         pass
 
     @abstractmethod
+    async def upload_release_asset(
+        self, repo_full_name: str, release_id: int, asset_name: str, data: bytes,
+        content_type: str = "application/octet-stream",
+    ) -> dict[str, Any]:
+        """Upload a release asset to an existing release, by release id.
+
+        ``release_id`` is the ``.id`` value ``create_release`` returns, so a
+        release created through this contract can carry its built assets
+        without a second lookup. Content is posted verbatim as ``data`` with
+        the given ``content_type``; a non-2xx response surfaces as
+        ``httpx.HTTPStatusError``.
+        """
+        pass
+
+    @abstractmethod
     async def create_tag(
         self, repo_full_name: str, tag_name: str, target: str = "main",
         message: Optional[str] = None,

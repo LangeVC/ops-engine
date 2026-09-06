@@ -166,6 +166,23 @@ class ForgejoAdapter(ForgeAdapter):
         )
         return resp.json()
 
+    async def upload_release_asset(
+        self, repo_full_name: str, release_id: int, asset_name: str, data: bytes,
+        content_type: str = "application/octet-stream",
+    ) -> dict[str, Any]:
+        # Forgejo (Gitea-compatible) attaches assets on the API host, under the
+        # release the workflow fetches by tag before uploading. This mirrors the
+        # proven shape in .forgejo/workflows/forgejo-release.yml:
+        #   POST /api/v1/repos/{repo}/releases/{id}/assets?name={name}
+        resp = await self._request(
+            "POST",
+            f"/repos/{repo_full_name}/releases/{release_id}/assets",
+            params={"name": asset_name},
+            content=data,
+            headers={"Content-Type": content_type},
+        )
+        return resp.json()
+
     async def create_tag(
         self, repo_full_name: str, tag_name: str, target: str = "main",
         message: Optional[str] = None,

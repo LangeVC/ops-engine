@@ -14,6 +14,7 @@ from .base import ForgeAdapter
 logger = logging.getLogger(__name__)
 
 API_BASE = "https://api.github.com"
+UPLOADS_HOST = "https://uploads.github.com"
 RETRY_DELAYS = [1.0, 2.0, 4.0]
 
 
@@ -153,6 +154,23 @@ class GithubAdapter(ForgeAdapter):
                 "draft": draft,
                 "prerelease": prerelease,
             },
+        )
+        return resp.json()
+
+    async def upload_release_asset(
+        self, repo_full_name: str, release_id: int, asset_name: str, data: bytes,
+        content_type: str = "application/octet-stream",
+    ) -> dict[str, Any]:
+        # GitHub uploads assets to a separate host from the API (uploads.github.com),
+        # not the release path on api.github.com. This mirrors the proven shape in
+        # .forgejo/workflows/forgejo-release.yml:
+        #   POST https://uploads.github.com/repos/{repo}/releases/{id}/assets?name={name}
+        resp = await self._request(
+            "POST",
+            f"{UPLOADS_HOST}/repos/{repo_full_name}/releases/{release_id}/assets",
+            params={"name": asset_name},
+            content=data,
+            headers={"Content-Type": content_type},
         )
         return resp.json()
 
