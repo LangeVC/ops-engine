@@ -299,12 +299,12 @@ class TestMirrorCreatesGitHubRelease:
         assert "sha256sum dist/*.whl dist/*.tar.gz > SHA256SUMS" not in FORGEJO_RELEASE_CONTENT
 
     def test_mirror_destination_comes_from_config_not_a_literal(self):
-        """Criterion 4 (ADP-004): the mirror destination is declared in the
-        config layer (the RELEASE_DESTINATIONS Actions variable), not as a
-        forge repository literal in the workflow. The engine resolves it via
-        resolve_destinations."""
-        assert "RELEASE_DESTINATIONS" in FORGEJO_RELEASE_CONTENT
-        assert "resolve_destinations" in FORGEJO_RELEASE_CONTENT
+        """Criterion 4 (ADP-004, corrected by ADP-008): the mirror destination is
+        declared in the config layer — the committed .ops.yaml read via
+        load_ops_yaml — not as an Actions variable nor a forge repository literal
+        in the workflow. The engine resolves it via load_ops_yaml."""
+        assert "load_ops_yaml" in FORGEJO_RELEASE_CONTENT
+        assert "RELEASE_DESTINATIONS" not in FORGEJO_RELEASE_CONTENT
         # No owner/repo destination literal and no API-host literal remain.
         assert "GH_REPO=" not in FORGEJO_RELEASE_CONTENT
         assert "GH_API=" not in FORGEJO_RELEASE_CONTENT

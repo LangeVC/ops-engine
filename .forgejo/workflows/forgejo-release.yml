@@ -370,31 +370,33 @@ jobs:
           sys.exit(0)
           OSV_GATE_PY
 
-      # ADP-004 — the workflow calls the ENGINE to publish; it no longer
-      # reimplements publication. The four curl steps that used to POST each
-      # forge's release API (Create Release / Upload assets / Create GitHub
-      # release / Upload assets to GitHub) are gone: they hardcoded the mirror
-      # forge's API and upload hosts and the mirror repository name as shell
-      # literals. The engine (`ReleaseHandler.publish_release`) creates the
-      # release and attaches every artifact on EVERY destination resolved from
-      # config — one build, published outward, nothing re-downloaded (REL-010),
-      # with a partial publication reported rather than swallowed.
+      # ADP-004 / ADP-008 — the workflow calls the ENGINE to publish; it no
+      # longer reimplements publication. The four curl steps that used to POST
+      # each forge's release API are gone: they hardcoded the mirror forge's
+      # API and upload hosts and the mirror repository name as shell literals.
+      # The engine (`ReleaseHandler.publish_release`) creates the release and
+      # attaches every artifact on EVERY destination resolved from config —
+      # one build, published outward, nothing re-downloaded (REL-010), with a
+      # partial publication reported rather than swallowed.
       #
-      # Destination resolution: the canonical Forgejo destination is this
-      # repository itself (`github.repository`) keyed against the runner's own
-      # base URL (`github.server_url`) — both Forgejo-provided, no literal. Any
-      # mirror destination is declared in the repository-level `vars.
-      # RELEASE_DESTINATIONS` Actions variable as a YAML list of {forge, repo}
-      # entries — the config layer, not a literal in this file.
+      # Destination resolution (ADP-008): the destinations come from the
+      # committed `.ops.yaml` at the repository root — the Layer-3 config
+      # override (DST-002) — read through config_loader.load_ops_yaml. BOTH
+      # the canonical Forgejo destination and the mirror are declared there,
+      # in the config layer, not in this file: no forge repository, no API
+      # host, and no Actions variable survive here. The previous per-destination
+      # Actions variable was a regression against the standing operator
+      # decision (LVC-247/248) and is gone. A missing or empty `.ops.yaml` is a
+      # named refusal, not a silently narrowed release: the previous shape
+      # (unset variable -> [] -> Forgejo-only release reporting success) is
+      # exactly what must not ship.
       #
       # Two forges carry two different credentials, and the adapter factory's
       # single-token form cannot serve them, so the workflow constructs the
       # adapters itself and passes them through `publish_release`'s `adapters`
-      # injection point (destination resolution still always runs). Each
-      # adapter refuses to construct without a non-empty webhook secret — a
-      # signed ingress must refuse unsigned payloads — so the organisation's
-      # webhook secrets are supplied to satisfy that constructor contract even
-      # though publication never touches a webhook.
+      # injection point. Each adapter constructs with the credentials for its
+      # forge; the webhook secret is supplied to satisfy the ingress contract
+      # even though publication never parses a webhook (ADP-006).
       - name: Create Release
         env:
           TAG_NAME: "${{ github.event.inputs.tag_name || github.ref_name }}"
@@ -406,7 +408,6 @@ jobs:
           FORGEJO_WEBHOOK_SECRET: "${{ secrets.FORGEJO_WEBHOOK_SECRET }}"
           GH_MIRROR_TOKEN: "${{ secrets.GH_MIRROR_TOKEN }}"
           GH_MIRROR_WEBHOOK_SECRET: "${{ secrets.GH_MIRROR_WEBHOOK_SECRET }}"
-          RELEASE_DESTINATIONS: "${{ vars.RELEASE_DESTINATIONS }}"
         run: |
           set -euo pipefail
 
@@ -431,13 +432,45 @@ jobs:
           import os
           import sys
 
-          import yaml
-
           from ops_engine.adapters.forgejo_adapter import ForgejoAdapter
           from ops_engine.adapters.github_adapter import GithubAdapter
-          from ops_engine.config_loader import OpsEngineConfig
-          from ops_engine.modules.mirror import resolve_destinations
+          from ops_engine.config_loader import (
+              OpsEngineConfig,
+              OpsYamlError,
+              load_ops_yaml,
+          )
           from ops_engine.modules.release import ReleaseHandler
+
+          # The release destinations come from the committed .ops.yaml at the
+          # repository root (Layer 3), loaded through config_loader.load_ops_yaml.
+          # No destination, forge repository, or API host is a literal in this
+          # workflow layer — the config layer owns them. A missing or empty
+          # .ops.yaml is a named refusal, never a silently narrowed release.
+          try:
+              layer3 = load_ops_yaml(".")
+          except OpsYamlError as exc:
+              print(f"::error::OpsYamlError: {exc}", file=sys.stderr)
+              sys.exit(2)
+
+          if layer3 is None:
+              print(
+                  "::error::MissingOpsYamlError: no .ops.yaml at the repository "
+                  "root; the release destination is a committed file, not a CI "
+                  "variable. Refusing to publish a release with no declared "
+                  "destinations.",
+                  file=sys.stderr,
+              )
+              sys.exit(2)
+
+          destinations = layer3.destinations
+          if not destinations:
+              print(
+                  "::error::MissingReleaseDestinationsError: .ops.yaml declares "
+                  "no destinations; refusing to publish to zero forges rather "
+                  "than silently narrowing the release.",
+                  file=sys.stderr,
+              )
+              sys.exit(2)
 
           repo = os.environ["FORGEJO_REPOSITORY"]
           tag_name = os.environ["TAG_NAME"]
@@ -445,13 +478,9 @@ jobs:
           name_template = os.environ["NAME_TEMPLATE"]
           forgejo_base_url = os.environ["FORGEJO_BASE_URL"]
 
-          # Mirror destinations come from the RELEASE_DESTINATIONS config
-          # variable; the canonical Forgejo destination is this repository.
-          raw_destinations = os.environ.get("RELEASE_DESTINATIONS", "").strip()
-          mirror_destinations = (
-              yaml.safe_load(raw_destinations) if raw_destinations else []
-          ) or []
-
+          # Materialise the Layer-3 destinations into a typed Layer-2 config so
+          # that ReleaseHandler.publish_release (whose internal
+          # resolve_destinations takes no repo_dir) re-resolves the same list.
           org, _, repo_name = repo.partition("/")
           config = OpsEngineConfig.load(
               {
@@ -461,20 +490,19 @@ jobs:
                               repo_name: {
                                   "destinations": [
                                       {
-                                          "forge": "forgejo",
-                                          "repo": repo,
-                                          "role": "release",
+                                          "forge": d.forge,
+                                          "repo": d.repo,
+                                          "role": d.role,
+                                          "visibility": d.visibility,
                                       }
+                                      for d in destinations
                                   ]
-                                  + mirror_destinations
                               }
                           }
                       }
                   }
               }
           )
-
-          destinations = resolve_destinations(config, repo)
 
           async def main():
               adapters = []
