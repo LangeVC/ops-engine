@@ -55,6 +55,12 @@ def _top_entry(member_path: str) -> str:
     return member_path.split("/", 2)[1]
 
 
+def _repo_relative(member_path: str) -> str:
+    # Drop the versioned root prefix (ops_engine-3.2.0/...) so the remaining
+    # path is comparable to a path relative to the repository root.
+    return member_path.split("/", 1)[1]
+
+
 def _sdist_members() -> set[str]:
     """Build the sdist from a throwaway clone and return its member paths."""
     tmp = Path(tempfile.mkdtemp(prefix="adp005-"))
@@ -95,7 +101,7 @@ def test_sdist_is_an_allowlist_not_a_sweep() -> None:
 
 def test_sdist_packages_the_committed_source() -> None:
     members = _sdist_members()
-    archived = {m for m in members if _top_entry(m) == "src"}
+    archived = {_repo_relative(m) for m in members if _top_entry(m) == "src"}
     committed = {
         str(p.relative_to(REPO_ROOT)) for p in (REPO_ROOT / "src").rglob("*")
         if p.is_file()
