@@ -27,6 +27,11 @@ WORKFLOW = REPO_ROOT / ".forgejo" / "workflows" / "forgejo-release.yml"
 GATE_CONTENT = GATE.read_text(encoding="utf-8")
 WORKFLOW_CONTENT = WORKFLOW.read_text(encoding="utf-8")
 
+# LangeVC's own tracker prefixes, exactly as the release workflow declares them
+# (the config layer). The engine itself knows no org; the vocabulary arrives
+# from the workflow.
+ORG_PREFIXES = "LVC\nOME\nCORE\nLNF\nDST\nREL\nCFG\nFFR\n"
+
 # An external-reader entry: prose only, no internal ticket reference. This is
 # the tone REL-012 rewrote the real 3.2.0 entry into.
 CLEAN_NOTES = """\
@@ -51,6 +56,19 @@ Three competing shapes existed across the layovers (LVC-248).
 
 ### Releases carry files (LVC-250)
 """
+
+# Ordinary external-facing technical prose and universal identifier classes.
+# All of these share the code-and-number shape of an internal ticket reference
+# yet are exactly the text an EXTERNAL reader needs. Every line must PASS once
+# the gate is armed with the organisation's own prefixes only.
+EXTERNAL_PROSE_LINES = (
+    "Files are now read as UTF-8 and hashed with SHA-256.\n",
+    "Connections now use TLS-1.3 over HTTP-2.\n",
+    "The payload is encrypted with AES-256 and signed with RSA-2048.\n",
+    "This release fixes CVE-2026-12345, a severity-9 advisory in the SBOM scanner.\n",
+    "Dates now follow RFC-5322 and timestamps ship as ISO-8601.\n",
+    "The code follows PEP-8 and drops RPC-2 (gRPC-2) framing.\n",
+)
 
 
 def _run_gate(*args, stdin_text=None):
@@ -81,28 +99,56 @@ def _write(tmp: str, text: str, name: str = "file") -> str:
 
 # --- Criterion 1: an internal ticket reference is a named refusal -----------
 
+# The vocabulary helper shared by the tests that arm the gate with the org's
+# prefixes: the engine is fed the same prefix file the workflow builds.
+def _org_prefix_args(tmp):
+    return "--ticket-prefixes", _write(tmp, ORG_PREFIXES, "prefixes.txt")
 
-def test_clean_external_reader_notes_pass():
-    """Notes with no internal ticket reference pass: exit 0."""
+
+def test_clean_external_reader_notes_pass_with_org_prefixes():
+    """Notes with no internal ticket reference pass (exit 0) even when the gate
+    is armed with the organisation's own prefixes."""
     with tempfile.TemporaryDirectory() as tmp:
-        path = _write(tmp, CLEAN_NOTES)
-        r = _run_gate(path)
+        notes_path = _write(tmp, CLEAN_NOTES, "notes.md")
+        pre = _org_prefix_args(tmp)
+        r = _run_gate(pre[0], pre[1], notes_path)
     assert r.returncode == 0, r.stdout + r.stderr
     assert "PASS" in r.stdout
 
 
-def test_clean_notes_via_stdin_pass():
-    """The absent-file form (stdin) is the normal case and passes."""
+def test_clean_notes_via_stdin_pass_with_no_vocabulary():
+    """The default (no --ticket-prefixes, no --forbid-file) is the template's
+    normal case: the engine holds no organisation vocabulary, so clean notes
+    pass."""
     r = _run_gate(stdin_text=CLEAN_NOTES)
     assert r.returncode == 0, r.stdout + r.stderr
+    assert "PASS" in r.stdout
 
 
-def test_internal_ticket_reference_is_refused_red_proof():
-    """RED PROOF: a note naming LVC-248/LVC-247/LVC-250 exits 1 and the named
-    error quotes each offending token and the line it appears on."""
+def test_with_no_vocabulary_the_gate_refuses_nothing():
+    """RED PROOF for the rework: with NO --ticket-prefixes supplied, a
+    code-and-number token is not classified as an internal ticket reference at
+    all — the engine has no organisation prefix to match and refusing nothing
+    is the correct default, not a hole. The org's own token therefore passes
+    only when the gate is unarmed; when armed it is refused."""
     with tempfile.TemporaryDirectory() as tmp:
-        path = _write(tmp, TICKETED_NOTES)  # name shadows the constant below
-        r = _run_gate(path)
+        r = _run_gate(stdin_text="A note that mentions LVC-250.\n")
+    assert r.returncode == 0, r.stdout + r.stderr
+
+    with tempfile.TemporaryDirectory() as tmp:
+        pre = _org_prefix_args(tmp)
+        r = _run_gate(pre[0], pre[1], stdin_text="A note that mentions LVC-250.\n")
+    assert r.returncode == 1, r.stdout + r.stderr
+
+
+def test_internal_ticket_reference_is_refused_when_armed_red_proof():
+    """RED PROOF: with the organisation's prefixes armed, a note naming
+    LVC-248/LVC-247/LVC-250 exits 1 and the named error quotes each offending
+    token and the line it appears on."""
+    with tempfile.TemporaryDirectory() as tmp:
+        notes_path = _write(tmp, TICKETED_NOTES, "notes.md")  # name shadows below
+        pre = _org_prefix_args(tmp)
+        r = _run_gate(pre[0], pre[1], notes_path)
     assert r.returncode == 1, r.stdout + r.stderr
     assert "ReleaseNotesAudienceError" in r.stderr
     for token in ("LVC-248", "LVC-247", "LVC-250"):
@@ -110,44 +156,88 @@ def test_internal_ticket_reference_is_refused_red_proof():
     assert "line %d" % _line_of(TICKETED_NOTES, "LVC-248") in r.stderr
     assert "line %d" % _line_of(TICKETED_NOTES, "LVC-247") in r.stderr
     assert "line %d" % _line_of(TICKETED_NOTES, "LVC-250") in r.stderr
+    assert "LVC" in r.stderr
 
 
-def test_external_identifier_prose_passes():
-    """GREEN PROOF for the rework finding: a CVE id, an RFC number, an ISO
-    format string, and an RPC protocol number are shape-identical to an
-    internal ticket reference but are prose the EXTERNAL reader legitimately
-    needs (a security fix must be announced by its CVE id; a standards
-    citation names an RFC/ISO/PEP/RPC). Each must PASS — exit 0 — not be
-    mislabelled the author's tracker.
+def test_external_identifier_and_technical_prose_passes_when_armed_green_proof():
+    """GREEN PROOF for the rework finding: every line of ordinary technical
+    prose AND each universal identifier class (CVE an advisory id, RFC/ISO a
+    standards number, PEP-8, gRPC) is shape-identical to an internal ticket
+    reference but is exactly the text the EXTERNAL reader needs. Armed with
+    only the organisation's OWN prefixes (LVC, OME, ...), NONE of these may be
+    refused: UTF-8, SHA-256, TLS-1.3, HTTP-2, AES-256, RSA-2048, CVE-...,
+    RFC-..., ISO-..., PEP-8 and gRPC all pass — exit 0 — line by line."""
+    for line in EXTERNAL_PROSE_LINES:
+        with tempfile.TemporaryDirectory() as tmp:
+            notes_path = _write(tmp, line, "notes.md")
+            pre = _org_prefix_args(tmp)
+            r = _run_gate(pre[0], pre[1], notes_path)
+        assert r.returncode == 0, (line, r.stdout + r.stderr)
 
-    This is deliberately a pure Layer-1 scan (no --forbid-file): the exclusion
-    lives in the gate, not in an org vocabulary. ops-engine is the template and
-    knows no org; CVE/RFC/ISO/PEP/RPC are universal identifier classes, so they
-    are excluded in Layer 1, while an organisation's own ticket prefixes must
-    keep flowing through --forbid-file from Layer 2.
-    """
+
+def test_an_organisation_token_is_refused_but_universal_prose_is_not():
+    """Side by side, the discriminator is the own-prefix match, nothing else:
+    armed with ``LVC`` only, ``LVC-250`` is refused while ``UTF-8`` and
+    ``CVE-2026-12345`` pass in the same note."""
     notes = (
-        "This release fixes CVE-2026-12345, a severity-9 advisory in the SBOM "
-        "scanner, adopts RFC-5322 date formatting, ships an ISO-8601 timestamp, "
-        "follows PEP-8, and drops RPC-2 (gRPC-2) framing.\n"
+        "The notes compute a UTF-8 digest (LVC-250) and fix CVE-2026-12345.\n"
     )
     with tempfile.TemporaryDirectory() as tmp:
-        path = _write(tmp, notes)
-        r = _run_gate(path)
-    assert r.returncode == 0, r.stdout + r.stderr
-    assert "PASS" in r.stdout
+        notes_path = _write(tmp, notes, "notes.md")
+        prefixes_path = _write(tmp, "LVC\n", "prefixes.txt")
+        r = _run_gate("--ticket-prefixes", prefixes_path, notes_path)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "ReleaseNotesAudienceError" in r.stderr
+    assert "LVC-250" in r.stderr
+    # The refusal names ONLY the org token; it never names UTF-8 or the CVE.
+    assert "UTF-8" not in r.stderr
+    assert "CVE-2026-12345" not in r.stderr
+
+
+def test_malformed_ticket_prefix_file_is_a_named_refusal():
+    """A --ticket-prefixes file whose line is not one uppercase [A-Z]{2,5}
+    token is refused with a named error — never silently skipped."""
+    with tempfile.TemporaryDirectory() as tmp:
+        notes_path = _write(tmp, CLEAN_NOTES, "notes.md")
+        prefixes_path = _write(tmp, "LVC-1\n", "prefixes.txt")  # not a bare prefix
+        r = _run_gate("--ticket-prefixes", prefixes_path, notes_path)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "ForbiddenVocabularyError" in r.stderr
+    assert "not a tracker prefix" in r.stderr
+    assert "line 1" in r.stderr
+
+
+def test_missing_ticket_prefix_file_is_a_named_refusal():
+    """A --ticket-prefixes file that is NAMED but does not resolve is a named
+    refusal, not a silent release without the tracker prefixes."""
+    with tempfile.TemporaryDirectory() as tmp:
+        notes_path = _write(tmp, CLEAN_NOTES, "notes.md")
+        r = _run_gate("--ticket-prefixes", str(Path(tmp) / "nope"), notes_path)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "ForbiddenVocabularyError" in r.stderr
+
+
+def test_workflow_arms_the_org_prefixes_so_own_notes_stay_gated():
+    """The workflow step passes --ticket-prefixes pointing at an inline list of
+    LangeVC's tracker prefixes — so THIS repository's own notes stay gated even
+    though the engine ships no vocabulary. A layover adopting the workflow
+    adapts that list to its own organisation."""
+    block = _gate_step_block()
+    assert "--ticket-prefixes" in block
+    assert "release_notes_audience_gate.py" in block
 
 
 # --- Criterion 2: optional --forbid-file, absent = normal, malformed = named -
 
-
-def test_absent_forbid_file_is_the_proven_normal_case():
-    """ops-engine ships no organisation vocabulary: the gate is invoked without
-    --forbid-file and clean notes pass. The workflow below never passes the
-    flag either."""
+# Consistent with the disarmed default, the bare-engine gate passes clean notes
+# when neither vocabulary flag is given: the engine ships no org of its own.
+def test_absent_vocabulary_flags_is_the_proven_engine_default():
+    """ops-engine (the template) ships no organisation vocabulary: with neither
+    flag the gate passes clean notes. This repository's REMOTE differs from the
+    template: because ops-engine is a LangeVC repository, the workflow below
+    arms --ticket-prefixes so this repo's own notes stay gated."""
     r = _run_gate(stdin_text=CLEAN_NOTES)
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "--forbid-file" not in _gate_step_block()
 
 
 def test_forbid_file_term_found_is_a_named_refusal():
@@ -196,6 +286,26 @@ def test_missing_forbid_file_is_a_named_refusal():
     assert "ForbiddenVocabularyError" in r.stderr
 
 
+def test_ticket_prefix_and_forbid_term_are_independent():
+    """A withhold term that is not a bare prefix still works alongside an armed
+    prefix set, and each fires its own named refusal."""
+    notes = "capacium ships LVC-250 and the fix covered by CVE-2026-12345.\n"
+    with tempfile.TemporaryDirectory() as tmp:
+        notes_path = _write(tmp, notes, "notes.md")
+        prefixes_path = _write(tmp, ORG_PREFIXES, "prefixes.txt")
+        forbid_path = _write(tmp, "capacium\n", "forbid.txt")
+        r = _run_gate(
+            "--ticket-prefixes", prefixes_path,
+            "--forbid-file", forbid_path,
+            notes_path,
+        )
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "ReleaseNotesAudienceError" in r.stderr
+    assert "LVC-250" in r.stderr
+    assert "ForbiddenVocabularyError" in r.stderr
+    assert "capacium" in r.stderr
+
+
 # --- Criterion 3: the gate is stdlib-only and wired before release creation -
 
 
@@ -239,6 +349,7 @@ def test_workflow_runs_the_gate_on_extracted_notes_before_release_creation():
     block = _gate_step_block()
     assert "python3 scripts/release_notes_audience_gate.py" in block
     assert "steps.notes.outputs.notes" in block
+    assert "--ticket-prefixes" in block
     notes_idx = WORKFLOW_CONTENT.index("Extract release notes from CHANGELOG")
     gate_idx = WORKFLOW_CONTENT.index(
         "- name: Gate the release notes for an external audience"

@@ -381,35 +381,52 @@ document addressed at an **external** reader: operators of other repositories,
 not the team that wrote the release. `scripts/release_notes_audience_gate.py`
 enforces that audience. It reads the extracted notes and refuses, with a named
 error that quotes each offending token and the line it appears on, any note
-that carries an internal ticket reference (`[A-Z]{2,5}-[0-9]+`, e.g.
-`LVC-248`). The refusal exits non-zero and the workflow runs the gate on the
-extracted notes **before** any release object is created, so a failing gate
-fails the release run.
+that carries an internal ticket reference whose prefix the caller has declared
+via `--ticket-prefixes`. The refusal exits non-zero and the workflow runs the
+gate on the extracted notes **before** any release object is created, so a
+failing gate fails the release run.
 
-The code-and-number shape is not the whole story: a token whose prefix is a
-**universal external identifier class** (`CVE`, `RFC`, `ISO`, `PEP`, `RPC`)
-has the same shape but is prose the external reader legitimately needs — a
-security fix must be announced by its CVE id, a standards citation names an
-RFC, an ISO format, a PEP, or an RPC (gRPC) protocol. The gate excludes those
-classes before the internal-ticket refusal, so announcing a security advisory
-by its CVE id, or citing an RFC, still passes. Those classes are universal, not
-organisational: ops-engine is the template and knows no org, so no *project*
-ticket code is allowlisted in the gate; an organisation's own ticket prefixes
-are Layer-2 vocabulary that arrives via `--forbid-file`.
+**The engine classifies no prefix by itself.** The code-and-number shape
+`[A-Z]{2,5}-[0-9]+` is shared by an internal ticket reference and by
+identifiers the external reader legitimately needs — a CVE advisory id, an RFC
+or ISO number, PEP-8, gRPC, and ordinary technical prose (`UTF-8`, `SHA-256`,
+`TLS-1.3`, `HTTP-2`, `AES-256`). The shape alone cannot tell an internal project
+code from an external identifier, and no deny-list of universal prefixes is
+ever sound, because that set is open-ended (`UTF`, `SHA`, `TLS`, `HTTP`, `SSL`,
+`AES`, `RSA`, `IEEE`, `PNG`, `JPEG`, ...). So the gate does not attempt the
+classification: a shape match is refused only when its prefix is among the
+prefixes the caller supplies as `--ticket-prefixes`.
+
+`--ticket-prefixes` is optional and supplies the organisation's own tracker
+prefixes, one per line, each an uppercase `[A-Z]{2,5}` token. ops-engine is the
+template and ships **no** organisation vocabulary, so with no `--ticket-prefixes`
+and no `--forbid-file` the gate refuses **nothing** — an organisation that
+supplies no vocabulary gets no vocabulary check. That is the correct default,
+not a hole. This repository's own release workflow *does* supply it: because
+ops-engine is a LangeVC repository, `.forgejo/workflows/forgejo-release.yml`
+declares LangeVC's tracker prefixes (`LVC`, `OME`, `CORE`, `LNF`, `DST`, `REL`,
+`CFG`, `FFR`) and this repository's own notes therefore stay gated. A layover
+that adopts the workflow adapts that prefix list to its own organisation; the
+vocabulary always arrives from the workflow (the config layer), never from the
+engine. A `--ticket-prefixes` file that is NAMED but missing or malformed (a
+line that is not one uppercase 2-5 letter token) is a named refusal, never a
+silent skip that would release without the tracker prefixes the organisation
+chose.
+
+`--forbid-file` is optional and supplies organisation-supplied *withheld*
+vocabulary terms, one per line — product names and project codenames that must
+not reach an external reader — alongside the prefix set. ops-engine ships no
+such terms, so the release workflow never passes the flag. `--forbid-file` and
+`--ticket-prefixes` are independent: an organisation may run either alone, both
+together, or neither. A forbid file that is present but malformed (a line that
+is not a single whitespace-free term, or a path that does not resolve) is a
+named refusal (`ForbiddenVocabularyError`), never a silent skip that would
+release without the vocabulary the organisation chose.
 
 The gate is **stdlib-only** and never imports `ops_engine` (REL-006): the bare
 release runner carries neither yaml nor pydantic, so nothing outside the
 standard library may execute there, and the gate's own tests likewise import
 nothing outside the standard library.
-
-`--forbid-file` is optional and supplies organisation-supplied vocabulary
-terms, one per line, that are withheld from an external reader. ops-engine
-ships **no** organisation vocabulary, so the release workflow never passes the
-flag: an absent forbid file is the proven normal case, and the gate then checks
-internal ticket references alone. A forbid file that is present but malformed
-(a line that is not a single whitespace-free term, or a path that does not
-resolve) is a named refusal (`ForbiddenVocabularyError`), never a silent skip
-that would release without the vocabulary the organisation chose.
 
 ## Test enforcement
 
