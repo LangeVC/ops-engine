@@ -2,10 +2,14 @@
 
 import fnmatch
 import logging
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from ops_engine.adapters.base import ForgeAdapter
-from ops_engine.config_loader import ReleaseConfig
+from ops_engine.adapters.factory import adapters_for
+from ops_engine.config_loader import Destination, OpsEngineConfig, ReleaseConfig
+from ops_engine.modules.mirror import resolve_destinations
 from ops_engine.utils.changelog_parser import ChangelogParser
 
 logger = logging.getLogger(__name__)
@@ -63,6 +67,48 @@ def render_release_name(template: str, repo: str, tag_name: str) -> str:
     return template.format_map(_TemplateDict(values))
 
 
+@dataclass
+class PublicationReport:
+    """Queryable record of one release published outward to its destinations.
+
+    A release is one build published to every destination resolved from config
+    (REL-010). A destination that fails mid-publication is recorded in
+    ``failed`` and the remaining destinations still run, so a partial
+    publication is a state an operator can read — the mirror is behind — rather
+    than a silent success. Serializes to a plain dict via :meth:`to_dict` so a
+    cockpit can query it without parsing log lines.
+    """
+
+    repo: str = ""
+    tag_name: str = ""
+    published: list[str] = field(default_factory=list)
+    failed: list[str] = field(default_factory=list)
+
+    @property
+    def partial(self) -> bool:
+        """True when at least one destination failed to publish."""
+        return bool(self.failed)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "repo": self.repo,
+            "tag_name": self.tag_name,
+            "published_destinations": list(self.published),
+            "failed_destinations": list(self.failed),
+            "partial": self.partial,
+        }
+
+
+def _destination_label(destination: Destination) -> str:
+    """Name a destination for a report: forge and target, joined.
+
+    Two destinations may carry the same ``repo`` string on different forges, so
+    the forge is part of the label; ``github:org/repo`` and ``forgejo:org/repo``
+    name two distinct targets.
+    """
+    return f"{destination.forge}:{destination.repo}"
+
+
 class ReleaseHandler:
     """Creates releases when tags are pushed or labeled PRs are merged.
 
@@ -112,6 +158,146 @@ class ReleaseHandler:
             if config.create_tag_on_merge:
                 # Try to detect version bump and auto-tag
                 logger.info(f"PR merged on {repo}, create_tag_on_merge is enabled (not yet implemented)")
+
+    @staticmethod
+    async def publish_release(
+        config: OpsEngineConfig,
+        repo: str,
+        tag_name: str,
+        release_notes: str,
+        artifact_dir: str | Path,
+        *,
+        token: str = "",
+        webhook_secret: str = "",
+        base_url: str = "",
+        draft: bool = False,
+        prerelease: bool = False,
+        name_template: str | None = None,
+        adapters: list[ForgeAdapter] | None = None,
+    ) -> "PublicationReport":
+        """Publish a built release to every destination resolved from config.
+
+        The whole job (ADP-003): one build, published outward, nothing
+        re-downloaded (REL-010). The destinations come from the config layer via
+        :func:`resolve_destinations`; each is turned into an adapter via
+        :func:`adapters_for` (ADP-002); for each, the release is created and
+        every artifact in ``artifact_dir`` is attached (ADP-001).
+
+        ``artifact_dir`` is the local directory of built artifacts; its files are
+        read from disk and attached verbatim. Nothing is downloaded.
+
+        A destination that fails mid-publication is recorded in the returned
+        :class:`PublicationReport` under ``failed`` and the remaining
+        destinations still run, so a partial publication is a reported state an
+        operator can see — the mirror is behind — rather than an exception that
+        vanishes or a silent success.
+
+        ``adapters`` is an optional injection point for tests: when omitted, the
+        adapters are constructed from the resolved destinations; when supplied,
+        they are used in destination order. It never changes the destination
+        resolution, which always runs.
+
+        Raises:
+            ValueError: a supplied ``adapters`` list does not match the resolved
+                destination count.
+        """
+        destinations = resolve_destinations(config, repo)
+
+        if adapters is None:
+            adapters = adapters_for(
+                destinations,
+                token=token,
+                webhook_secret=webhook_secret,
+                base_url=base_url,
+            )
+        if len(adapters) != len(destinations):
+            raise ValueError(
+                f"publish_release resolved {len(destinations)} destinations but "
+                f"received {len(adapters)} adapters"
+            )
+
+        release_name = render_release_name(
+            name_template or DEFAULT_NAME_TEMPLATE, repo, tag_name
+        )
+        artifacts = _collect_artifacts(artifact_dir)
+
+        report = PublicationReport(repo=repo, tag_name=tag_name)
+        for destination, adapter in zip(destinations, adapters):
+            label = _destination_label(destination)
+            try:
+                await _publish_to_destination(
+                    adapter,
+                    destination,
+                    tag_name=tag_name,
+                    release_name=release_name,
+                    release_notes=release_notes,
+                    artifacts=artifacts,
+                    draft=draft,
+                    prerelease=prerelease,
+                )
+            except Exception as exc:  # noqa: BLE001 (record — the report, not abort)
+                logger.error(f"partial publication: {label} failed: {exc}")
+                report.failed.append(label)
+            else:
+                report.published.append(label)
+
+        if report.failed:
+            logger.error(
+                f"release {tag_name} partially published: "
+                f"failed destinations {report.failed}"
+            )
+        return report
+
+
+async def _publish_to_destination(
+    adapter: ForgeAdapter,
+    destination: Destination,
+    *,
+    tag_name: str,
+    release_name: str,
+    release_notes: str,
+    artifacts: list[tuple[str, bytes]],
+    draft: bool,
+    prerelease: bool,
+) -> None:
+    """Create the release on one destination and attach every artifact to it.
+
+    The release id comes from ``create_release``'s return value, so the uploads
+    target the release object just created — no second lookup and no
+    re-download. An exception anywhere in the create-or-attach sequence fails
+    the whole destination, which the caller records as a partial publication.
+    """
+    created = await adapter.create_release(
+        repo_full_name=destination.repo,
+        tag_name=tag_name,
+        name=release_name,
+        body=release_notes,
+        draft=draft,
+        prerelease=prerelease,
+    )
+    release_id = created["id"]
+    for asset_name, data in artifacts:
+        await adapter.upload_release_asset(
+            repo_full_name=destination.repo,
+            release_id=release_id,
+            asset_name=asset_name,
+            data=data,
+        )
+
+
+def _collect_artifacts(artifact_dir: str | Path) -> list[tuple[str, bytes]]:
+    """Read the built artifacts from ``artifact_dir``, name and bytes, sorted.
+
+    Only regular files are attached, by their basename, in name order so a
+    destination receives the same attachment sequence every run. The bytes come
+    from disk — nothing is downloaded.
+    """
+    root = Path(artifact_dir)
+    artifacts: list[tuple[str, bytes]] = []
+    for path in sorted(root.iterdir()):
+        if path.is_file():
+            artifacts.append((path.name, path.read_bytes()))
+    return artifacts
 
 
 async def _create_release_for_tag(

@@ -376,6 +376,32 @@ and is therefore unpromised by this contract, like the other submodule names; th
 behaviour above is documented as the promised semantics the release module
 (ADP-003) relies on.
 
+## Release publication to every destination (ADP-003)
+
+`ReleaseHandler.publish_release(...)` is the release module's publication entry
+point: it turns a tag, release notes and a directory of built artifacts into a
+release, created and asset-attached on **every** destination resolved from
+config. It is an async `staticmethod` on the public `ReleaseHandler` class; the
+method itself is additive and is not listed in the `methods` array above, which
+covers only the mirror-destination methods whose semantics are signature-guarded.
+
+One build, published outward; nothing re-downloaded (REL-010). The inputs are a
+tag, release notes, and a directory of built artifacts on disk. The destinations
+come from the config layer via `resolve_destinations` (DST-003), each destination
+is turned into an adapter via the factory `adapters_for` (ADP-002), and for each
+destination the release is created (with the name rendered from the configured
+`name_template`) and every artifact in the directory is attached via
+`upload_release_asset` (ADP-001). The artifacts' bytes are read from the given
+directory — nothing is downloaded.
+
+A destination that fails mid-publication is recorded, and the remaining
+destinations still run: a partial publication is a **reported state**, not an
+exception that vanishes and not a silent success. The return value is a
+`PublicationReport` (`ops_engine.modules.release`) whose `published` /
+`failed` lists name each destination as `forge:repo`, and whose `to_dict()`
+serializes that state to a plain dict so a cockpit (or an operator) can see
+that a mirror is behind without parsing log lines.
+
 ## Variable-name constants — deprecated
 
 `MIRROR_OWNER_VARIABLE` and `MIRROR_REPO_VARIABLE` live in the unpromised
