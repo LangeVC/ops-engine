@@ -335,7 +335,16 @@ and never restated as a literal in the workflow layer. `.forgejo/workflows/mirro
 resolves the github destination (`destinations` entries whose `forge` is
 `github`) out of `.ops.yaml` and constructs its push remote from that value plus
 the `GH_MIRROR_TOKEN` secret; a missing github destination is a named refusal
-(`MirrorDestinationBoundaryError`), never a silent Forgejo-only mirror.
+(`MirrorDestinationBoundaryError`), never a silent Forgejo-only mirror. The
+resolver is a strict line-scan that reads only the rigid `destinations` list the
+committed `.ops.yaml` declares; it does not parse YAML (REL-006/REL-010 keep
+yaml and pydantic off this bare runner). It strips scalar quoting around a value
+— `repo: "org/repo"` resolves to `org/repo` exactly as `load_ops_yaml` does —
+and refuses by name any value still carrying syntax it cannot parse (an inline
+comment), rather than emit raw bytes (quotes, a comment) into a push remote.
+That refusal-first property is what keeps a file the real loader accepts AND
+this scanner does not misread from silently choosing a remote a reviewer never
+saw.
 
 ### Destination boundary (ADP-009)
 
@@ -348,12 +357,20 @@ place a person edits without a review or a single source of truth:
   system's repo-/org-level *variable store* — user-managed, unreviewed data. A
   destination rendered into `vars.RELEASE_DESTINATIONS` and read back out (the
   pre-ADP-008 regression, ADP-004) carried the destination exactly there.
-- **a hardcoded repository or API host.** A literal `HOST/OWNER/REPO` (with or
-  without a trailing `.git`) or a forge API URL that names the target by value
-  instead of reading it from `.ops.yaml`. The pre-ADP-008 release workflow
-  reached for the Actions variable; the mirror workflow hardcoded
-  `github.com/LangeVC/ops-engine` as its push remote. Both are the shape refused
-  here.
+- **a hardcoded repository or API host.** A destination a release or mirror
+  reaches is named by value instead of read from `.ops.yaml`. The gate refuses
+  the forged-destination literal shapes the workflows carry:
+  - `HOST/OWNER/REPO[.git]` in an `http(s)://` remote or URL;
+  - the scp git remote `git@HOST:OWNER/REPO[.git]`;
+  - a forge API host (`api.github.com`, `uploads.github.com`) named by value —
+    the forge identity half of a split destination, which the pre-ADP-004
+    release workflow set as `GH_API` and concatenated with `GH_REPO` into its
+    request. The register is refused at its host, because the OWNER/REPO half
+    travels beside it and no single line carries both.
+  The pre-ADP-008 release workflow reached for the Actions variable; the mirror
+  workflow hardcoded `github.com/LangeVC/ops-engine` as its push remote; the
+  pre-ADP-004 workflow hardcoded `api.github.com` + `LangeVC/ops-engine`. All
+  are the shape refused here.
 
 What is **not** refused, because it is not in either shape:
 

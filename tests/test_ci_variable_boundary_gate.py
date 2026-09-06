@@ -8,14 +8,18 @@ behaviour is proven by a REAL subprocess run of the committed script, not by
 reading the script text.
 
 The two red proofs are REAL history, not invented examples:
+  * the pre-ADP-004 mirror workflow set `GH_API="https://api.github.com"` and
+    `GH_REPO="LangeVC/ops-engine"` as literals and POSTed the GitHub release
+    object at `https://api.github.com/repos/...` — the ORIGINAL instance (the
+    gate must catch it, not only the later cleans);
   * the pre-ADP-008 release workflow rendered its mirror destinations into the
     `vars.RELEASE_DESTINATIONS` Actions variable and read them back out;
   * the mirror workflow hardcoded `github.com/LangeVC/ops-engine` as its push
     remote.
-Both looked reasonable and both bypassed the config layer (.ops.yaml). The
-faithful excerpts below are copied from `git show a96cab7~2` and `git show
-a96cab7` respectively; the test replaces them with nothing and asserts the gate
-refuses each on its exact bytes.
+All looked reasonable and all bypassed the config layer (.ops.yaml). The
+faithful excerpts below are copied from `git show de302bc`,
+`git show a96cab7~2` and `git show a96cab7` respectively; the test replaces
+them with nothing and asserts the gate refuses each on its exact bytes.
 
 The file runs two ways:
   * ``python3 tests/test_ci_variable_boundary_gate.py`` — standalone, no pytest
@@ -37,6 +41,33 @@ WORKFLOW_DIR = REPO_ROOT / ".forgejo" / "workflows"
 GATE_CONTENT = GATE.read_text(encoding="utf-8")
 
 # --- REAL red-proof history bytes (see docstring). --------------------------
+
+# From git show de302bc:.forgejo/workflows/forgejo-release.yml (ADP-004 shape, the
+# ORIGINAL instance this gate exists to stop recurring). The forge identity rode
+# as two literals — an API host and the OWNER/REPO it was concatenated into.
+RED_PROOF_API_LITERALS = """\
+      - name: Create GitHub release
+        env:
+          GH_MIRROR_TOKEN: ${{ secrets.GH_MIRROR_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          TAG_NAME="${{ github.event.inputs.tag_name || github.ref_name }}"
+          GH_API="https://api.github.com"
+          GH_REPO="LangeVC/ops-engine"
+
+          GH_REL="$(curl -fsSL -X POST "${GH_API}/repos/${GH_REPO}/releases" \\
+            -H "Authorization: token ${GH_MIRROR_TOKEN}")" || {
+            echo "GitHubReleaseError" >&2
+            exit 1
+          }
+      - name: Upload assets to GitHub
+        run: |
+          GH_REPO="LangeVC/ops-engine"
+          curl -fsSL -X POST \\
+            "https://uploads.github.com/repos/${GH_REPO}/releases/1/assets" \\
+            -H "Authorization: token ${GH_MIRROR_TOKEN}" || exit 1
+"""
 
 # From git show a96cab7~2:.forgejo/workflows/forgejo-release.yml (ADP-004 shape).
 # The mirror destination was rendered into a repo/org-level Actions variable and
@@ -128,6 +159,38 @@ jobs:
           git push --force "https://x-access-token:${GH_MIRROR_TOKEN}@github.com/LangeVC/ops-engine.git" "+${GITHUB_REF}:${GITHUB_REF}"
 """
 
+# The scp-form git remote. Same OWNER/REPO destination by value, only a
+# different transport prefix (`git@` + `:` after the host); the contract names
+# this form and the gate must refuse it too.
+REFUSED_SCP = """\
+name: Regression
+on:
+  push:
+    branches: ["**"]
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Push to the mirror over ssh
+        run: |
+          git push "git@github.com:LangeVC/ops-engine.git" "+${GITHUB_REF}:${GITHUB_REF}"
+"""
+
+# A forge API URL that names the target by value (the other prose in CONTRACT.md).
+REFUSED_API_URL = """\
+name: Regression
+on:
+  push:
+    tags: ["v*"]
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create the GitHub release object
+        run: |
+          curl -X POST "https://api.github.com/repos/LangeVC/ops-engine/releases"
+"""
+
 
 def _write_intmp(tmp, text, name="workflow.yml"):
     path = Path(tmp) / name
@@ -159,6 +222,22 @@ def test_refuses_the_pre_adp008_vars_destination():
     # RELEASE_DESTINATIONS sits on line 4 of the excerpt.
     assert ":4:" in r.stderr
     assert "CiVariableBoundaryError" in r.stderr
+
+
+def test_refuses_the_original_adp004_api_literals():
+    """The ORIGINAL instance — the pre-ADP-004 release workflow that set
+    GH_API=https://api.github.com and concatenated GH_REPO into the request.
+    Neither line carries an OWNER/REPO of its own, so only refusing the forge
+    API host by name closes this shape. The gate must refuse it (references the
+    API host and upload host by value)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_intmp(tmp, RED_PROOF_API_LITERALS, "adp004.yml")
+        r = _scan_file(path)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "adp004.yml" in r.stderr
+    assert "api.github.com" in r.stderr
+    assert "uploads.github.com" in r.stderr
+    assert "DestinationBoundaryError" in r.stderr
 
 
 def test_refuses_the_historical_hardcoded_mirror_destination():
@@ -226,6 +305,30 @@ def test_hardcoded_destination_is_refused():
         r = _scan_file(path)
     assert r.returncode == 1, r.stdout + r.stderr
     assert "github.com/LangeVC/ops-engine.git" in r.stderr
+
+
+def test_scp_form_destination_is_refused():
+    """The scp git remote `git@host:owner/repo` names the same destination by
+    value through a different transport; the contract names it and the gate
+    refuses it."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_intmp(tmp, REFUSED_SCP)
+        r = _scan_file(path)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "DestinationBoundaryError" in r.stderr
+    assert "git@github.com:LangeVC/ops-engine.git" in r.stderr
+
+
+def test_forge_api_url_naming_the_target_is_refused():
+    """A forge API URL that names the target by value (api.github.com/repos/
+    OWNER/REPO/...) is refused at the API host: the register the contract names
+    for a destination must not be named by value."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_intmp(tmp, REFUSED_API_URL)
+        r = _scan_file(path)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "DestinationBoundaryError" in r.stderr
+    assert "api.github.com" in r.stderr
 
 
 # --- Criterion 3: mirror reads config, whole tree passes, wired in CI --------
@@ -296,6 +399,64 @@ def test_mirror_destination_resolver_reads_the_real_ops_yaml():
         )
     assert r.returncode == 2, r.stdout + r.stderr
     assert "exactly one github destination" in r.stderr
+
+
+def _ops_yaml_with(destinations_body: str) -> str:
+    """A minimal committed .ops.yaml carrying only the given github destination
+    block, mirroring the real-but-minimised shape the resolver reads."""
+    return (
+        "config_version: 1\n"
+        "destinations:\n"
+        + destinations_body
+        + "\n"
+    )
+
+
+def test_mirror_destination_resolver_strips_yaml_quoting():
+    """Quoting the repo value (which load_ops_yaml ACCEPTS and unquotes) must not
+    leak into the push remote: the resolver strips the quotes and emits the bare
+    repo — matching the real loader's resolution, not the raw bytes."""
+    resolver = _mirror_destination_resolver()
+    body = (
+        "  - forge: forgejo\n"
+        "    repo: langevc/ops-engine\n"
+        "    role: release\n"
+        "  - forge: github\n"
+        '    repo: "LangeVC/ops-engine"\n'
+        "    role: release\n"
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        ops = Path(tmp) / ".ops.yaml"
+        ops.write_text(_ops_yaml_with(body), encoding="utf-8")
+        r = subprocess.run(
+            [sys.executable, "-c", resolver], cwd=tmp, capture_output=True, text=True
+        )
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert r.stdout.strip() == "LangeVC/ops-engine"
+
+
+def test_mirror_destination_resolver_never_guesses_an_inline_comment():
+    """An inline comment after the repo value (which load_ops_yaml ACCEPTS and
+    strips) must make the resolver REFUSE by name, never emit the comment text
+    into a push remote. The refusal is deliberate, not a downstream git error."""
+    resolver = _mirror_destination_resolver()
+    body = (
+        "  - forge: forgejo\n"
+        "    repo: langevc/ops-engine\n"
+        "    role: release\n"
+        "  - forge: github\n"
+        "    repo: LangeVC/ops-engine  # the mirror target\n"
+        "    role: release\n"
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        ops = Path(tmp) / ".ops.yaml"
+        ops.write_text(_ops_yaml_with(body), encoding="utf-8")
+        r = subprocess.run(
+            [sys.executable, "-c", resolver], cwd=tmp, capture_output=True, text=True
+        )
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "MirrorDestinationBoundaryError" in r.stderr
+    assert "inline comment" in r.stderr
 
 
 def test_whole_tree_passes_the_gate():

@@ -13,14 +13,18 @@ is pointed at, the two shapes that took the destination OUT of the config layer:
   (``.ops.yaml`` read through ``ops_engine.config_loader.load_ops_yaml``).
 
 * *a hardcoded repository or API host* — a literal ``HOST/OWNER/REPO`` (with or
-  without a trailing ``.git``) or a forge API URL that names the target by value
-  instead of reading it from the config layer.
+  without a trailing ``.git``) in http(s) or scp form, or a forge API host
+  (``api.github.com`` / ``uploads.github.com``) named by value, instead of the
+  destination being read from the config layer.
 
-The two shapes are real history, not invented examples: the pre-ADP-008 release
-workflow rendered the destinations into ``vars.RELEASE_DESTINATIONS`` and read it
-back out, and the mirror workflow hardcoded
-``github.com/LangeVC/ops-engine`` as its push remote. Both looked reasonable and
-both bypassed the config layer.
+The shapes are real history, not invented examples: the pre-ADP-004 release
+workflow set ``GH_API="https://api.github.com"`` and ``GH_REPO="LangeVC/ops-engine"``
+as two literals and POSTed the GitHub release object at
+``${GH_API}/repos/${GH_REPO}/releases`` (the original instance this gate exists
+to stop recurring); the pre-ADP-008 release workflow rendered the destinations
+into ``vars.RELEASE_DESTINATIONS`` and read it back out; and the mirror workflow
+hardcoded ``github.com/LangeVC/ops-engine`` as its push remote. All looked
+reasonable and all bypassed the config layer.
 
 What is NOT refused — these are separate from the two shapes:
 
@@ -64,13 +68,15 @@ import sys
 from pathlib import Path
 
 # Hosts whose ``OWNER/REPO`` is a forge **destination** this kind of workflow is
-# prohibited from naming as a literal. github.com covers the mirror's git remote;
+# prohibited from naming as a literal. github.com covers the mirror's git remote
+# and any github.com/OWNER/REPO fetch that is not a whitelisted supplier;
 # gitlab.com, codeberg.org, git.sr.ht and the Forgejo host cover the shape a
 # layover that later points a second (web/git-form) destination would write, so
-# the refusal is explicit rather than a github-only special case. The API hosts
-# are intentionally absent: their ``/repos/OWNER/REPO`` (and GitLab's
-# numeric-project) layout is a different literal shape and is not the bypass
-# these workflows have ever carried.
+# the refusal is explicit rather than a github-only special case. GitLab's API
+# rides on gitlab.com itself and Forgejo's on its own host, so their API paths
+# are refused through this same set; only github.com keeps its REST/upload
+# endpoints on dedicated subdomains, which is why ``api.github.com`` and
+# ``uploads.github.com`` are a separate, host-name-only refusal (below).
 _DESTINATION_HOSTS = (
     "github.com",
     "www.github.com",
@@ -79,6 +85,17 @@ _DESTINATION_HOSTS = (
     "git.sr.ht",
     "git.langevc.com",
 )
+
+# Forge **API** hosts, refused by host name alone. Naming an API host by value is
+# the half of an API destination that carries the forge identity: the pre-ADP-004
+# release workflow set ``GH_API="https://api.github.com"`` and relied on the
+# upload URL ``https://uploads.github.com/repos/...`` — neither line carries an
+# OWNER/REPO of its own, so no HOST/OWNER/REPO rule can see them. The repository
+# half travelled beside them (``GH_REPO="LangeVC/ops-engine"``), and the two were
+# concatenated into the request. Refusing the host names outright catches that
+# split-destination shape at its forge-identity end.
+_API_HOSTS = ("api.github.com", "uploads.github.com")
+_API_HOST_REF = re.compile("|".join(re.escape(h) for h in _API_HOSTS))
 
 # Tool-fetch suppliers a destination workflow legitimately downloads tool bytes
 # from, named as ``(host, owner, repo)``. They are **not** a destination the
@@ -100,15 +117,26 @@ _DEST_PATH = re.compile(
     r"(?P<repo>[A-Za-z0-9_.-]+?)(?:\.git)?(?=[/\"'#?]|\s|\\|$)"
 )
 
+# The scp-form git remote, ``git@HOST:OWNER/REPO[.git]``. The destination is the
+# same repository literal as the http(s) form; only the transport prefix differs
+# (``git@`` and a ``:`` instead of a ``/`` after the host), so the HOST/OWNER/REPO
+# rule above never sees it. The optional ``.git`` is folded into the token.
+_SCP_PATH = re.compile(
+    r"(?<![\w])git@(?P<host>[A-Za-z0-9._-]+\.[A-Za-z]{2,}):"
+    r"(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+?)(?:\.git)?(?=[/\"'#?\s\\]|$)"
+)
+
 
 def _is_tool_supplier(path_token):
     """True when a HOST/OWNER/REPO literal is a whitelisted tool-supplier fetch.
 
-    ``path_token`` is a full (possibly path-truncated) multiline host/owner/repo
-    literal. Reduce it to its first three segments and compare against the
-    committed supplier set. A supplier namespace carries only released tool
-    bytes, never a release or mirror the workflow produces.
+    ``path_token`` comes in either transport form: ``host/owner/repo`` (http) or
+    ``host:owner/repo`` after a ``git@`` (scp). Normalise the scp form onto a
+    slash before comparing. A supplier namespace carries only released tool bytes,
+    never a release or mirror the workflow produces.
     """
+    if path_token.startswith("git@"):
+        path_token = path_token[len("git@"):].replace(":", "/", 1)
     parts = path_token.split("/")
     if len(parts) < 3:
         return False
@@ -117,23 +145,34 @@ def _is_tool_supplier(path_token):
 
 
 def _iter_multipart_host_literals(line):
-    """Yield full multipart tokens whose host is a forge destination host.
+    """Yield all forge repository literals in one line (http or scp transport).
 
-    Yields the longest ``HOST/OWNER/REPO[...]`` run so a URL and a token after it
-    do not get reported as two separate at-allocations.
+    Yields the full ``HOST/OWNER/REPO[...]`` matched run per http-scoped match,
+    and the full ``git@HOST:OWNER/REPO[.git]`` run per scp match, each as a
+    single reportable token.
     """
     for m in _DEST_PATH.finditer(line):
         host = m.group("host")
         if host not in _DESTINATION_HOSTS:
             continue
-        # reconstruct the full matched host/owner/repo using a clean start
-        start = m.start("host")
-        token_end = m.end()
-        yield line[start:token_end]
+        yield line[m.start("host"):m.end()]
+    for m in _SCP_PATH.finditer(line):
+        host = m.group("host")
+        if host not in _DESTINATION_HOSTS:
+            continue
+        yield line[m.start():m.end()]
 
 
 def _vis_vars_offence(line, lineno):
     for m in _VARS_REF.finditer(line):
+        yield lineno, m.group(0)
+
+
+def _vis_api_host_offence(line, lineno):
+    """Refuse a forge API host name by value, even without an OWNER/REPO beside
+    it. An API call takes its transport from the host and its target from a
+    split path/owner, so only refusing both half-destinations closes the shape."""
+    for m in _API_HOST_REF.finditer(line):
         yield lineno, m.group(0)
 
 
@@ -150,6 +189,8 @@ def _scan_text(path, text):
     for lineno, line in enumerate(text.splitlines(), start=1):
         for ln, token in _vis_vars_offence(line, lineno):
             offences.append((path, ln, token, "ci-variable"))
+        for ln, token in _vis_api_host_offence(line, lineno):
+            offences.append((path, ln, token, "api-host"))
         for ln, token in _vis_dest_offence(line, lineno):
             offences.append((path, ln, token, "destination"))
     return sorted(offences)
@@ -244,6 +285,14 @@ def main(argv=None):
                     "github.* (Forgejo-provided event context) are permitted.\n"
                     % (filepath, lineno, token)
                 )
+            elif kind == "api-host":
+                sys.stderr.write(
+                    "DestinationBoundaryError: %s:%d: hardcoded forge API host "
+                    "%r. Naming an API host by value splits the destination away "
+                    "from the config layer; read the destination from .ops.yaml "
+                    "instead.\n"
+                    % (filepath, lineno, token)
+                )
             else:
                 sys.stderr.write(
                     "DestinationBoundaryError: %s:%d: hardcoded forge destination "
@@ -257,7 +306,8 @@ def main(argv=None):
     sys.stdout.write(
         "ci-variable boundary gate: PASS - no workflow names a forge "
         "destination outside the config layer (no vars.* destination variable, "
-        "no hardcoded forge repository or API host on a non-tool-supplier).\n"
+        "no hardcoded forge repository, git remote or API host on a "
+        "non-tool-supplier).\n"
     )
     return 0
 
