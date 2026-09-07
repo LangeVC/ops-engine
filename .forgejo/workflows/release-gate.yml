@@ -30,9 +30,12 @@ name: Release gate
 # adopter recognises). An organisation's own forge host is organisation
 # knowledge, so it is not shipped in the gate: it arrives via --dest-hosts, the
 # same shape --org-vocab and --ci-env take on the src/ side. This workflow
-# derives that host from github.server_url — Forgejo-provided event context
-# that names this instance — so no organisation host literal lives here any
-# more than it lives in the gate.
+# derives the BARE host from github.server_url — Forgejo-provided event context
+# that names this instance — stripping the scheme and any port, path, query or
+# fragment, so no organisation host literal lives here any more than it lives in
+# the gate. A server_url that does not reduce to a bare host is refused by name:
+# the gate never runs with an empty host file, so the org-host check is never
+# silently switched off.
 #
 # ADP-010 — the Layer-1 boundary runs here too. The engine's own Python source
 # (src/) must know no organisation and no CI system: an organisation name as a
@@ -58,7 +61,14 @@ jobs:
           DEST_HOSTS="$(mktemp)"
           trap 'rm -f "$DEST_HOSTS"' EXIT
           SERVER_URL="${{ github.server_url }}"
-          printf '%s\n' "${SERVER_URL#*://}" > "$DEST_HOSTS"
+          SERVER_HOST="${SERVER_URL#*://}"
+          SERVER_HOST="${SERVER_HOST%%[/?#]*}"
+          SERVER_HOST="${SERVER_HOST%%:*}"
+          if [ -z "$SERVER_HOST" ]; then
+            echo "ServerUrlBoundaryError: github.server_url (${SERVER_URL}) names no bare forge host; refusing to run the destination gate with no organisation host rather than silently disabling it." >&2
+            exit 1
+          fi
+          printf '%s\n' "$SERVER_HOST" > "$DEST_HOSTS"
           python3 scripts/ci_variable_boundary_gate.py --dir .forgejo \
             --dest-hosts "$DEST_HOSTS"
       - name: Refuse a Layer-1 boundary bypass (org name or CI env read in src)

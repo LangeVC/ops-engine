@@ -777,6 +777,86 @@ def test_gate_runs_without_site_packages():
     assert re.search(r"^import\s+ops_engine\b", GATE_CONTENT, re.MULTILINE) is None
 
 
+def _bare_host(server_url: str) -> str:
+    """The exact POSIX-sh derivation the wired release-gate step performs to
+    reduce github.server_url to a bare host: strip the scheme, then any path,
+    query or fragment separator, then an optional :port."""
+    host = server_url
+    if "://" in host:
+        host = host.split("://", 1)[1]
+    for sep in ("/", "?", "#"):
+        host = host.split(sep, 1)[0]
+    if ":" in host:
+        host = host.split(":", 1)[0]
+    return host
+
+
+def test_bare_host_derivation_reduces_every_server_url_shape():
+    """The wired step derives a BARE host, so a port, a trailing slash, a query
+    or a fragment all reduce to the plain host a reintroduced org literal
+    carries — and an empty/unparseable value reduces to the empty string the
+    step refuses by name."""
+    assert _bare_host("https://git.langevc.com") == "git.langevc.com"
+    assert _bare_host("https://git.langevc.com:9443") == "git.langevc.com"
+    assert _bare_host("https://git.langevc.com/") == "git.langevc.com"
+    assert _bare_host("https://git.langevc.com?x=1") == "git.langevc.com"
+    assert _bare_host("https://git.langevc.com#frag") == "git.langevc.com"
+    assert _bare_host("") == ""
+
+
+def test_release_gate_derives_a_bare_host_not_a_scheme_stripped_remainder():
+    """The wired step must strip port/path/query/fragment, not only the scheme:
+    `${SERVER_URL#*://}` alone lets the org-host refusal silently vanish, so the
+    workflow must reduce to a bare host and refuse an empty result by name."""
+    text = _release_gate_text()
+    assert "SERVER_HOST=" in text
+    assert "${SERVER_URL#*://}" in text
+    assert "${SERVER_HOST%%[/?#]*}" in text
+    assert "${SERVER_HOST%%:*}" in text
+    assert "exit 1" in text
+
+
+def _derived_org_forge_literal(host: str) -> str:
+    return (
+        'name: X\non: push\njobs:\n  y:\n    runs-on: ubuntu-latest\n'
+        '    steps:\n      - name: a\n'
+        '        run: |\n          git push "https://x-access-token:${TOKEN}@'
+        + host + '/LangeVC/ops-engine.git"\n'
+    )
+
+
+def test_org_forge_is_refused_across_every_derived_server_url_shape():
+    """The org forge literal is refused for a clean AND a ported/pathed/queried
+    server_url, because the deduced bare host derives to the plain host the
+    reintroduced literal carries. Only the BARE host from _bare_host is fed to
+    --dest-hosts, so the org-host refusal never vanishes under a non-plain
+    server_url."""
+    for server_url in (
+        "https://git.langevc.com",
+        "https://git.langevc.com:9443",
+        "https://git.langevc.com/",
+        "https://git.langevc.com?x=1",
+    ):
+        bare = _bare_host(server_url)
+        assert bare == "git.langevc.com", server_url
+        with tempfile.TemporaryDirectory() as tmp:
+            hosts = _dest_hosts_file(tmp, [bare])
+            path = _write_intmp(tmp, _derived_org_forge_literal(bare), "org.yml")
+            r = _scan_file_with_dest_hosts(path, hosts)
+        assert r.returncode == 1, (server_url, r.stdout + r.stderr)
+        assert "DestinationBoundaryError" in r.stderr
+
+
+def test_empty_server_url_is_refused_not_a_silent_pass():
+    """An empty/unparseable server_url derives no bare host; the wired step must
+    refuse by name (never run the destination gate with an empty host set, which
+    would silently drop the org-host check it exists to run)."""
+    assert _bare_host("") == ""
+    assert _bare_host("https://") == ""
+    # The workflow names the refusal for an empty derived host.
+    assert "ServerUrlBoundaryError" in _release_gate_text()
+
+
 def test_contract_documents_the_permitted_set():
     """CONTRACT.md defends the boundary: secrets are not destinations and
     Forgejo-provided event context is not a user variable store, while vars.*
