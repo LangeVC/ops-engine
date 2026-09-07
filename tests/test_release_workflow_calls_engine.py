@@ -137,12 +137,16 @@ def test_all_five_gates_precede_the_engine_call():
 
 
 def test_publish_block_constructs_one_adapter_per_destination():
-    """The publish block builds a ForgejoAdapter for the canonical forge and a
-    GithubAdapter for each github destination — two forges, two adapters, no
-    shared credential."""
+    """The publish block maps one credential per forge through the factory and
+    delegates adapter construction to it, rather than hand-building a
+    ForgejoAdapter / GithubAdapter inline — two forges, two adapters, two
+    distinct tokens, no shared credential (ADP-011)."""
     block = _publish_block()
-    assert "ForgejoAdapter" in block
-    assert "GithubAdapter" in block
+    assert "adapters_for" in block
+    assert "Credential" in block
+    # No inline adapter construction: the factory owns the mapping.
+    assert "ForgejoAdapter" not in block
+    assert "GithubAdapter" not in block
     # The two credentials are distinct tokens, not one shared one.
     assert "FORGEJO_TOKEN" in block
     assert "GH_MIRROR_TOKEN" in block

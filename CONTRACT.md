@@ -558,6 +558,45 @@ secret. The ingress guard is NOT weakened: `parse_webhook` on an adapter whose
 unsigned ingress still refuses every payload. That refusal lives where the secret
 is used, not where it is not.
 
+### A credential per destination (ADP-011)
+
+The factory also serves a credential **per destination**, keyed by forge value,
+so a consumer with two destinations carrying two distinct credentials no longer
+has to bypass the factory and hand-build adapters inline. The release workflow's
+only real shape is two destinations with two *different* tokens — the Forgejo
+runner token and the GitHub mirror token — which the single-token form ADP-002
+shipped could not express.
+
+- `Credential` (in `ops_engine.adapters.factory`) is an immutable value holding
+  one forge's `token` and an optional `webhook_secret`. Both are caller input.
+  The factory forwards them to the matching adapter and retains nothing: a
+  `Credential` is passed into the call, not state the factory stores or logs.
+  A credential is **not** a destination — the token stays in the caller's secret
+  store; the factory learns only that a destination's forge HAS a credential in
+  the mapping, never anything about the token's value beyond forwarding it.
+
+- `adapters_for(destinations, *, credentials=...)` accepts a mapping from forge
+  value (`"github"` / `"forgejo"`) to a `Credential`. Each destination is served
+  only its own forge's credential, so two destinations with two distinct tokens
+  are constructed in one call. When `credentials` is omitted, the legacy shared
+  `token`/`webhook_secret` keywords still apply — every destination receives the
+  same credential, exactly as before, so the previous form is unchanged.
+
+- A destination whose forge has **no** entry in the `credentials` mapping raises
+  `MissingCredentialError` naming the destination — a named refusal, never a
+  silent unauthenticated call that would construct an adapter with an empty
+  token. An unrecognised forge value still raises `UnknownForgeError` exactly as
+  before, whichever credential shape supplies it.
+
+`Credential` and `MissingCredentialError` are names in the internal submodule
+`ops_engine.adapters.factory` and are therefore unpromised by this contract,
+like the other submodule names; the behaviour above is documented as the
+promised semantics the release workflow relies on. The release workflow
+(`.forgejo/workflows/forgejo-release.yml`) is the consumer that exercised only
+its two-different-token shape, which is why it previously hand-built each
+adapter; it now delegates adapter construction to the factory's
+credential-per-destination form.
+
 ## Release publication to every destination (ADP-003)
 
 `ReleaseHandler.publish_release(...)` is the release module's publication entry
