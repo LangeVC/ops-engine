@@ -1,6 +1,6 @@
 # Layover Consumption Declaration
 
-Each org layover consumes `ops-engine`. A version pin (`@v3.0.0`) is not
+Each org layover consumes `ops-engine`. A version pin (`@v3.4.0`) is not
 checkable on its own: it does not say *what* the layover uses. This document
 declares, per layover, the **contract names** it consumes — resolution of the
 names listed in `CONTRACT.md` — placed next to the pin that the layover holds
@@ -25,7 +25,7 @@ layover entry carries its own `pin` (the version it resolves in
   "layovers": [
     {
       "name": "lvc-ops",
-      "pin": "3.0.0",
+      "pin": "3.4.0",
       "extra": null,
       "consumes": [
         "OpsEngineConfig",
@@ -43,7 +43,7 @@ layover entry carries its own `pin` (the version it resolves in
     },
     {
       "name": "capacium-ops",
-      "pin": "3.0.0",
+      "pin": "3.4.0",
       "extra": "postgres",
       "consumes": [
         "OpsEngineConfig",
@@ -64,7 +64,7 @@ layover entry carries its own `pin` (the version it resolves in
     },
     {
       "name": "elementeer-ops",
-      "pin": "3.0.0",
+      "pin": "3.4.0",
       "extra": null,
       "consumes": [
         "OpsEngineConfig",
@@ -82,7 +82,7 @@ layover entry carries its own `pin` (the version it resolves in
     },
     {
       "name": "fusionaize-ops",
-      "pin": "3.0.0",
+      "pin": "3.4.0",
       "extra": null,
       "consumes": [
         "OpsEngineConfig",
@@ -100,7 +100,7 @@ layover entry carries its own `pin` (the version it resolves in
     },
     {
       "name": "skillweave-ops",
-      "pin": "3.0.0",
+      "pin": "3.4.0",
       "extra": null,
       "consumes": [
         "OpsEngineConfig",
@@ -134,3 +134,6 @@ layover entry carries its own `pin` (the version it resolves in
   `@v3.0.0`; the declaration previously carried the stale `2.2.0` (CFG-005). The
   pins in this document are the values read from each layover's own
   `pyproject.toml`, cross-checked by `tests/test_pin_drift_check.py`.
+- Re-measured on 2026-09-07: all five layovers were moved to `@v3.4.0` and this
+  declaration with them. `capacium-ops` carries the pin as
+  `ops-engine[postgres]`, which the four others do not.
