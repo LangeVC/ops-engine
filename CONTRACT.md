@@ -412,6 +412,51 @@ release gate build at tag time — before `forgejo-release.yml`'s release step c
 publish to a destination nobody reviewed. `mirror.yml` both reads its destination
 from the config layer and is covered by the same gate.
 
+## Layer-1 boundary (ADP-010)
+
+Layer 1 — the engine's own `src/` tree — knows no organisation and no CI
+system. Two shapes are refused wherever they appear as a **live value in
+executing Python**, each a form of Layer-1 knowledge that belongs in the calling
+layer instead:
+
+- **an organisation name as a literal.** A string constant whose value equals an
+  organisation term the caller declares. The historical case is the rate-limit
+  decorator `@track_rate_limit(namespace="capacium-ops")` in
+  `ops_engine.modules.health_monitor`: the namespace was an organisation name
+  baked into executing code. It must arrive as configuration or an argument —
+  `HealthMonitor.run` now takes `repo`, `token` and `namespace` as caller-supplied
+  arguments, and the CLI carries `--repo`, `--token` and `--rate-limit-namespace`.
+  The module reads no CI environment variable and names no organisation by value.
+
+- **a direct CI-environment read.** `os.environ.get("NAME")` (or
+  `os.getenv("NAME")`) with a literal variable name the caller declares. The
+  historical case is `os.environ.get("GITHUB_REPOSITORY")` (and `GITHUB_TOKEN`)
+  in `health_monitor.py`: the engine reaching into one CI system's variable
+  store. The value must instead arrive from the workflow that invokes the
+  engine; a read whose variable name comes from configuration
+  (`os.environ.get(cfg.var_name)`) is not a literal and is not refused.
+
+The boundary is enforced by `scripts/ci_variable_boundary_gate.py`, the same
+stdlib-only script that guards the destination boundary (REL-006; it imports
+only the standard library, `ast` included, and never imports `ops_engine`).
+Given `--py-dir src`, it parses every `.py` file with `ast` and refuses either
+shape, naming the file and the 1-based line. The distinction between a
+documentation mention and a live value is made by **parsing, not pattern**: a
+docstring is a node in the parse tree (the first `Expr` holding a `Constant`
+string of a module, class, or function body) and its value is skipped, and a
+comment never reaches the AST. The same organisation name therefore passes
+inside a docstring or comment and is refused as a live value.
+
+The vocabulary is supplied from outside, never shipped in the gate
+(REL-011's principle applied to the engine). `--org-vocab` is a file of
+organisation names (one per line) and `--ci-env` a file of CI environment
+variable names; with neither, the scan refuses nothing — an adopting engine
+supplies the vocabulary that matches its own ecosystem. The release gate
+(`.forgejo/workflows/release-gate.yml`) supplies both for LangeVC, so this
+engine's `src/` stays gated the way this repository's release notes stay gated:
+the vocabulary arrives from the workflow (the config layer), never from the
+engine.
+
 ## Destination resolver (DST-003)
 
 `resolve_destinations(config, repo, *, repo_dir=None)` is the Layer-1

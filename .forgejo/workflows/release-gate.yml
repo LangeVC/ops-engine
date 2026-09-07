@@ -24,6 +24,16 @@ name: Release gate
 # a user variable store) are permitted. A deliberately reintroduced destination
 # therefore fails THIS build at tag time, before the release step in
 # forgejo-release.yml can publish anywhere.
+#
+# ADP-010 — the Layer-1 boundary runs here too. The engine's own Python source
+# (src/) must know no organisation and no CI system: an organisation name as a
+# live value, or a direct CI-environment read, belongs in the calling layer, never
+# in the engine. The same gate script scans src/ with ast and refuses either
+# shape, naming file and line. Its vocabulary arrives from THIS workflow (the
+# config layer), never shipped in the gate: the organisation names and the CI
+# variable names a LangeVC engine must not carry are listed below. A docstring or
+# comment naming the same organisation is documentation and passes; a live value
+# fails before any release step can publish.
 on:
   push:
     tags: ["v*"]
@@ -37,6 +47,19 @@ jobs:
         run: |
           set -euo pipefail
           python3 scripts/ci_variable_boundary_gate.py --dir .forgejo
+      - name: Refuse a Layer-1 boundary bypass (org name or CI env read in src)
+        run: |
+          set -euo pipefail
+          ORG_VOCAB="$(mktemp)"
+          CI_ENV_VOCAB="$(mktemp)"
+          trap 'rm -f "$ORG_VOCAB" "$CI_ENV_VOCAB"' EXIT
+          printf '%s\n' Capacium capacium capacium-ops LangeVC langevc lvc-ops \
+            > "$ORG_VOCAB"
+          printf '%s\n' GITHUB_REPOSITORY GITHUB_TOKEN > "$CI_ENV_VOCAB"
+          python3 scripts/ci_variable_boundary_gate.py \
+            --py-dir src \
+            --org-vocab "$ORG_VOCAB" \
+            --ci-env "$CI_ENV_VOCAB"
       - name: Check tag against the declared version
         run: |
           set -euo pipefail
