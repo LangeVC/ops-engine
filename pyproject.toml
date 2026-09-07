@@ -19,6 +19,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# The `dev` extra is for DEVELOPING THE SOURCE CHECKOUT in this repository: it
+# installs the test/lint tooling its suite runs. A checkout carries tests/;
+# the published sdist does NOT (Decision 1 in CONTRACT.md) — it ships only the
+# package. Installing ops-engine[dev] from the published artifact therefore
+# gives the tooling but not the tests, and no consumer should expect the
+# artifact to self-verify. Run the suite against a checkout, not an unpacked
+# sdist.
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
@@ -35,6 +42,12 @@ postgres = [
 [tool.hatch.build.targets.wheel]
 packages = ["src/ops_engine"]
 
+# The published sdist carries EXACTLY this set — the one package tree under
+# src/ plus the files hatchling force-includes with it (Decision set in
+# CONTRACT.md, "What the published artifacts carry"). tests/, scripts/, docs/,
+# examples/ and .forgejo/ are deliberately absent (Decision 1), and
+# constraints.txt does not travel, so byte-identical reproducibility is
+# FROM THE SOURCE CHECKOUT, not from the unpacked sdist (Decision 2).
 [tool.hatch.build.targets.sdist]
 only-include = ["src/ops_engine"]
 

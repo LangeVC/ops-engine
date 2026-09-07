@@ -19,6 +19,13 @@
 # metadata hatchling force-includes (pyproject.toml, README, LICENSE, the VCS
 # exclusion file). Any OTHER top-level entry makes the test fail.
 #
+# ADP-012 — this is a DECIDED set, recorded in CONTRACT.md ("What the published
+# artifacts carry"): tests/, scripts/, docs/, examples/, .forgejo/ and
+# constraints.txt are deliberately absent. It is asserted EXACTLY, in both
+# directions — an incidental inclusion and a missing decided member both fail —
+# rather than as a one-sided "no stray" guard, so nobody can silently redesign
+# what the artifact carries.
+#
 # It requires a Python on PATH that can `python3 -m build` (as the suite's
 # existing shell build checks already do). If the module is missing the test
 # ERRORS rather than skipping, because an environment that cannot build the
@@ -41,10 +48,14 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# The only top-level components a consumer of the sdist needs. Everything a CI
-# edit might otherwise leak in - .forgejo/, .github/, tests/, docs/, scripts/,
-# examples/, venvs, log files - lands at a first path component that is not in
-# this set and therefore fails the suite.
+# The DECIDED top-level set the sdist must carry, and must carry EXACTLY
+# (ADP-012; recorded in CONTRACT.md). These are the components a consumer of a
+# source distribution needs to rebuild the wheel: the package under src/ and
+# the metadata hatchling force-includes. Everything a CI edit might otherwise
+# leak in - .forgejo/, .github/, tests/, docs/, scripts/, examples/, venvs, log
+# files, constraints.txt - lands at a first path component that is NOT in this
+# set and therefore fails the suite. This is the set the "decided, not
+# incidental" test below compares the archive against exactly.
 ALLOWED_TOP_LEVEL = {
     "src",
     "pyproject.toml",
@@ -160,6 +171,30 @@ def test_sdist_is_an_allowlist_not_a_sweep(sdist_members: set[str]) -> None:
         )
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_sdist_carries_exactly_the_decided_set(sdist_members: set[str]) -> None:
+    """The sdist carries the DECIDED top-level set, and nothing else.
+
+    ADP-012 — the allowlist guard above compares only one way (no member
+    outside `allowed`). That never fails if a DECIDED member stops shipping, so
+    it would not catch somebody silently redesigning down what the sdist
+    carries. This asserts the archive top-level members EQUAL the decided set
+    exactly: an incidental inclusion (`top_level` is a superset) AND a decided
+    member that vanished (`top_level` is a subset) both fail. The decided set is
+    recorded in CONTRACT.md ("What the published artifacts carry") or, for
+    files hatchling force-includes (.gitignore, PKG-INFO), in `_ALWAYS_PRESENT`.
+    """
+    top_level = {_top_entry(m) for m in sdist_members}
+    decided = ALLOWED_TOP_LEVEL | _ALWAYS_PRESENT
+
+    extra = sorted(top_level - decided)
+    missing = sorted(decided - top_level)
+    assert not extra and not missing, (
+        "sdist does not carry exactly the decided set (CONTRACT.md). "
+        f"Decided members missing from the artifact: {missing}; "
+        f"incidental members the artifact carries that are not decided: {extra}"
+    )
 
 
 def test_sdist_packages_the_committed_source(sdist_members: set[str]) -> None:
