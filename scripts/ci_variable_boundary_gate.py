@@ -79,23 +79,30 @@ import re
 import sys
 from pathlib import Path
 
-# Hosts whose ``OWNER/REPO`` is a forge **destination** this kind of workflow is
-# prohibited from naming as a literal. github.com covers the mirror's git remote
-# and any github.com/OWNER/REPO fetch that is not a whitelisted supplier;
-# gitlab.com, codeberg.org, git.sr.ht and the Forgejo host cover the shape a
-# layover that later points a second (web/git-form) destination would write, so
-# the refusal is explicit rather than a github-only special case. GitLab's API
-# rides on gitlab.com itself and Forgejo's on its own host, so their API paths
-# are refused through this same set; only github.com keeps its REST/upload
-# endpoints on dedicated subdomains, which is why ``api.github.com`` and
-# ``uploads.github.com`` are a separate, host-name-only refusal (below).
+# The UNIVERSAL set of hosts whose ``OWNER/REPO`` is a forge **destination** this
+# kind of workflow is prohibited from naming as a literal — the public forges any
+# adopter recognises, no organisation knowledge. github.com covers the mirror's
+# git remote and any github.com/OWNER/REPO fetch that is not a whitelisted
+# supplier; gitlab.com, codeberg.org and git.sr.ht cover the shape a layover that
+# later points a second (web/git-form) destination would write, so the refusal is
+# explicit rather than a github-only special case. GitLab's API rides on
+# gitlab.com itself, so its API paths are refused through this same set; only
+# github.com keeps its REST/upload endpoints on dedicated subdomains, which is why
+# ``api.github.com`` and ``uploads.github.com`` are a separate, host-name-only
+# refusal (below).
+#
+# A self-hosted instance is NOT in this set: an organisation's own forge host is
+# organisation knowledge and arrives from the config layer via ``--dest-hosts``
+# (a file of hosts, one per line), exactly as the org vocabulary arrives via
+# ``--org-vocab`` and the CI variable names via ``--ci-env`` on the ``src/`` side.
+# With no ``--dest-hosts`` file the gate still refuses only the universal set,
+# and an organisation that declares no forge host gets no check for one.
 _DESTINATION_HOSTS = (
     "github.com",
     "www.github.com",
     "gitlab.com",
     "codeberg.org",
     "git.sr.ht",
-    "git.langevc.com",
 )
 
 # Forge **API** hosts, refused by host name alone. Naming an API host by value is
@@ -215,21 +222,23 @@ def _is_tool_supplier(path_token):
     return triple in _TOOL_SUPPLIERS
 
 
-def _iter_multipart_host_literals(line):
+def _iter_multipart_host_literals(line, dest_hosts):
     """Yield all forge repository literals in one line (http or scp transport).
 
+    ``dest_hosts`` is the destination-host set to refuse against: the universal
+    set plus any organisation hosts the caller supplied via ``--dest-hosts``.
     Yields the full ``HOST/OWNER/REPO[...]`` matched run per http-scoped match,
     and the full ``git@HOST:OWNER/REPO[.git]`` run per scp match, each as a
     single reportable token.
     """
     for m in _DEST_PATH.finditer(line):
         host = m.group("host")
-        if host not in _DESTINATION_HOSTS:
+        if host not in dest_hosts:
             continue
         yield line[m.start("host"):m.end()]
     for m in _SCP_PATH.finditer(line):
         host = m.group("host")
-        if host not in _DESTINATION_HOSTS:
+        if host not in dest_hosts:
             continue
         yield line[m.start():m.end()]
 
@@ -247,14 +256,14 @@ def _vis_api_host_offence(line, lineno):
         yield lineno, m.group(0)
 
 
-def _vis_dest_offence(line, lineno):
-    for token in _iter_multipart_host_literals(line):
+def _vis_dest_offence(line, lineno, dest_hosts):
+    for token in _iter_multipart_host_literals(line, dest_hosts):
         if _is_tool_supplier(token):
             continue
         yield lineno, token
 
 
-def _scan_text(path, text):
+def _scan_text(path, text, dest_hosts):
     """Return a sorted list of (path, lineno, token, kind) offences in one file."""
     offences = []
     for lineno, line in enumerate(text.splitlines(), start=1):
@@ -263,18 +272,18 @@ def _scan_text(path, text):
             offences.append((path, ln, token, "ci-variable"))
         for ln, token in _vis_api_host_offence(line, lineno):
             offences.append((path, ln, token, "api-host"))
-        for ln, token in _vis_dest_offence(line, lineno):
+        for ln, token in _vis_dest_offence(line, lineno, dest_hosts):
             offences.append((path, ln, token, "destination"))
     return sorted(offences)
 
 
-def _scan_file(path):
+def _scan_file(path, dest_hosts):
     try:
         text = Path(path).read_text(encoding="utf-8")
     except OSError as exc:
         print(f"ci_variable_boundary_gate: ERROR reading {path}: {exc}", file=sys.stderr)
         raise
-    return _scan_text(str(path), text)
+    return _scan_text(str(path), text, dest_hosts)
 
 
 # ── Python layer-boundary scan (ADP-010) ────────────────────────────────────
@@ -517,6 +526,14 @@ def main(argv=None):
         help="file of CI environment variable names (one per line) refused as direct reads",
     )
     parser.add_argument(
+        "--dest-hosts",
+        metavar="PATH",
+        default=None,
+        help="file of organisation forge hosts (one per line) refused as destinations, "
+        "added to the universal set (github.com, www.github.com, gitlab.com, "
+        "codeberg.org, git.sr.ht)",
+    )
+    parser.add_argument(
         "workflow",
         nargs="*",
         metavar="WORKFLOW",
@@ -540,10 +557,14 @@ def main(argv=None):
         )
         return 2
 
+    dest_hosts = set(_DESTINATION_HOSTS)
+    if args.dest_hosts is not None:
+        dest_hosts.update(_load_vocab(args.dest_hosts))
+
     all_offences = []
     for path in targets:
         try:
-            all_offences.extend(_scan_file(path))
+            all_offences.extend(_scan_file(path, dest_hosts))
         except OSError:
             return 2
 

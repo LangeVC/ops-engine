@@ -412,6 +412,19 @@ release gate build at tag time — before `forgejo-release.yml`'s release step c
 publish to a destination nobody reviewed. `mirror.yml` both reads its destination
 from the config layer and is covered by the same gate.
 
+The destination-host register the gate refuses against ships only its
+**universal** set — `github.com`, `www.github.com`, `gitlab.com`, `codeberg.org`,
+`git.sr.ht`, the public forges any adopter recognises. A self-hosted instance is
+not in that set: an organisation's own forge host is organisation knowledge and
+arrives from the config layer via the `--dest-hosts` file, exactly as the
+organisation names arrive via `--org-vocab` and the CI variable names via
+`--ci-env` on the `src/` side (see the Layer-1 boundary below). With no
+`--dest-hosts` file the gate refuses only the universal five; an organisation
+that declares no forge host gets no check for one. The release gate supplies
+`git.langevc.com` through `--dest-hosts`, so this repository's own workflows stay
+gated on its private forge without the engine or the gate shipping LangeVC
+knowledge.
+
 ## Layer-1 boundary (ADP-010)
 
 Layer 1 — the engine's own `src/` tree — knows no organisation and no CI
@@ -455,7 +468,10 @@ supplies the vocabulary that matches its own ecosystem. The release gate
 (`.forgejo/workflows/release-gate.yml`) supplies both for LangeVC, so this
 engine's `src/` stays gated the way this repository's release notes stay gated:
 the vocabulary arrives from the workflow (the config layer), never from the
-engine.
+engine. The same principle governs the destination-host set (see "Destination
+boundary" above): `--dest-hosts` is the file of organisation forge hosts, kept
+out of the gate and supplied by the config layer, mirroring `--org-vocab` and
+`--ci-env` here.
 
 ## Destination resolver (DST-003)
 

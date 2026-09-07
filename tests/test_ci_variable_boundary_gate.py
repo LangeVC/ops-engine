@@ -316,6 +316,14 @@ def _scan_file(path):
     )
 
 
+def _scan_file_with_dest_hosts(path, dest_hosts):
+    return subprocess.run(
+        [sys.executable, str(GATE), "--dest-hosts", str(dest_hosts), str(path)],
+        capture_output=True,
+        text=True,
+    )
+
+
 # --- Criterion 1: both REAL red proofs refuse, naming file/line/token --------
 
 
@@ -439,6 +447,68 @@ def test_forge_api_url_naming_the_target_is_refused():
     assert r.returncode == 1, r.stdout + r.stderr
     assert "DestinationBoundaryError" in r.stderr
     assert "api.github.com" in r.stderr
+
+
+# --- Destination-host register: universal shipped, org host externalised. -----
+#
+# The gate ships the UNIVERSAL destination-host set only (github.com,
+# www.github.com, gitlab.com, codeberg.org, git.sr.ht). An organisation's own
+# forge host (git.langevc.com) arrives from the config layer via --dest-hosts,
+# the same shape --org-vocab/--ci-env take on the src/ side. A self-hosted
+# instance must NOT be shipped in the gate.
+
+REMOTE_ON_ORG_FORGE = """\
+name: Regression
+on:
+  push:
+    branches: ["**"]
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Push to the org forge
+        run: |
+          git push "https://x-access-token:${TOKEN}@git.langevc.com/LangeVC/ops-engine.git"
+"""
+
+
+def _dest_hosts_file(tmp, hosts, name="dest-hosts.txt"):
+    path = Path(tmp) / name
+    path.write_text("\n".join(hosts) + "\n", encoding="utf-8")
+    return path
+
+
+def test_org_forge_host_is_not_refused_without_dest_hosts():
+    """With no --dest-hosts file the gate refuses only the universal set, so an
+    organisation's own forge host is not a shipped refusal — the gate knows no
+    organisation. (An org declaring none gets no check for it.)"""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_intmp(tmp, REMOTE_ON_ORG_FORGE, "org-forge.yml")
+        r = _scan_file(path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "PASS" in r.stdout
+
+
+def test_org_forge_host_is_refused_when_supplied_via_dest_hosts():
+    """The same org forge destination is refused when the host arrives from the
+    config layer via --dest-hosts, naming file, line and the destination literal."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_intmp(tmp, REMOTE_ON_ORG_FORGE, "org-forge.yml")
+        hosts = _dest_hosts_file(tmp, ["git.langevc.com"])
+        r = _scan_file_with_dest_hosts(path, hosts)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "DestinationBoundaryError" in r.stderr
+    assert "git.langevc.com/LangeVC/ops-engine.git" in r.stderr
+
+
+def test_universal_set_is_refused_without_dest_hosts():
+    """The universal five (github.com etc.) stay a shipped refusal with no
+    --dest-hosts file: the mirror hardcode is refused exactly as before."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_intmp(tmp, RED_PROOF_HARDCODE, "mirror.yml")
+        r = _scan_file(path)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "github.com/LangeVC/ops-engine.git" in r.stderr
 
 
 # --- Criterion 4 (F4): comment text is documentation, not a destination. ------
@@ -656,6 +726,9 @@ def test_gate_is_wired_to_fail_the_build_in_ci():
     before the release step can publish anywhere."""
     text = _release_gate_text()
     assert "ci_variable_boundary_gate.py --dir .forgejo" in text
+    # The org forge host arrives from the config layer, not shipped in the gate.
+    assert "--dest-hosts" in text
+    assert "git.langevc.com" in text
 
 
 def test_deliberately_reintroduced_destination_fails_the_wired_build():
@@ -714,6 +787,8 @@ def test_contract_documents_the_permitted_set():
     assert "tool-fetch suppliers" in contract
     assert "comment text is documentation" in contract
     assert "ci_variable_boundary_gate.py" in contract
+    assert "--dest-hosts" in contract
+    assert "universal" in contract
 
 
 def _main() -> None:
