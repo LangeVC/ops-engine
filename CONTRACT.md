@@ -535,7 +535,8 @@ Layer-1 boundary supplies its org vocabulary via `--org-vocab` and the
 destination gate supplies its org hosts via `--dest-hosts`.
 
 Two shapes, deliberately not collapsed (the same distinction ADP-008 drew for a
-missing release destination and ADP-010 for an absent vocabulary):
+missing release destination and ADP-010 for an absent vocabulary) — plus a
+third for a present-but-malformed register:
 
 - **No register supplied** is *nothing to check*, not an error: the check
   reports by name that it has nothing to check and exits zero.

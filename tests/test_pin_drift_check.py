@@ -101,6 +101,9 @@ def test_parse_register_rejects_an_entry_without_name_or_pin():
         # empty layovers list
         ('{"schema": 1, "package": "ops_engine", "layovers": []}',
          "no layovers declared"),
+        # layover entry missing name or pin
+        ('{"schema": 1, "package": "ops_engine", "layovers": [{"name": "a-ops"}]}',
+         "missing name or pin"),
         # JSON that does not parse
         ("{not json", "invalid JSON"),
     ],
