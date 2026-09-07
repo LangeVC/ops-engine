@@ -1,139 +1,17 @@
-# Layover Consumption Declaration
+# Layover Consumption Declaration — moved
 
-Each org layover consumes `ops-engine`. A version pin (`@v3.4.0`) is not
-checkable on its own: it does not say *what* the layover uses. This document
-declares, per layover, the **contract names** it consumes — resolution of the
-names listed in `CONTRACT.md` — placed next to the pin that the layover holds
-in its own `pyproject.toml`.
+The layover register that once lived here — a JSON block naming one
+organisation's layovers, their `ops-engine` pins, and the contract names each
+consumes — has moved out of this template. It was an organisation's data
+wearing a document's clothes, asserted by the engine's own tests and therefore
+load-bearing inside an Apache-2.0 template an adopter has no use for.
 
-A layover consumes a name when its source imports or refers to that name.
-Names imported from a submodule path (`ops_engine.adapters.*`,
-`ops_engine.core.*`, `ops_engine.modules.*`, `ops_engine.utils.*`) are
-internal and are **not** consumed contract names; only the bare contract
-names from `ops_engine.__all__` are declared here.
+The register now lives in the calling organisation's own repository, and
+`scripts/pin-drift-check.py` reads it from a path supplied on the command line
+(`--layovers PATH`). With no register supplied, the check reports it has nothing
+to check and exits zero; a register whose declared pins disagree with the
+engine version fails and names both. See `CONTRACT.md`, "Layover pin drift
+(ADP-015)".
 
-## Machine-readable declaration
-
-The single source of truth for this consumption is the JSON block below. Each
-layover entry carries its own `pin` (the version it resolves in
-`pyproject.toml`) and the `consumes` list of contract names it relies on.
-
-```json
-{
-  "schema": 1,
-  "package": "ops_engine",
-  "layovers": [
-    {
-      "name": "lvc-ops",
-      "pin": "3.4.0",
-      "extra": null,
-      "consumes": [
-        "OpsEngineConfig",
-        "QueueManager",
-        "EventDeduplicator",
-        "StaleManager",
-        "CronDispatcher",
-        "TriageHandler",
-        "DependencyTriggerHandler",
-        "ReleaseHandler",
-        "MergeHandler",
-        "MirrorHandler",
-        "NotificationHandler"
-      ]
-    },
-    {
-      "name": "capacium-ops",
-      "pin": "3.4.0",
-      "extra": "postgres",
-      "consumes": [
-        "OpsEngineConfig",
-        "QueueManager",
-        "EventDeduplicator",
-        "StaleManager",
-        "CronDispatcher",
-        "TriageHandler",
-        "DependencyTriggerHandler",
-        "ReleaseHandler",
-        "MergeHandler",
-        "NotificationHandler",
-        "MigrationRunner",
-        "MigrationTargetConfig",
-        "ApplyResult",
-        "runner_from_config"
-      ]
-    },
-    {
-      "name": "elementeer-ops",
-      "pin": "3.4.0",
-      "extra": null,
-      "consumes": [
-        "OpsEngineConfig",
-        "QueueManager",
-        "EventDeduplicator",
-        "StaleManager",
-        "CronDispatcher",
-        "TriageHandler",
-        "DependencyTriggerHandler",
-        "ReleaseHandler",
-        "MergeHandler",
-        "MirrorHandler",
-        "NotificationHandler"
-      ]
-    },
-    {
-      "name": "fusionaize-ops",
-      "pin": "3.4.0",
-      "extra": null,
-      "consumes": [
-        "OpsEngineConfig",
-        "QueueManager",
-        "EventDeduplicator",
-        "StaleManager",
-        "CronDispatcher",
-        "TriageHandler",
-        "DependencyTriggerHandler",
-        "ReleaseHandler",
-        "MergeHandler",
-        "MirrorHandler",
-        "NotificationHandler"
-      ]
-    },
-    {
-      "name": "skillweave-ops",
-      "pin": "3.4.0",
-      "extra": null,
-      "consumes": [
-        "OpsEngineConfig",
-        "QueueManager",
-        "EventDeduplicator",
-        "StaleManager",
-        "CronDispatcher",
-        "TriageHandler",
-        "DependencyTriggerHandler",
-        "ReleaseHandler",
-        "MergeHandler",
-        "MirrorHandler",
-        "NotificationHandler"
-      ]
-    }
-  ]
-}
-```
-
-## Reading
-
-- `capacium-ops` is the only layover consuming the migration runner
-  (`MigrationRunner`, `MigrationTargetConfig`, `ApplyResult`,
-  `runner_from_config`); its `[postgres]` extra in `pyproject.toml` is the
-  migration-runner target and is intended, not drift.
-- `capacium-ops` does **not** consume `MirrorHandler`; the other four layovers
-  do.
-- Pins measured from each layover's `pyproject.toml` dependency line on
-  2026-08-23.
-- Re-measured on 2026-09-04: all five layovers now resolve `ops-engine` at
-  `@v3.0.0`; the declaration previously carried the stale `2.2.0` (CFG-005). The
-  pins in this document are the values read from each layover's own
-  `pyproject.toml`, cross-checked by `tests/test_pin_drift_check.py`.
-- Re-measured on 2026-09-07: all five layovers were moved to `@v3.4.0` and this
-  declaration with them. `capacium-ops` carries the pin as
-  `ops-engine[postgres]`, which the four others do not.
+This file is retained only as a pointer, so a reader who follows an old
+reference lands on the explanation rather than on a missing page.

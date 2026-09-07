@@ -1,45 +1,43 @@
 #!/usr/bin/env python3
-"""pin-drift-check — report per-layover pin drift against the current contract.
+"""pin-drift-check — report per-layover pin drift against the engine's release.
 
-A layover's pin (``@v2.0.0``) says which ops-engine release it runs. The
-consumption declaration (``docs/layover-consumption.md``) says which contract
-names it consumes. A consumed name that was introduced *after* the layover's
-pin is drift: the layover relies on a name its pinned release does not provide.
+A layover's pin (``@v3.4.0``) says which ops-engine release it runs. The
+layover register lists each layover's name and the version it pins. The drift
+check reads that register from a path supplied on the command line and compares
+each declared pin against the engine's own current version (``pyproject.toml``).
+A layover whose declared pin disagrees with the engine's version is drift: the
+register lags the release it should describe.
 
-This check reads the consumption declaration and the public-surface contract
-(``CONTRACT.md``), reconstructs when each contract name was introduced from the
-git release tags, and reports, per layover, its pin, the latest version, and the
-consumed names that changed after that pin.
+The register is the calling organisation's data, not the template's: it lives
+in that organisation's own repository and arrives here as a ``--layovers`` path.
+No register is shipped in this template, and no organisation or layover name is
+hard-coded in this script.
+
+Two shapes, deliberately not collapsed (ADP-008's missing-destination and
+ADP-010's absent-vocabulary):
+
+- **No register supplied** is *nothing to check*, not an error: the check
+  reports by name that it has nothing to check and exits zero.
+- **A register that contradicts a pin** *is* an error: the check fails, names
+  the layover's declared pin and the engine's version, and exits non-zero.
 
 Stdlib only, no external deps, so it runs unattended on a clean runner.
 
 Usage:
-    pin-drift-check.py [--repo PATH]
+    pin-drift-check.py [--layovers PATH] [--repo PATH]
 """
 
 from __future__ import annotations
 
 import argparse
-import ast
 import json
 import re
-import subprocess
 import sys
 from pathlib import Path
-from typing import NoReturn
 
-LAYOVER_DOC = "docs/layover-consumption.md"
-CONTRACT_DOC = "CONTRACT.md"
 PYPROJECT = "pyproject.toml"
-INIT_PATH = "src/ops_engine/__init__.py"
 
 VERSION_RE = re.compile(r'^version\s*=\s*"(\d+\.\d+\.\d+)"')
-SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
-
-
-def _die(msg: str) -> "NoReturn":
-    print(f"pin-drift-check: ERROR: {msg}", file=sys.stderr)
-    sys.exit(2)
 
 
 def parse_semver(version: str) -> tuple[int, ...]:
@@ -48,47 +46,6 @@ def parse_semver(version: str) -> tuple[int, ...]:
     if not v or not all(part.isdigit() for part in v.split(".")):
         raise ValueError(f"not a semver: {version!r}")
     return tuple(int(part) for part in v.split("."))
-
-
-def version_gt(a: str, b: str) -> bool:
-    return parse_semver(a) > parse_semver(b)
-
-
-def extract_json_fence(text: str) -> dict:
-    m = re.search(r"```json\n(.*?)\n```", text, re.DOTALL)
-    if not m:
-        raise ValueError("no ```json``` declaration block found")
-    return json.loads(m.group(1))
-
-
-def parse_layovers(text: str) -> list[dict]:
-    """Parse the layover consumption declaration into a list of layovers."""
-    decl = extract_json_fence(text)
-    if decl.get("schema") != 1:
-        raise ValueError(f"unsupported schema {decl.get('schema')!r}")
-    if decl.get("package") != "ops_engine":
-        raise ValueError(f"unexpected package {decl.get('package')!r}")
-    layovers = decl.get("layovers")
-    if not layovers:
-        raise ValueError("no layovers declared")
-    return layovers
-
-
-def parse_contract_names(text: str) -> list[str]:
-    """Return the contract export names declared in CONTRACT.md."""
-    decl = extract_json_fence(text)
-    return [entry["name"] for entry in decl["exports"]]
-
-
-def parse_all_from_source(text: str) -> set[str]:
-    """Extract the ``__all__`` names from ``src/ops_engine/__init__.py`` source."""
-    tree = ast.parse(text)
-    for node in tree.body:
-        if isinstance(node, ast.Assign) and any(
-            isinstance(t, ast.Name) and t.id == "__all__" for t in node.targets
-        ):
-            return set(ast.literal_eval(node.value))
-    raise ValueError("no __all__ assignment found")
 
 
 def read_latest_version(repo: Path) -> str:
@@ -100,172 +57,83 @@ def read_latest_version(repo: Path) -> str:
     raise ValueError(f"no version found in {PYPROJECT}")
 
 
-def git_tags(repo: Path) -> list[str]:
-    """Return semver release tags, oldest first."""
-    r = subprocess.run(
-        ["git", "tag", "--list"], cwd=repo, capture_output=True, text=True
+def parse_register(text: str) -> list[dict]:
+    """Parse a layover register into a list of ``{name, pin}`` entries."""
+    decl = json.loads(text)
+    if decl.get("schema") != 1:
+        raise ValueError(f"unsupported schema {decl.get('schema')!r}")
+    if decl.get("package") != "ops_engine":
+        raise ValueError(f"unexpected package {decl.get('package')!r}")
+    layovers = decl.get("layovers")
+    if not layovers:
+        raise ValueError("no layovers declared in the register")
+    for entry in layovers:
+        if not entry.get("name") or not entry.get("pin"):
+            raise ValueError(f"layover entry missing name or pin: {entry!r}")
+    return layovers
+
+
+def drift_for(layovers: list[dict], latest: str) -> list[tuple[str, str]]:
+    """Return ``(name, declared_pin)`` for every layover whose declared pin is
+    not the engine's current version."""
+    latest_parts = parse_semver(latest)
+    drifted = []
+    for entry in layovers:
+        declared_parts = parse_semver(entry["pin"])
+        if declared_parts != latest_parts:
+            drifted.append((entry["name"], entry["pin"]))
+    return drifted
+
+
+def report_nothing_to_check() -> None:
+    print(
+        "pin-drift-check: no layover register supplied; nothing to check. "
+        "Pass --layovers PATH to check a register against the engine version."
     )
-    if r.returncode != 0:
-        raise RuntimeError(f"git tag failed: {r.stderr.strip()}")
-    tags = []
-    for raw in r.stdout.splitlines():
-        tag = raw.strip()
-        v = tag.lstrip("v")
-        if v and SEMVER_RE.match(v):
-            tags.append(tag)
-    return sorted(tags, key=parse_semver)
 
 
-def git_init_at(repo: Path, tag: str) -> str:
-    r = subprocess.run(
-        ["git", "show", f"{tag}:{INIT_PATH}"],
-        cwd=repo,
-        capture_output=True,
-        text=True,
-    )
-    if r.returncode != 0:
-        raise RuntimeError(f"git show {tag}:{INIT_PATH} failed: {r.stderr.strip()}")
-    return r.stdout
-
-
-def build_timeline_from_tagged_names(
-    tagged_names: dict[str, set[str]], current_names: set[str], latest: str
-) -> dict[str, str]:
-    """Map each contract name to the version that first introduced it.
-
-    ``tagged_names`` maps an ascending-ordered release tag to the ``__all__``
-    names present at that tag. A name still unknown after the last tag is
-    treated as introduced by the current (latest) version.
-    """
-    timeline: dict[str, str] = {}
-    for tag, names in tagged_names.items():
-        for name in names:
-            if name not in timeline:
-                timeline[name] = tag.lstrip("v")
-    for name in current_names:
-        if name not in timeline:
-            timeline[name] = latest
-    return timeline
-
-
-def build_timeline(repo: Path, current_names: set[str], latest: str) -> dict[str, str]:
-    tags = git_tags(repo)
-    if not tags:
-        raise RuntimeError(
-            "no semver release tags found; cannot reconstruct the contract timeline"
-        )
-    tagged_names = {tag: parse_all_from_source(git_init_at(repo, tag)) for tag in tags}
-    return build_timeline_from_tagged_names(tagged_names, current_names, latest)
-
-
-def changed_consumed_names(
-    layover: dict, timeline: dict[str, str], latest: str
-) -> list[str]:
-    """Return the consumed names introduced after the layover's pin, sorted."""
-    pin = layover["pin"]
-    changed = []
-    for name in layover.get("consumes", []):
-        introduced = timeline.get(name, latest)
-        if version_gt(introduced, pin):
-            changed.append(name)
-    return sorted(changed)
-
-
-def removed_declared_names(
-    previous_names: set[str], current_names: set[str]
-) -> list[str]:
-    """Return declared names present before a bump but absent after, sorted.
-
-    A declared name that vanishes in a bump (renamed or removed) is drift for
-    every layover that still consumes it.
-    """
-    return sorted(previous_names - current_names)
-
-
-def layovers_consuming_removed(
-    layovers: list[dict], removed: set[str]
-) -> list[tuple[str, list[str]]]:
-    """Return ``(layover_name, consumed_removed_names)`` for every layover that
-    consumes at least one removed declared name, sorted by layover name."""
-    consumers = []
-    for layover in layovers:
-        consumed = sorted(set(layover.get("consumes", [])) & removed)
-        if consumed:
-            consumers.append((layover["name"], consumed))
-    return sorted(consumers, key=lambda pair: pair[0])
-
-
-def removed_consumption_lines(
-    layovers: list[dict], previous_names: set[str], current_names: set[str]
-) -> list[str]:
-    """Report lines for layovers consuming a removed declared name.
-
-    Empty when no declared name changed, so the check stays quiet.
-    """
-    removed = set(removed_declared_names(previous_names, current_names))
-    consumers = layovers_consuming_removed(layovers, removed)
-    if not consumers:
-        return []
-    name_w = max(len(name) for name, _ in consumers)
-    lines = [
-        "",
-        "pin-drift-check: removed declared names (layovers consuming a removed contract name)",
-    ]
-    for name, consumed in consumers:
-        lines.append(f"{name:<{name_w}}  {','.join(consumed)}")
-    return lines
-
-
-def report_removed(
-    layovers: list[dict], previous_names: set[str], current_names: set[str]
-) -> None:
-    for line in removed_consumption_lines(layovers, previous_names, current_names):
-        print(line)
-
-
-def previous_declared_names(repo: Path) -> set[str]:
-    """Declared names at the most recent release tag, or empty when untagged."""
-    tags = git_tags(repo)
-    if not tags:
-        return set()
-    return parse_all_from_source(git_init_at(repo, tags[-1]))
-
-
-def report(layovers: list[dict], timeline: dict[str, str], latest: str) -> None:
+def report_green(layovers: list[dict], latest: str) -> None:
     name_w = max(len(l["name"]) for l in layovers)
-    print("pin-drift-check: per-layover pin vs latest contract drift")
+    print("pin-drift-check: per-layover pin vs engine version")
     print()
-    print(f"{'layover':<{name_w}}  {'pin':<8} {'latest':<8} changed-consumed-names")
-    print(f"{'-' * name_w}  {'---':<8} {'------':<8} ---------------------")
+    print(f"{'layover':<{name_w}}  {'pin':<8} {'engine':<8}")
+    print(f"{'-' * name_w}  {'---':<8} {'------':<8}")
     for l in sorted(layovers, key=lambda x: x["name"]):
-        changed = changed_consumed_names(l, timeline, latest)
-        names = ",".join(changed) if changed else "-"
-        print(f"{l['name']:<{name_w}}  {l['pin']:<8} {latest:<8} {names}")
+        print(f"{l['name']:<{name_w}}  {l['pin']:<8} {latest:<8}")
+
+
+def report_drift(drift: list[tuple[str, str]], latest: str) -> None:
+    print(
+        "pin-drift-check: layover pins disagree with the engine version",
+        file=sys.stderr,
+    )
+    for name, pin in drift:
+        print(
+            f"{name}: declares {pin}, but the engine is {latest}",
+            file=sys.stderr,
+        )
 
 
 def main() -> int:
     p = argparse.ArgumentParser(prog="pin-drift-check")
+    p.add_argument("--layovers", type=Path, default=None)
     p.add_argument("--repo", type=Path, default=Path("."))
     args = p.parse_args()
     repo = args.repo
 
-    layover_doc = repo / LAYOVER_DOC
-    if not layover_doc.exists():
-        _die(f"missing {layover_doc}")
-    layovers = parse_layovers(layover_doc.read_text(encoding="utf-8"))
-
-    contract_doc = repo / CONTRACT_DOC
-    if not contract_doc.exists():
-        _die(f"missing {contract_doc}")
-    current_names = set(
-        parse_contract_names(contract_doc.read_text(encoding="utf-8"))
-    )
+    if args.layovers is None:
+        report_nothing_to_check()
+        return 0
 
     latest = read_latest_version(repo)
-    timeline = build_timeline(repo, current_names, latest)
+    layovers = parse_register(args.layovers.read_text(encoding="utf-8"))
+    drift = drift_for(layovers, latest)
 
-    report(layovers, timeline, latest)
-    report_removed(layovers, previous_declared_names(repo), current_names)
+    if drift:
+        report_drift(drift, latest)
+        return 1
+
+    report_green(layovers, latest)
     return 0
 
 

@@ -1,14 +1,24 @@
-"""pin-drift-check: per-layover pin, latest, and changed consumed names.
+"""pin-drift-check: reads a layover register from a path, compares pins vs the
+engine version.
 
-The check runs unattended and reports, for every layover, its pin, the latest
-ops-engine version, and the consumed names that changed (were introduced) after
-that pin.
+The register is the calling organisation's data and arrives as a ``--layovers``
+path. Two shapes are tested, mirroring ADP-008's missing-destination shape:
+
+- **no register supplied** — the check reports it has nothing to check and
+  exits zero (nothing to check is not an error);
+- **a register that contradicts the engine version** — the check fails, names
+  the declared pin and the engine version, and exits non-zero.
+
+No test reads a path outside this repository: the register fixtures are written
+into a throwaway temporary directory by each test, and the engine version is
+read from this repository's own ``pyproject.toml``. The historical sibling-read
+behaviour (reading each layover's ``pyproject.toml`` by relative path under the
+operator's checkout) is gone.
 """
 
-import importlib.util
+import json
 import subprocess
 import sys
-import re
 from pathlib import Path
 
 import pytest
@@ -16,62 +26,34 @@ import pytest
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "scripts" / "pin-drift-check.py"
 
-EXPECTED_LAYOVERS = [
-    "capacium-ops",
-    "elementeer-ops",
-    "fusionaize-ops",
-    "lvc-ops",
-    "skillweave-ops",
-]
+import importlib.util
 
-# Each layout's ops-engine pin is read from its own pyproject.toml. Paths are
-# resolved the same way the sequence reads them: sibling repositories of the
-# ops-engine worktree root.
-PIN_READS = {
-    "lvc-ops": Path("../lvc-ops/pyproject.toml"),
-    "capacium-ops": Path("../../capacium/capacium-ops/pyproject.toml"),
-    "elementeer-ops": Path("../../elementeer/elementeer-ops/pyproject.toml"),
-    "fusionaize-ops": Path("../../fusionaize/fusionaize-ops/pyproject.toml"),
-    "skillweave-ops": Path("../../skillweave/skillweave-ops/pyproject.toml"),
-}
+spec = importlib.util.spec_from_file_location("pin_drift_check", SCRIPT)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
 
-OPS_ENGINE_RE = re.compile(
-    r'"ops-engine(?:\[[^\]]*\])?\s*@\s*git\+[^\s@]+@v?(\d+\.\d+\.\d+)"'
-)
+ENGINE_VERSION = mod.read_latest_version(REPO)
 
 
-def _load_module():
-    spec = importlib.util.spec_from_file_location("pin_drift_check", SCRIPT)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+def _write_register(tmp_path: Path, pins: dict[str, str]) -> Path:
+    """Write a register JSON declaring the given ``name -> pin`` map."""
+    register = {
+        "schema": 1,
+        "package": "ops_engine",
+        "layovers": [{"name": name, "pin": pin} for name, pin in pins.items()],
+    }
+    path = tmp_path / "register.json"
+    path.write_text(json.dumps(register), encoding="utf-8")
+    return path
 
 
-mod = _load_module()
-
-
-def real_pin_from_pyproject(path: Path) -> str:
-    """Return the ops-engine version a layover pins in its pyproject.toml.
-
-    The dependency line is ``ops-engine[extra] @ git+...@v3.0.0``; the version
-    carries a leading ``v`` that is dropped for comparison.
-    """
-    text = path.read_text(encoding="utf-8")
-    m = OPS_ENGINE_RE.search(text)
-    if not m:
-        raise ValueError(f"no ops-engine pin in {path}")
-    return m.group(1)
-
-
-def declared_pin_map(doc_text: str) -> dict[str, str]:
-    decl = mod.extract_json_fence(doc_text)
-    return {l["name"]: l["pin"].lstrip("v") for l in decl["layovers"]}
-
-
-def reachable_pyproject(repo_root: Path, rel: str) -> Path | None:
-    """Resolve a sibling read path; return Path when present else None."""
-    cand = (repo_root / rel).resolve()
-    return cand if cand.is_file() else None
+def run_check(args: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(SCRIPT), *args],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
 
 def test_parse_semver_strips_v_prefix():
@@ -79,263 +61,61 @@ def test_parse_semver_strips_v_prefix():
     assert mod.parse_semver("2.0.0") == (2, 0, 0)
 
 
-def test_version_gt():
-    assert mod.version_gt("2.1.0", "2.0.0")
-    assert not mod.version_gt("2.0.0", "2.0.0")
-    assert not mod.version_gt("2.0.0", "2.1.0")
-
-
-def test_parse_layovers_reads_declaration():
-    text = (REPO / "docs" / "layover-consumption.md").read_text(encoding="utf-8")
-    layovers = mod.parse_layovers(text)
-    names = [l["name"] for l in layovers]
-    assert sorted(names) == sorted(EXPECTED_LAYOVERS)
-    for l in layovers:
-        assert l["pin"]
-        assert l["consumes"]
-
-
-def test_parse_contract_reads_names():
-    text = (REPO / "CONTRACT.md").read_text(encoding="utf-8")
-    contract_names = mod.parse_contract_names(text)
-    source_names = mod.parse_all_from_source(
-        (REPO / "src" / "ops_engine" / "__init__.py").read_text(encoding="utf-8")
-    )
-    # The contract's size is not a property to pin — a contract legitimately
-    # grows. Pinning the count teaches the next author to bump a literal each
-    # time. The real invariant is that the decoded exports and the code's
-    # __all__ agree, so the parsed list is derived from the contract body and
-    # cross-checked against the source that must mirror it, never from a count.
-    assert set(contract_names) == source_names
-    assert "MigrationRunner" in contract_names
-    assert "QueueManager" in contract_names
-    # Non-trivial so an empty/truncated decode cannot silently pass.
-    assert len(contract_names) > 5
-    assert len(contract_names) == len(set(contract_names))
-
-
-def test_build_timeline_from_tagged_names():
-    tagged = {
-        "v0.1.0": {"QueueManager", "OpsEngineConfig"},
-        "v2.0.0": {"QueueManager", "OpsEngineConfig", "ReleaseHandler"},
-        "v2.1.0": {
-            "QueueManager",
-            "OpsEngineConfig",
-            "ReleaseHandler",
-            "MigrationRunner",
-        },
-    }
-    current = {
-        "QueueManager",
-        "OpsEngineConfig",
-        "ReleaseHandler",
-        "MigrationRunner",
-        "BrandNew",
-    }
-    timeline = mod.build_timeline_from_tagged_names(tagged, current, "2.2.0")
-    assert timeline == {
-        "QueueManager": "0.1.0",
-        "OpsEngineConfig": "0.1.0",
-        "ReleaseHandler": "2.0.0",
-        "MigrationRunner": "2.1.0",
-        "BrandNew": "2.2.0",
-    }
-
-
-def test_changed_consumed_names_flags_names_introduced_after_pin():
-    timeline = {
-        "QueueManager": "0.1.0",
-        "ReleaseHandler": "2.0.0",
-        "MigrationRunner": "2.1.0",
-    }
-    layover = {
-        "name": "x-ops",
-        "pin": "2.0.0",
-        "consumes": ["QueueManager", "ReleaseHandler", "MigrationRunner"],
-    }
-    assert mod.changed_consumed_names(layover, timeline, "2.2.0") == ["MigrationRunner"]
-
-
-def test_changed_consumed_names_empty_when_pin_is_current():
-    timeline = {"MigrationRunner": "2.1.0", "QueueManager": "0.1.0"}
-    layover = {
-        "name": "x-ops",
-        "pin": "2.1.2",
-        "consumes": ["QueueManager", "MigrationRunner"],
-    }
-    assert mod.changed_consumed_names(layover, timeline, "2.2.0") == []
-
-
-def test_removed_declared_report_diffs_all_names_between_tags():
-    previous = {
-        "QueueManager",
-        "OpsEngineConfig",
-        "ReleaseHandler",
-        "MergeHandler",
-        "NotificationHandler",
-    }
-    current_now = {
-        "QueueManager",
-        "OpsEngineConfig",
-        "ReleaseHandler",
-        "MirrorHandler",
-        "NotificationHandler",
-    }
-    removed = mod.removed_declared_names(previous, current_now)
-    assert removed == ["MergeHandler"]
-
-
-def test_layovers_consuming_removed_maps_each_consumer_to_its_removed_names():
-    layovers = [
+def test_parse_register_reads_layover_names_and_pins():
+    text = json.dumps(
         {
-            "name": "lvc-ops",
-            "pin": "2.0.0",
-            "consumes": [
-                "MergeHandler",
-                "MirrorHandler",
-                "NotificationHandler",
+            "schema": 1,
+            "package": "ops_engine",
+            "layovers": [
+                {"name": "a-ops", "pin": "2.0.0"},
+                {"name": "b-ops", "pin": "v3.1.0"},
             ],
-        },
-        {
-            "name": "capacium-ops",
-            "pin": "2.1.2",
-            "consumes": ["MigrationRunner", "ApplyResult"],
-        },
-        {
-            "name": "elementeer-ops",
-            "pin": "2.0.0",
-            "consumes": ["MergeHandler", "NotificationHandler"],
-        },
-    ]
-    removed = {"MergeHandler"}
-    consumers = mod.layovers_consuming_removed(layovers, removed)
-    assert consumers == [
-        ("elementeer-ops", ["MergeHandler"]),
-        ("lvc-ops", ["MergeHandler"]),
-    ]
-
-
-def test_removed_consumption_lines_reports_only_when_something_removed():
-    previous = {
-        "QueueManager",
-        "OpsEngineConfig",
-        "ReleaseHandler",
-        "MergeHandler",
-    }
-    current_now = {"QueueManager", "OpsEngineConfig", "ReleaseHandler"}
-    layovers = [
-        {
-            "name": "lvc-ops",
-            "pin": "2.0.0",
-            "consumes": ["QueueManager", "MergeHandler"],
-        },
-        {"name": "capacium-ops", "pin": "2.1.2", "consumes": ["ReleaseHandler"]},
-    ]
-    removed = {"MergeHandler"}
-    lines = mod.removed_consumption_lines(layovers, previous, current_now)
-    assert lines
-    assert not set(previous) - set(current_now) - removed  # MergeHandler is the only removed
-    # lvc-ops consumes the removed name, so its line flags it
-    lvc = next(ln for ln in lines if ln.startswith("lvc-ops"))
-    assert "MergeHandler" in lvc
-
-
-def test_removed_consumption_lines_stay_quiet_when_internal_only_changed():
-    previous = {
-        "QueueManager",
-        "OpsEngineConfig",
-        "ReleaseHandler",
-        "MergeHandler",
-    }
-    current_now = previous  # no declared name changed
-    layovers = [
-        {
-            "name": "lvc-ops",
-            "pin": "2.0.0",
-            "consumes": ["QueueManager", "MergeHandler"],
         }
-    ]
-    assert mod.removed_consumption_lines(layovers, previous, current_now) == []
-
-
-def test_removed_consumption_lines_quiet_when_last_tag_is_current():
-    # previous == current: nothing removed, so no lines even if consumers exist
-    previous = {
-        "QueueManager",
-        "OpsEngineConfig",
-        "ReleaseHandler",
-        "MergeHandler",
-    }
-    current_now = {
-        "QueueManager",
-        "OpsEngineConfig",
-        "ReleaseHandler",
-        "MergeHandler",
-    }
-    layovers = [
-        {
-            "name": "lvc-ops",
-            "pin": "2.0.0",
-            "consumes": ["QueueManager", "MergeHandler"],
-        }
-    ]
-    assert mod.removed_consumption_lines(layovers, previous, current_now) == []
-
-
-def test_check_runs_unattended_and_reports_pin_latest_changed():
-    r = subprocess.run(
-        [sys.executable, str(SCRIPT), "--repo", str(REPO)],
-        capture_output=True,
-        text=True,
     )
+    layovers = mod.parse_register(text)
+    assert [l["name"] for l in layovers] == ["a-ops", "b-ops"]
+    assert [l["pin"] for l in layovers] == ["2.0.0", "v3.1.0"]
+
+
+def test_parse_register_rejects_an_entry_without_name_or_pin():
+    text = json.dumps(
+        {"schema": 1, "package": "ops_engine", "layovers": [{"name": "a-ops"}]}
+    )
+    with pytest.raises(ValueError):
+        mod.parse_register(text)
+
+
+def test_drift_for_flags_only_mismatched_pins():
+    layovers = [
+        {"name": "a-ops", "pin": ENGINE_VERSION},
+        {"name": "b-ops", "pin": "3.0.0"},
+    ]
+    assert mod.drift_for(layovers, ENGINE_VERSION) == [("b-ops", "3.0.0")]
+
+
+def test_drift_for_accepts_a_v_prefixed_declared_pin():
+    layovers = [{"name": "a-ops", "pin": f"v{ENGINE_VERSION}"}]
+    assert mod.drift_for(layovers, ENGINE_VERSION) == []
+
+
+def test_no_register_supplied_reports_nothing_to_check_and_exits_zero():
+    r = run_check(["--repo", str(REPO)])
     assert r.returncode == 0, r.stderr
-    out = r.stdout
-    latest = mod.read_latest_version(REPO)
-
-    assert f"latest" in out
-    assert latest in out
-    for name in EXPECTED_LAYOVERS:
-        assert name in out
-    # Every layover in the current tree has a pin consistent with its
-    # consumption, so the changed column reports no drift.
-    for name in EXPECTED_LAYOVERS:
-        line = next(ln for ln in out.splitlines() if ln.startswith(name))
-        assert line.split()[-1] == "-"
+    assert "nothing to check" in r.stdout
 
 
-def test_declared_pins_match_the_real_pyproject_pins():
-    """The document's declared pin equals the value in the layover's own pyproject.
+def test_register_matching_the_engine_version_exits_zero(tmp_path):
+    register = _write_register(tmp_path, {"a-ops": ENGINE_VERSION})
+    r = run_check(["--layovers", str(register), "--repo", str(REPO)])
+    assert r.returncode == 0, r.stderr
+    assert ENGINE_VERSION in r.stdout
 
-    This is the WRITE-side guard for CFG-005: a mirror that goes stale (doc says
-    2.2.0 while every layover resolves v3.0.0) must fail here. The read is each
-    layover's own pyproject.toml, quoted below on failure.
 
-    The read is only possible where the sibling organisation checkouts are
-    present (the developer worktree). Reachability is decided per name: a
-    sibling that is not checked out on this runner is degraded individually,
-    while every reachable sibling is still asserted for drift. Only when none
-    of the five layovers is reachable (a clean clone) does the whole test skip
-    with a named reason — a fresh clone cannot be expected to carry the layover
-    organisations next door.
-    """
-    doc_text = (REPO / "docs" / "layover-consumption.md").read_text(encoding="utf-8")
-    declared = declared_pin_map(doc_text)
-    reachable = {
-        name: cand
-        for name in EXPECTED_LAYOVERS
-        if (cand := reachable_pyproject(REPO, PIN_READS[name].as_posix())) is not None
-    }
-    if not reachable:
-        pytest.skip(
-            "sibling organisation checkouts not reachable from this clone: "
-            + ", ".join(sorted(EXPECTED_LAYOVERS))
-        )
-    failures = []
-    for name in EXPECTED_LAYOVERS:
-        cand = reachable.get(name)
-        if cand is None:
-            continue
-        real = real_pin_from_pyproject(cand)
-        if declared[name] != real:
-            failures.append(f"{name}: doc declares {declared[name]} but {cand} pins v{real}")
-    assert not failures, "\n".join(failures)
+def test_register_contradicting_the_engine_version_fails_and_names_both(tmp_path):
+    # The 2026-09-07 shape: a register still declaring 3.0.0 while the engine
+    # pins v3.4.0. The check must fail and name both versions.
+    register = _write_register(tmp_path, {"a-ops": "3.0.0"})
+    r = run_check(["--layovers", str(register), "--repo", str(REPO)])
+    assert r.returncode != 0, r.stdout
+    assert "3.0.0" in r.stderr
+    assert ENGINE_VERSION in r.stderr

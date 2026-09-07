@@ -515,6 +515,43 @@ engine. The organisation forge host is derived from `github.server_url` in the
 workflow (the same bare host the destination gate derives), so the Layer-1 gate
 and the destination gate share one vocabulary file shape and one derivation.
 
+## Layover pin drift (ADP-015)
+
+`scripts/pin-drift-check.py` is a stdlib-only check that reports, for each
+layover an organisation declares, whether the pin that layover holds agrees
+with the engine's own current release version. It reads a **layover register**
+from a path supplied on the command line (`--layovers PATH`), never from a file
+shipped in this template.
+
+The register is the calling organisation's data. It lives in that
+organisation's own repository and names that organisation's layovers:
+`docs/layover-consumption.md` and `docs/org-identifier-sweep.md` — which once
+carried the LangeVC register and identifier sweep as machine-readable JSON
+inside this template — are gone. They were configuration wearing a document's
+clothes: one organisation's repositories declared inside an Apache-2.0 template
+an adopter has no use for, load-bearing because the engine's own script and
+tests read them. The register now arrives as a `--layovers` path, exactly as the
+Layer-1 boundary supplies its org vocabulary via `--org-vocab` and the
+destination gate supplies its org hosts via `--dest-hosts`.
+
+Two shapes, deliberately not collapsed (the same distinction ADP-008 drew for a
+missing release destination and ADP-010 for an absent vocabulary):
+
+- **No register supplied** is *nothing to check*, not an error: the check
+  reports by name that it has nothing to check and exits zero.
+- **A register that contradicts the engine version** *is* an error: the check
+  exits non-zero and names both the layover's declared pin and the engine
+  version.
+
+The check compares each layover's declared pin to the engine's `pyproject.toml`
+version (semver, a leading `v` tolerated on either side). This is the check that,
+on 2026-09-07, caught four layover pins moved to `v3.4.0` while the register
+still declared `3.0.0` — a live inconsistency introduced and not noticed until
+the check ran. The mechanism stays; its input moved to the organisation's
+repository and its reach (which once read each layover's `pyproject.toml` by
+sibling path under the operator's checkout) is bounded to this repository and
+the register the caller supplies.
+
 ## Destination resolver (DST-003)
 
 `resolve_destinations(config, repo, *, repo_dir=None)` is the Layer-1
