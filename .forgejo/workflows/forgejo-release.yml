@@ -391,12 +391,18 @@ jobs:
       # (unset variable -> [] -> Forgejo-only release reporting success) is
       # exactly what must not ship.
       #
-      # Two forges carry two different credentials, and the adapter factory's
-      # single-token form cannot serve them, so the workflow constructs the
-      # adapters itself and passes them through `publish_release`'s `adapters`
-      # injection point. Each adapter constructs with the credentials for its
-      # forge; the webhook secret is supplied to satisfy the ingress contract
-      # even though publication never parses a webhook (ADP-006).
+      # ADP-011 — two forges carry two different credentials, and the adapter
+      # factory now serves a credential PER destination, keyed by forge value,
+      # so the workflow no longer hand-builds each adapter inline. The factory
+      # (`adapters_for` with a `credentials` mapping) constructs both adapters
+      # — the Forgejo adapter from the runner token and the GitHub mirror
+      # adapter from the mirror token — in one call; a destination whose forge
+      # has no credential in the mapping is a named refusal (`MissingCredentialError`),
+      # never a silent unauthenticated publication. The webhook secret rides in
+      # the same credential to satisfy the ingress contract even though
+      # publication never parses a webhook (ADP-006). A credential is not a
+      # destination: the tokens stay in the runner's secret store and arrive
+      # here as input; neither the factory nor this workflow stores or logs one.
       - name: Create Release
         env:
           TAG_NAME: "${{ github.event.inputs.tag_name || github.ref_name }}"
@@ -432,8 +438,7 @@ jobs:
           import os
           import sys
 
-          from ops_engine.adapters.forgejo_adapter import ForgejoAdapter
-          from ops_engine.adapters.github_adapter import GithubAdapter
+          from ops_engine.adapters.factory import Credential, adapters_for
           from ops_engine.config_loader import (
               OpsEngineConfig,
               OpsYamlError,
@@ -505,31 +510,25 @@ jobs:
           )
 
           async def main():
-              adapters = []
-              for destination in destinations:
-                  if destination.forge == "forgejo":
-                      adapters.append(
-                          ForgejoAdapter(
-                              base_url=forgejo_base_url,
-                              token=os.environ["FORGEJO_TOKEN"],
-                              webhook_secret=os.environ["FORGEJO_WEBHOOK_SECRET"],
-                          )
-                      )
-                  elif destination.forge == "github":
-                      adapters.append(
-                          GithubAdapter(
-                              token=os.environ["GH_MIRROR_TOKEN"],
-                              webhook_secret=os.environ[
-                                  "GH_MIRROR_WEBHOOK_SECRET"
-                              ],
-                          )
-                      )
-                  else:
-                      print(
-                          "::error::UnknownForgeError: destination "
-                          f"{destination.forge} has no adapter here"
-                      )
-                      sys.exit(1)
+              # ADP-011 — the factory serves the credential each destination's
+              # forge declares, so the two forges' distinct tokens are mapped
+              # in one call. A destination whose forge has no credential here
+              # is a named refusal, not a silent unauthenticated publication.
+              credentials = {
+                  "forgejo": Credential(
+                      token=os.environ["FORGEJO_TOKEN"],
+                      webhook_secret=os.environ["FORGEJO_WEBHOOK_SECRET"],
+                  ),
+                  "github": Credential(
+                      token=os.environ["GH_MIRROR_TOKEN"],
+                      webhook_secret=os.environ["GH_MIRROR_WEBHOOK_SECRET"],
+                  ),
+              }
+              adapters = adapters_for(
+                  destinations,
+                  credentials=credentials,
+                  base_url=forgejo_base_url,
+              )
 
               report = await ReleaseHandler.publish_release(
                   config,
