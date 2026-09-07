@@ -1,5 +1,42 @@
 # Changelog
 
+## 3.4.0
+
+Publishing a release to several forges no longer requires one credential to serve them
+all, and a credential no longer prints itself.
+
+### A credential per destination
+
+The adapter factory can be given a different credential for each destination, keyed by
+forge. A release that publishes to two forges holding two distinct tokens no longer has to
+construct its adapters by hand. A destination whose forge has no credential in the mapping
+is refused by name rather than attempted unauthenticated.
+
+### Credentials no longer render their secrets
+
+A credential value used to render its token and its webhook secret in clear text through
+every standard string form: an f-string, `str()`, `repr()` and `%s` formatting. Any log
+line or traceback that touched one exposed both. All four forms are redacted now.
+
+If you hold logs from an earlier version that touched a credential, treat the secrets in
+them as exposed.
+
+### The package holds no organisation knowledge
+
+Resolving destinations, publishing and mirroring take their targets from configuration.
+The package names no organisation and reads no continuous-integration environment of its
+own, and a check refuses the reintroduction of either — in the package and in the
+command-line tools alike — while leaving the public forge hosts an adapter legitimately
+needs.
+
+### What the source distribution carries is now stated
+
+The published source archive ships the package and the metadata needed to build it. Tests
+and the pinned dependency set are deliberately not part of it: verification happens from
+the repository, and the byte-identical build guarantee holds for a checkout rather than
+for the archive. The archive's contents are asserted by a test, so an unintended addition
+fails the build.
+
 ## 3.3.0
 
 The adapter factory no longer rejects the default, so publishing a release needs no webhook
