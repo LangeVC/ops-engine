@@ -41,121 +41,121 @@ jobs:
           set -euo pipefail
           mirror_repo="$(
             python3 - <<'PY'
-            import sys
+          import sys
 
-            def _clean_scalar(raw):
-                """Strip YAML quoting/inline-comment then flag anything leftover.
+          def _clean_scalar(raw):
+              """Strip YAML quoting/inline-comment then flag anything leftover.
 
-                The real loader (config_loader.load_ops_yaml) accepts forms this
-                line-scan cannot parse: a single- or double-quoted scalar, and an
-                inline comment after a value. Rather than pass the raw bytes
-                (quotes, trailing comment) into a push remote that git then
-                rejects with an obscure error, this mirror strips the exact YAML
-                wrapping it understands and, when wrapping it does NOT understand
-                remains, refuses by name instead of guessing.
-                """
-                v = raw.strip()
-                if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
-                    v = v[1:-1].strip()
-                marker = None
-                if v and v[0] in "\"'":
-                    marker = "an unmatched quote"
-                elif "#" in v:
-                    rest = v.split("#", 1)[1]
-                    if rest.strip():
-                        marker = "an inline comment"
-                if marker:
-                    return "", marker
-                return v, None
+              The real loader (config_loader.load_ops_yaml) accepts forms this
+              line-scan cannot parse: a single- or double-quoted scalar, and an
+              inline comment after a value. Rather than pass the raw bytes
+              (quotes, trailing comment) into a push remote that git then
+              rejects with an obscure error, this mirror strips the exact YAML
+              wrapping it understands and, when wrapping it does NOT understand
+              remains, refuses by name instead of guessing.
+              """
+              v = raw.strip()
+              if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+                  v = v[1:-1].strip()
+              marker = None
+              if v and v[0] in "\"'":
+                  marker = "an unmatched quote"
+              elif "#" in v:
+                  rest = v.split("#", 1)[1]
+                  if rest.strip():
+                      marker = "an inline comment"
+              if marker:
+                  return "", marker
+              return v, None
 
-            # Strict, refusal-first scan of `.ops.yaml` for the github destination.
-            #
-            # This workflow is install-free (REL-010 keeps the mirror a bare force-push,
-            # and REL-006 keeps the bare runner free of yaml/pydantic), so it cannot call
-            # config_loader.load_ops_yaml here. It reads ONLY the rigid `destinations`
-            # list that the committed `.ops.yaml` declares, and REFUSES (never guesses)
-            # the moment the file uses a form this scan does not understand. The forms
-            # it understands and strips are YAML scalar quoting and an inline comment;
-            # any wrapping left over after that is refused by name rather than passed
-            # as raw bytes into a push remote (see _clean_scalar) or guessed at.
-            indent = None
-            git_repos = []
-            with open(".ops.yaml", "r", encoding="utf-8") as fh:
-                in_destinations = False
-                cur = {}
-                cur_indent = None
-                for lineno, raw in enumerate(fh, start=1):
-                    line = raw.rstrip("\n")
-                    stripped = line.strip()
-                    if not stripped or stripped.startswith("#"):
-                        continue
-                    pad = len(line) - len(line.lstrip(" "))
-                    if in_destinations and stripped == "destinations:":
-                        raise LookupError("nested destinations is not supported")
-                    if not in_destinations and stripped == "destinations:":
-                        in_destinations = True
-                        indent = pad
-                        continue
-                    if not in_destinations:
-                        continue
-                    if pad <= indent:
-                        break
-                    if stripped.startswith("- "):
-                        if cur and cur.get("forge") == "github":
-                            git_repos.append(cur["repo"])
-                        cur = {}
-                        cur_indent = pad
-                        field = stripped[2:]
-                        if ":" not in field:
-                            raise LookupError("unexpected destinations sequence entry")
-                        key, _, value = field.partition(":")
-                        if key not in ("forge", "repo", "role", "visibility"):
-                            raise LookupError("unknown destination field: %r" % key)
-                        value, marker = _clean_scalar(value)
-                        if marker:
-                            sys.stderr.write(
-                                "MirrorDestinationBoundaryError: .ops.yaml destination value "
-                                "at line %d carries %s; this mirror does not parse YAML and "
-                                "cannot be sure which repo it pushes to. Refusing to "
-                                "guess a push remote over one a reviewer did not see.\n"
-                                % (lineno, marker)
-                            )
-                            sys.exit(2)
-                        cur[key] = value
-                    else:
-                        if cur_indent is None or pad <= cur_indent:
-                            raise LookupError(
-                                "unexpected destinations indentation at line %d" % lineno
-                            )
-                        key, _, value = stripped.partition(":")
-                        if ":" not in stripped or not value.strip():
-                            raise LookupError(
-                                "destination value must be `key: value` at line %d" % lineno
-                            )
-                        if key not in ("forge", "repo", "role", "visibility"):
-                            raise LookupError("unknown destination field: %r" % key)
-                        value, marker = _clean_scalar(value)
-                        if marker:
-                            sys.stderr.write(
-                                "MirrorDestinationBoundaryError: .ops.yaml destination value "
-                                "at line %d carries %s; this mirror does not parse YAML and "
-                                "cannot be sure which repo it pushes to. Refusing to "
-                                "guess a push remote over one a reviewer did not see.\n"
-                                % (lineno, marker)
-                            )
-                            sys.exit(2)
-                        cur[key] = value
-                if in_destinations and cur and cur.get("forge") == "github":
-                    git_repos.append(cur["repo"])
-            if len(git_repos) != 1:
-                sys.stderr.write(
-                    "MirrorDestinationBoundaryError: .ops.yaml must declare exactly one "
-                    "github destination (the mirror); refusing to push an ambiguous or "
-                    "unconfigured mirror remote rather than silently choosing one.\n"
-                )
-                sys.exit(2)
-            sys.stdout.write(git_repos[0] + "\n")
-            PY
+          # Strict, refusal-first scan of `.ops.yaml` for the github destination.
+          #
+          # This workflow is install-free (REL-010 keeps the mirror a bare force-push,
+          # and REL-006 keeps the bare runner free of yaml/pydantic), so it cannot call
+          # config_loader.load_ops_yaml here. It reads ONLY the rigid `destinations`
+          # list that the committed `.ops.yaml` declares, and REFUSES (never guesses)
+          # the moment the file uses a form this scan does not understand. The forms
+          # it understands and strips are YAML scalar quoting and an inline comment;
+          # any wrapping left over after that is refused by name rather than passed
+          # as raw bytes into a push remote (see _clean_scalar) or guessed at.
+          indent = None
+          git_repos = []
+          with open(".ops.yaml", "r", encoding="utf-8") as fh:
+              in_destinations = False
+              cur = {}
+              cur_indent = None
+              for lineno, raw in enumerate(fh, start=1):
+                  line = raw.rstrip("\n")
+                  stripped = line.strip()
+                  if not stripped or stripped.startswith("#"):
+                      continue
+                  pad = len(line) - len(line.lstrip(" "))
+                  if in_destinations and stripped == "destinations:":
+                      raise LookupError("nested destinations is not supported")
+                  if not in_destinations and stripped == "destinations:":
+                      in_destinations = True
+                      indent = pad
+                      continue
+                  if not in_destinations:
+                      continue
+                  if pad <= indent:
+                      break
+                  if stripped.startswith("- "):
+                      if cur and cur.get("forge") == "github":
+                          git_repos.append(cur["repo"])
+                      cur = {}
+                      cur_indent = pad
+                      field = stripped[2:]
+                      if ":" not in field:
+                          raise LookupError("unexpected destinations sequence entry")
+                      key, _, value = field.partition(":")
+                      if key not in ("forge", "repo", "role", "visibility"):
+                          raise LookupError("unknown destination field: %r" % key)
+                      value, marker = _clean_scalar(value)
+                      if marker:
+                          sys.stderr.write(
+                              "MirrorDestinationBoundaryError: .ops.yaml destination value "
+                              "at line %d carries %s; this mirror does not parse YAML and "
+                              "cannot be sure which repo it pushes to. Refusing to "
+                              "guess a push remote over one a reviewer did not see.\n"
+                              % (lineno, marker)
+                          )
+                          sys.exit(2)
+                      cur[key] = value
+                  else:
+                      if cur_indent is None or pad <= cur_indent:
+                          raise LookupError(
+                              "unexpected destinations indentation at line %d" % lineno
+                          )
+                      key, _, value = stripped.partition(":")
+                      if ":" not in stripped or not value.strip():
+                          raise LookupError(
+                              "destination value must be `key: value` at line %d" % lineno
+                          )
+                      if key not in ("forge", "repo", "role", "visibility"):
+                          raise LookupError("unknown destination field: %r" % key)
+                      value, marker = _clean_scalar(value)
+                      if marker:
+                          sys.stderr.write(
+                              "MirrorDestinationBoundaryError: .ops.yaml destination value "
+                              "at line %d carries %s; this mirror does not parse YAML and "
+                              "cannot be sure which repo it pushes to. Refusing to "
+                              "guess a push remote over one a reviewer did not see.\n"
+                              % (lineno, marker)
+                          )
+                          sys.exit(2)
+                      cur[key] = value
+              if in_destinations and cur and cur.get("forge") == "github":
+                  git_repos.append(cur["repo"])
+          if len(git_repos) != 1:
+              sys.stderr.write(
+                  "MirrorDestinationBoundaryError: .ops.yaml must declare exactly one "
+                  "github destination (the mirror); refusing to push an ambiguous or "
+                  "unconfigured mirror remote rather than silently choosing one.\n"
+              )
+              sys.exit(2)
+          sys.stdout.write(git_repos[0] + "\n")
+          PY
           )"
           remote="https://x-access-token:${GH_MIRROR_TOKEN}@github.com/${mirror_repo}.git"
           git push --force "$remote" "+${GITHUB_REF}:${GITHUB_REF}"
