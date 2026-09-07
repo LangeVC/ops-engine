@@ -14,12 +14,14 @@ No register is shipped in this template, and no organisation or layover name is
 hard-coded in this script.
 
 Two shapes, deliberately not collapsed (ADP-008's missing-destination and
-ADP-010's absent-vocabulary):
+ADP-010's absent-vocabulary) — plus a third for a present-but-unusable register:
 
 - **No register supplied** is *nothing to check*, not an error: the check
   reports by name that it has nothing to check and exits zero.
 - **A register that contradicts a pin** *is* an error: the check fails, names
   the layover's declared pin and the engine's version, and exits non-zero.
+- **A present but malformed register** is a named refusal (exit non-zero, no
+  traceback): refused as ``pin-drift-check: ERROR: <path>: <reason>``.
 
 Stdlib only, no external deps, so it runs unattended on a clean runner.
 
@@ -57,19 +59,42 @@ def read_latest_version(repo: Path) -> str:
     raise ValueError(f"no version found in {PYPROJECT}")
 
 
+class LayoverRegisterError(ValueError):
+    """A caller-supplied layover register is malformed.
+
+    Raised naming the register's structure (schema, package, entries), so a
+    broken register is a refusal that identifies its source — never a raw
+    traceback. Mirrors the repo's settled named-refusal discipline for
+    externally supplied config (:class:`OpsYamlError`) and
+    ``mirror-destination-propose.py``'s ``prog: ERROR: <path>: <reason>``.
+    """
+
+
 def parse_register(text: str) -> list[dict]:
-    """Parse a layover register into a list of ``{name, pin}`` entries."""
-    decl = json.loads(text)
+    """Parse a layover register into a list of ``{name, pin}`` entries.
+
+    Raises :class:`LayoverRegisterError` for every malformed shape — JSON that
+    does not parse, a top-level list or scalar, a wrong schema or package, an
+    empty layovers list, or an entry missing name/pin.
+    """
+    try:
+        decl = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise LayoverRegisterError(f"invalid JSON: {e}") from e
+    if not isinstance(decl, dict):
+        raise LayoverRegisterError(
+            f"not a schema-1 object (got {type(decl).__name__})"
+        )
     if decl.get("schema") != 1:
-        raise ValueError(f"unsupported schema {decl.get('schema')!r}")
+        raise LayoverRegisterError(f"unsupported schema {decl.get('schema')!r}")
     if decl.get("package") != "ops_engine":
-        raise ValueError(f"unexpected package {decl.get('package')!r}")
+        raise LayoverRegisterError(f"unexpected package {decl.get('package')!r}")
     layovers = decl.get("layovers")
     if not layovers:
-        raise ValueError("no layovers declared in the register")
+        raise LayoverRegisterError("no layovers declared in the register")
     for entry in layovers:
-        if not entry.get("name") or not entry.get("pin"):
-            raise ValueError(f"layover entry missing name or pin: {entry!r}")
+        if not isinstance(entry, dict) or not entry.get("name") or not entry.get("pin"):
+            raise LayoverRegisterError(f"layover entry missing name or pin: {entry!r}")
     return layovers
 
 
@@ -126,7 +151,14 @@ def main() -> int:
         return 0
 
     latest = read_latest_version(repo)
-    layovers = parse_register(args.layovers.read_text(encoding="utf-8"))
+    try:
+        layovers = parse_register(args.layovers.read_text(encoding="utf-8"))
+    except LayoverRegisterError as e:
+        print(
+            f"pin-drift-check: ERROR: {args.layovers}: {e}",
+            file=sys.stderr,
+        )
+        return 2
     drift = drift_for(layovers, latest)
 
     if drift:

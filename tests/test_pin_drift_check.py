@@ -81,8 +81,40 @@ def test_parse_register_rejects_an_entry_without_name_or_pin():
     text = json.dumps(
         {"schema": 1, "package": "ops_engine", "layovers": [{"name": "a-ops"}]}
     )
-    with pytest.raises(ValueError):
+    with pytest.raises(mod.LayoverRegisterError):
         mod.parse_register(text)
+
+
+@pytest.mark.parametrize(
+    "raw, reason",
+    [
+        # top-level list -> not a schema-1 object
+        ("[]", "not a schema-1 object"),
+        # bare string -> not a schema-1 object
+        ('"just a string"', "not a schema-1 object"),
+        # wrong schema value
+        ('{"schema": 2, "package": "ops_engine", "layovers": []}',
+         "unsupported schema"),
+        # wrong package
+        ('{"schema": 1, "package": "not_ops", "layovers": []}',
+         "unexpected package"),
+        # empty layovers list
+        ('{"schema": 1, "package": "ops_engine", "layovers": []}',
+         "no layovers declared"),
+        # JSON that does not parse
+        ("{not json", "invalid JSON"),
+    ],
+)
+def test_present_but_malformed_register_is_a_named_refusal(tmp_path, raw, reason):
+    """A present-but-malformed register is refused by name, exit non-zero, with
+    no traceback — same shape as mirror-destination-propose.py's named refusal."""
+    reg = tmp_path / "bad.json"
+    reg.write_text(raw, encoding="utf-8")
+    r = run_check(["--layovers", str(reg), "--repo", str(REPO)])
+    assert r.returncode != 0, r.stdout
+    assert "Traceback" not in r.stderr
+    assert "ERROR" in r.stderr
+    assert reason in r.stderr
 
 
 def test_drift_for_flags_only_mismatched_pins():

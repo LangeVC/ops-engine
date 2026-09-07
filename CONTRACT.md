@@ -542,6 +542,12 @@ missing release destination and ADP-010 for an absent vocabulary):
 - **A register that contradicts the engine version** *is* an error: the check
   exits non-zero and names both the layover's declared pin and the engine
   version.
+- **A present but malformed register** is a named refusal, not a raw traceback:
+  a register that is not a schema-1 object (a top-level list or scalar), a
+  wrong schema or package, an empty layovers list, an entry missing name or pin,
+  or JSON that does not parse is refused as `pin-drift-check: ERROR: <path>:
+  <reason>` and exits non-zero — the same named-refusal shape as
+  `mirror-destination-propose.py` and ADP-008's `OpsYamlError`.
 
 The check compares each layover's declared pin to the engine's `pyproject.toml`
 version (semver, a leading `v` tolerated on either side). This is the check that,
