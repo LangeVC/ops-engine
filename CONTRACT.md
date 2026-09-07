@@ -420,10 +420,11 @@ arrives from the config layer via the `--dest-hosts` file, exactly as the
 organisation names arrive via `--org-vocab` and the CI variable names via
 `--ci-env` on the `src/` side (see the Layer-1 boundary below). With no
 `--dest-hosts` file the gate refuses only the universal five; an organisation
-that declares no forge host gets no check for one. The release gate supplies
-`git.langevc.com` through `--dest-hosts`, so this repository's own workflows stay
-gated on its private forge without the engine or the gate shipping LangeVC
-knowledge.
+that declares no forge host gets no check for one. The release gate derives its
+forge host from `github.server_url` — Forgejo-provided event context that names
+this instance — and feeds it through `--dest-hosts`, so this repository's own
+workflows stay gated on its private forge while neither the engine nor the gate
+nor the workflow names a LangeVC host by value.
 
 ## Layer-1 boundary (ADP-010)
 

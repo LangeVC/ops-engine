@@ -726,9 +726,11 @@ def test_gate_is_wired_to_fail_the_build_in_ci():
     before the release step can publish anywhere."""
     text = _release_gate_text()
     assert "ci_variable_boundary_gate.py --dir .forgejo" in text
-    # The org forge host arrives from the config layer, not shipped in the gate.
+    # The org forge host is derived from github.server_url, never a literal: the
+    # workflow names no organisation host, and the gate ships none.
     assert "--dest-hosts" in text
-    assert "git.langevc.com" in text
+    assert "github.server_url" in text
+    assert "git.langevc.com" not in text
 
 
 def test_deliberately_reintroduced_destination_fails_the_wired_build():

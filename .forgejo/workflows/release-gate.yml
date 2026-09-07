@@ -28,9 +28,11 @@ name: Release gate
 # The gate ships the UNIVERSAL destination-host set only (github.com,
 # www.github.com, gitlab.com, codeberg.org, git.sr.ht — the public forges any
 # adopter recognises). An organisation's own forge host is organisation
-# knowledge, so it arrives from THIS workflow (the config layer) via
-# --dest-hosts, the same shape --org-vocab and --ci-env take on the src/ side.
-# A self-hosted instance is not shipped in the gate.
+# knowledge, so it is not shipped in the gate: it arrives via --dest-hosts, the
+# same shape --org-vocab and --ci-env take on the src/ side. This workflow
+# derives that host from github.server_url — Forgejo-provided event context
+# that names this instance — so no organisation host literal lives here any
+# more than it lives in the gate.
 #
 # ADP-010 — the Layer-1 boundary runs here too. The engine's own Python source
 # (src/) must know no organisation and no CI system: an organisation name as a
@@ -55,7 +57,8 @@ jobs:
           set -euo pipefail
           DEST_HOSTS="$(mktemp)"
           trap 'rm -f "$DEST_HOSTS"' EXIT
-          printf '%s\n' git.langevc.com > "$DEST_HOSTS"
+          SERVER_URL="${{ github.server_url }}"
+          printf '%s\n' "${SERVER_URL#*://}" > "$DEST_HOSTS"
           python3 scripts/ci_variable_boundary_gate.py --dir .forgejo \
             --dest-hosts "$DEST_HOSTS"
       - name: Refuse a Layer-1 boundary bypass (org name or CI env read in src)
