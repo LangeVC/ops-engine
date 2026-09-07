@@ -39,13 +39,25 @@ name: Release gate
 #
 # ADP-010 — the Layer-1 boundary runs here too. The engine's own Python source
 # (src/) must know no organisation and no CI system: an organisation name as a
-# live value, or a direct CI-environment read, belongs in the calling layer, never
-# in the engine. The same gate script scans src/ with ast and refuses either
-# shape, naming file and line. Its vocabulary arrives from THIS workflow (the
-# config layer), never shipped in the gate: the organisation names and the CI
-# variable names a LangeVC engine must not carry are listed below. A docstring or
-# comment naming the same organisation is documentation and passes; a live value
-# fails before any release step can publish.
+# live value, a direct CI-environment read, or an organisation forge host as a
+# live value (ADP-014) belongs in the calling layer, never in the engine. The
+# same gate script scans src/ with ast and refuses any of the three shapes,
+# naming file and line. Its vocabulary arrives from THIS workflow (the config
+# layer), never shipped in the gate: the organisation names, the CI variable
+# names, and the forge hosts a LangeVC engine must not carry are listed below.
+# A docstring or comment naming the same organisation, host, or variable is
+# documentation and passes; a live value fails before any release step can
+# publish. The forge host is derived from github.server_url — the same bare host
+# the destination gate derives — so no organisation host literal lives here.
+#
+# The Layer-1 gate also scans scripts/. The operator tools (scripts/) are the
+# calling layer, not the engine, so they may name the organisation they operate
+# on and read a CI variable the workflow hands them — the org-name and ci-env
+# shapes are not enforced there. But they must still receive the organisation's
+# forge base URL as input, never default it: the ADP-014 defect lived in
+# scripts/mirror-destination-propose.py, so the org-host shape IS enforced over
+# scripts/ too. The gate script records this tree decision (operator-tool and
+# test carve-outs), so the scan and the wiring agree on what each tree may name.
 on:
   push:
     tags: ["v*"]
@@ -76,14 +88,30 @@ jobs:
           set -euo pipefail
           ORG_VOCAB="$(mktemp)"
           CI_ENV_VOCAB="$(mktemp)"
-          trap 'rm -f "$ORG_VOCAB" "$CI_ENV_VOCAB"' EXIT
+          DEST_HOSTS="$(mktemp)"
+          trap 'rm -f "$ORG_VOCAB" "$CI_ENV_VOCAB" "$DEST_HOSTS"' EXIT
           printf '%s\n' Capacium capacium capacium-ops LangeVC langevc lvc-ops \
             > "$ORG_VOCAB"
           printf '%s\n' GITHUB_REPOSITORY GITHUB_TOKEN > "$CI_ENV_VOCAB"
+          SERVER_URL="${{ github.server_url }}"
+          SERVER_HOST="${SERVER_URL#*://}"
+          SERVER_HOST="${SERVER_HOST%%[/?#]*}"
+          SERVER_HOST="${SERVER_HOST%%:*}"
+          if [ -z "$SERVER_HOST" ]; then
+            echo "ServerUrlBoundaryError: github.server_url (${SERVER_URL}) names no bare forge host; refusing to run the Layer-1 gate with no organisation host rather than silently disabling it." >&2
+            exit 1
+          fi
+          printf '%s\n' "$SERVER_HOST" > "$DEST_HOSTS"
           python3 scripts/ci_variable_boundary_gate.py \
             --py-dir src \
             --org-vocab "$ORG_VOCAB" \
-            --ci-env "$CI_ENV_VOCAB"
+            --ci-env "$CI_ENV_VOCAB" \
+            --dest-hosts "$DEST_HOSTS"
+          python3 scripts/ci_variable_boundary_gate.py \
+            --py-dir scripts \
+            --org-vocab "$ORG_VOCAB" \
+            --ci-env "$CI_ENV_VOCAB" \
+            --dest-hosts "$DEST_HOSTS"
       - name: Check tag against the declared version
         run: |
           set -euo pipefail

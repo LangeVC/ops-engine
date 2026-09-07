@@ -454,29 +454,66 @@ layer instead:
   engine; a read whose variable name comes from configuration
   (`os.environ.get(cfg.var_name)`) is not a literal and is not refused.
 
+- **an organisation forge host as a live value** (ADP-014). A string constant
+  whose value *contains* an organisation forge host the caller declares via
+  `--dest-hosts` — the same file the destination boundary (ADP-009) uses. The
+  historical case is `FORGEJO_API_DEFAULT = "https://git.langevc.com/api/v1"` in
+  `scripts/mirror-destination-propose.py`: the operator's own forge base URL
+  baked into executing code. A public forge's API host (`api.github.com`,
+  `uploads.github.com`) is *not* refused here: a template that ships adapters for
+  a public forge legitimately knows that forge's endpoints. An organisation's own
+  instance is organisation knowledge, and the line is precise: the public forge
+  is shared vocabulary; the private instance is a named dependency. The check is
+  a substring test, so a port or path on the same host still refuses.
+
+  This shape is scoped to production source (`src/`) and operator tools
+  (`scripts/`), never the test tree: a file under a `tests/` directory
+  legitimately names the organisation's own forge to assert the gate's own
+  behaviour (and the adapter surface it guards), so those fixtures are not
+  refused. An operator tool must still receive the organisation's forge base URL
+  as input, never default it (the ADP-014 defect lived in
+  `scripts/mirror-destination-propose.py`), so the org-host check is enforced on
+  both `src/` and `scripts/` and carved out only for `tests/`.
+
 The boundary is enforced by `scripts/ci_variable_boundary_gate.py`, the same
 stdlib-only script that guards the destination boundary (REL-006; it imports
 only the standard library, `ast` included, and never imports `ops_engine`).
-Given `--py-dir src`, it parses every `.py` file with `ast` and refuses either
-shape, naming the file and the 1-based line. The distinction between a
-documentation mention and a live value is made by **parsing, not pattern**: a
+Given `--py-dir`, it parses every `.py` file with `ast` and refuses any of
+the three shapes, naming the file and the 1-based line. The distinction between
+a documentation mention and a live value is made by **parsing, not pattern**: a
 docstring is a node in the parse tree (the first `Expr` holding a `Constant`
 string of a module, class, or function body) and its value is skipped, and a
-comment never reaches the AST. The same organisation name therefore passes
-inside a docstring or comment and is refused as a live value.
+comment never reaches the AST. The same organisation name, host, or variable
+therefore passes inside a docstring or comment and is refused as a live value.
+
+The three shapes do not all reach the same tree. Layer 1 is the engine's own
+`src/` tree, so the **org-name** and **ci-env-read** shapes are enforced over
+`src/` only, and are deliberately carved out for the operator tools
+(`scripts/`) and the test tree (`tests/`). An operator tool is the calling
+layer, not the engine: it legitimately names the organisation it operates on and
+reads a CI environment variable the workflow hands it, which is exactly what a
+template may not do. The **org-host** shape is different and is enforced one
+tree wider: an operator tool must still receive the organisation's forge base
+URL as input and never default it (ADP-014), so the org-host check runs over
+`src/` **and** `scripts/`, and is carved out only for `tests/` (whose fixtures
+name the organisation's own forge to assert the gate itself). The release gate
+(`.forgejo/workflows/release-gate.yml`) wires exactly this: it scans `src/` and
+`scripts/`, and does not scan `tests/` — the carve-outs in the gate record that
+tree decision rather than leaving an unscanned tree to drift.
 
 The vocabulary is supplied from outside, never shipped in the gate
 (REL-011's principle applied to the engine). `--org-vocab` is a file of
-organisation names (one per line) and `--ci-env` a file of CI environment
-variable names; with neither, the scan refuses nothing — an adopting engine
-supplies the vocabulary that matches its own ecosystem. The release gate
-(`.forgejo/workflows/release-gate.yml`) supplies both for LangeVC, so this
-engine's `src/` stays gated the way this repository's release notes stay gated:
+organisation names (one per line), `--ci-env` a file of CI environment variable
+names, and `--dest-hosts` a file of organisation forge hosts; with none of them,
+the scan refuses nothing — an adopting engine supplies the vocabulary that
+matches its own ecosystem. The release gate
+(`.forgejo/workflows/release-gate.yml`) supplies all three for LangeVC, so this
+engine's `src/` and `scripts/` stay gated the way this repository's release notes
+stay gated:
 the vocabulary arrives from the workflow (the config layer), never from the
-engine. The same principle governs the destination-host set (see "Destination
-boundary" above): `--dest-hosts` is the file of organisation forge hosts, kept
-out of the gate and supplied by the config layer, mirroring `--org-vocab` and
-`--ci-env` here.
+engine. The organisation forge host is derived from `github.server_url` in the
+workflow (the same bare host the destination gate derives), so the Layer-1 gate
+and the destination gate share one vocabulary file shape and one derivation.
 
 ## Destination resolver (DST-003)
 

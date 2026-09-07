@@ -52,7 +52,9 @@ Stdlib only (plus this package's own config/resolver modules, already runtime
 dependencies).
 
 Environment:
-  FORGEJO_API    base  (default https://git.langevc.com/api/v1)  -- apply only
+  FORGEJO_API    base URL of the forge the apply path reaches; REQUIRED on the
+                 apply path, never defaulted -- the operator's forge host is
+                 organisation knowledge and arrives as input (ADP-014)
   FORGEJO_USER   (default typelicious)                            -- apply only
   FORGEJO_TOKEN  HTTP Basic password / api token (canonical forge) -- apply only
 
@@ -77,7 +79,6 @@ import yaml  # noqa: E402
 from ops_engine.config_loader import OrgConfig, OpsEngineConfig  # noqa: E402
 from ops_engine.modules.mirror import resolve_destinations  # noqa: E402
 
-FORGEJO_API_DEFAULT = "https://git.langevc.com/api/v1"
 UA = "ops-engine/mirror-destination-propose (DST-004)"
 
 # The repo-scope Actions variable that the still-variable mirror.yml reads. This
@@ -394,7 +395,14 @@ def main():
     # writes and are grouped by the org the repo belongs to.
     fg_token = os.environ.get("FORGEJO_TOKEN")
     fg_user = os.environ.get("FORGEJO_USER", "typelicious")
-    api = os.environ.get("FORGEJO_API", FORGEJO_API_DEFAULT)
+    api = os.environ.get("FORGEJO_API")
+    if not api:
+        print(
+            "mirror-destination-propose: ERROR: apply needs FORGEJO_API (the "
+            "operator's forge base URL arrives as input; it is never defaulted).",
+            file=sys.stderr,
+        )
+        return 2
     if not fg_token:
         print("mirror-destination-propose: ERROR: apply needs FORGEJO_TOKEN",
               file=sys.stderr)
