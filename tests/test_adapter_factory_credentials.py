@@ -277,3 +277,29 @@ def test_credential_is_an_immutable_value(caplog):
     credential is hidden or derived."""
     c = Credential(token=_FORGEJO_TOKEN, webhook_secret=_FORGEJO_SECRET)
     assert asdict(c) == {"token": _FORGEJO_TOKEN, "webhook_secret": _FORGEJO_SECRET}
+
+
+def test_credential_never_renders_secret_values_in_any_stringification():
+    """No standard stringification path reveals a secret's value.
+
+    The ``Credential`` type is a bearer value for runner tokens and webhook
+    secrets. A plain dataclass repr would render both fields verbatim, so a
+    single log line, debug print, or exception frame would publish a runner
+    token. The masked ``__repr__`` (aliased to ``__str__``) covers all four
+    formatting paths plus exception embedding: each must keep the field names
+    visible while masking the values.
+    """
+    token = "RUNNER-SECRET-ABC123XY"
+    secret = "WH-SECRET-456"
+    c = Credential(token=token, webhook_secret=secret)
+
+    f_string = f"{c}"
+    str_form = str(c)
+    repr_form = repr(c)
+    percent_form = "%s" % c  # noqa: UP031
+    exception_form = repr(RuntimeError(c))
+
+    for rendered in (f_string, str_form, repr_form, percent_form, exception_form):
+        assert token not in rendered
+        assert secret not in rendered
+        assert "REDACTED" in rendered

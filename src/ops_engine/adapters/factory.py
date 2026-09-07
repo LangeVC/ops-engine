@@ -61,6 +61,11 @@ class Credential:
     token: str = ""
     webhook_secret: str = ""
 
+    def __repr__(self) -> str:
+        return "Credential(token='***REDACTED***', webhook_secret='***REDACTED***')"
+
+    __str__ = __repr__
+
 
 def adapter_for(
     destination: Destination,
