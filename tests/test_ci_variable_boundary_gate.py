@@ -511,6 +511,121 @@ def test_universal_set_is_refused_without_dest_hosts():
     assert "github.com/LangeVC/ops-engine.git" in r.stderr
 
 
+# --- ADP-014: organisation forge host as a live Python value. ------------------
+#
+# The --py-dir scan extends the same --dest-hosts file to the engine's Python
+# source: an organisation forge host supplied via --dest-hosts is refused when it
+# appears as a LIVE value in executing Python, and is NOT refused in a docstring
+# or comment. The historical case is the FORGEJO_API_DEFAULT constant that named
+# the operator's own forge base URL as a fallback. The line is precise: a public
+# forge's API host (api.github.com) is legitimately known by the adapter template
+# and is not refused here; an organisation's own instance is organisation
+# knowledge and must arrive as input.
+
+# The historical live value: a default carrying the operator's own forge host.
+ORG_HOST_DEFAULT = '''\
+FORGEJO_API_DEFAULT = "https://git.langevc.com/api/v1"
+'''
+
+
+def _write_py_intmp(tmp, text, name="mod.py"):
+    path = Path(tmp) / name
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def _scan_py_dir_with_dest_hosts(py_dir, dest_hosts):
+    return subprocess.run(
+        [sys.executable, str(GATE), "--py-dir", str(py_dir),
+         "--dest-hosts", str(dest_hosts)],
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_org_forge_host_default_is_refused_as_a_live_value():
+    """The historical FORGEJO_API_DEFAULT line — an organisation forge host as a
+    live string constant — is refused by the --py-dir scan when the host arrives
+    via --dest-hosts, naming file, line and the offending value."""
+    with tempfile.TemporaryDirectory() as tmp:
+        py_dir = Path(tmp) / "py"
+        py_dir.mkdir()
+        _write_py_intmp(py_dir, ORG_HOST_DEFAULT, "propose.py")
+        hosts = _dest_hosts_file(tmp, ["git.langevc.com"])
+        r = _scan_py_dir_with_dest_hosts(py_dir, hosts)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "Layer1BoundaryError" in r.stderr
+    assert "git.langevc.com" in r.stderr
+    assert ":1:" in r.stderr
+
+
+def test_org_forge_host_in_a_docstring_is_not_refused():
+    """The same organisation forge host appearing only in a docstring is
+    documentation and passes; the scan skips the docstring value node."""
+    docstring_only = '''\
+"""The operator's canonical forge is git.langevc.com; this is documentation."""
+x = 1
+'''
+    with tempfile.TemporaryDirectory() as tmp:
+        py_dir = Path(tmp) / "py"
+        py_dir.mkdir()
+        _write_py_intmp(py_dir, docstring_only, "doc.py")
+        hosts = _dest_hosts_file(tmp, ["git.langevc.com"])
+        r = _scan_py_dir_with_dest_hosts(py_dir, hosts)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "PASS" in r.stdout
+
+
+def test_public_forge_api_host_is_not_refused_in_python():
+    """A public forge's API host (api.github.com) is legitimately known by the
+    adapter template and is NOT refused by the --py-dir scan even with a
+    --dest-hosts file supplied — the org-host refusal targets only org hosts."""
+    public_api = '''\
+API_BASE = "https://api.github.com"
+UPLOADS_HOST = "https://uploads.github.com"
+'''
+    with tempfile.TemporaryDirectory() as tmp:
+        py_dir = Path(tmp) / "py"
+        py_dir.mkdir()
+        _write_py_intmp(py_dir, public_api, "adapter.py")
+        hosts = _dest_hosts_file(tmp, ["git.langevc.com"])
+        r = _scan_py_dir_with_dest_hosts(py_dir, hosts)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "PASS" in r.stdout
+
+
+def test_py_dir_scan_without_dest_hosts_refuses_no_host():
+    """With no --dest-hosts file the --py-dir scan refuses no forge host — it
+    ships no organisation vocabulary, so the org-host check is nil."""
+    with tempfile.TemporaryDirectory() as tmp:
+        py_dir = Path(tmp) / "py"
+        py_dir.mkdir()
+        _write_py_intmp(py_dir, ORG_HOST_DEFAULT, "propose.py")
+        r = subprocess.run(
+            [sys.executable, str(GATE), "--py-dir", str(py_dir)],
+            capture_output=True,
+            text=True,
+        )
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "PASS" in r.stdout
+
+
+def test_whole_src_scripts_tests_pass_py_dir_scan_with_org_hosts_supplied():
+    """No public forge host is refused: running the --py-dir scan over src/,
+    scripts/ and tests/ with the org host file supplied passes — every live
+    public-forge constant (62) and test fixture survives, none is an org host."""
+    with tempfile.TemporaryDirectory() as tmp:
+        hosts = _dest_hosts_file(tmp, ["git.langevc.com"])
+        for rel in ("src", "scripts", "tests"):
+            r = subprocess.run(
+                [sys.executable, str(GATE), "--py-dir", str(REPO_ROOT / rel),
+                 "--dest-hosts", str(hosts)],
+                capture_output=True,
+                text=True,
+            )
+            assert r.returncode == 0, (rel, r.stdout + r.stderr)
+
+
 # --- Criterion 4 (F4): comment text is documentation, not a destination. ------
 
 
