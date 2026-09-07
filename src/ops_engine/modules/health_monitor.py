@@ -6,7 +6,16 @@ repo. Configured via YAML in the org layover; sinks decide where results land
 
 CLI usage (from a GitHub Action workflow or cron):
 
-    python -m ops_engine.modules.health_monitor --config config.yml [--org NAME]
+    python -m ops_engine.modules.health_monitor --config config.yml \
+        [--org NAME] [--repo OWNER/REPO] [--token TOKEN] \
+        [--rate-limit-namespace NAMESPACE]
+
+Layer 1 knows no organisation and no CI system (ADP-010): the ``github_issue``
+sink's target repository (``--repo``), its credential (``--token``) and the
+rate-limit metric namespace (``--rate-limit-namespace``) all arrive as
+caller-supplied arguments. This module reads no CI environment variable and
+names no organisation by value; the values are supplied by the workflow that
+invokes it.
 
 Exit code 1 if any probe fails AND ``fail_run_on_error`` is true (default).
 
@@ -38,7 +47,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 import sys
 import urllib.error
 import urllib.request
@@ -60,7 +68,7 @@ logger = logging.getLogger(__name__)
 
 # ── Probe ────────────────────────────────────────────────────────────────────
 
-_DEFAULT_UA = "ops-engine-health-monitor/1.0 (+https://github.com/Capacium/ops-engine)"
+_DEFAULT_UA = "ops-engine-health-monitor/1.0"
 
 
 def _probe(check: HealthCheck) -> dict[str, Any]:
@@ -156,21 +164,24 @@ def _emit_webhook(results: list[dict[str, Any]], sink: HealthSink) -> None:
         logger.warning("webhook sink %s failed: %s", sink.url, e)
 
 
-@track_rate_limit(namespace="capacium-ops")
 def _emit_github_issue(
     results: list[dict[str, Any]],
     sink: HealthSink,
     repo: str | None,
     token: str | None,
+    namespace: str | None,
 ) -> None:
-    """Create or update a single labeled issue on failure (avoids spam)."""
+    """Create or update a single labeled issue on failure (avoids spam).
+
+    ``repo``, ``token`` and ``namespace`` are caller-supplied (Layer 1 knows no
+    organisation and no CI system). ``namespace`` labels the rate-limit metric;
+    when supplied it is applied to the tracker over the network request.
+    """
     failures = [r for r in results if not r["ok"]]
     if sink.only_on_failure and not failures:
         return
     if not repo or not token:
-        logger.warning(
-            "github_issue sink: missing GITHUB_REPOSITORY or GITHUB_TOKEN; skipping"
-        )
+        logger.warning("github_issue sink: missing repository or token; skipping")
         return
     api = "https://api.github.com"
     hdr = {
@@ -178,6 +189,17 @@ def _emit_github_issue(
         "Accept": "application/vnd.github+json",
         "User-Agent": "ops-engine/health-monitor",
     }
+
+    def _request(url: str, *, method: str = "GET", data: bytes | None = None) -> Any:
+        headers = dict(hdr)
+        if data is not None:
+            headers["Content-Type"] = "application/json"
+        req = urllib.request.Request(url, data=data, method=method, headers=headers)
+        return urllib.request.urlopen(req, timeout=10)
+
+    if namespace:
+        _request = track_rate_limit(namespace=namespace)(_request)
+
     failure_lines = "\n".join(
         f"- **{r['name']}** ({r['url']}) → {r.get('error') or r.get('status')}"
         for r in failures
@@ -190,9 +212,7 @@ def _emit_github_issue(
     # find existing open issue with the label
     url = f"{api}/repos/{repo}/issues?state=open&labels={sink.issue_label}"
     try:
-        with urllib.request.urlopen(
-            urllib.request.Request(url, headers=hdr), timeout=10
-        ) as r:
+        with _request(url) as r:
             issues = json.load(r)
     except Exception as e:  # noqa: BLE001
         logger.warning("github_issue sink: list failed: %s", e)
@@ -201,31 +221,21 @@ def _emit_github_issue(
     try:
         if existing:
             url = f"{api}/repos/{repo}/issues/{existing['number']}/comments"
-            urllib.request.urlopen(
-                urllib.request.Request(
-                    url,
-                    data=json.dumps({"body": body}).encode("utf-8"),
-                    method="POST",
-                    headers={**hdr, "Content-Type": "application/json"},
-                ),
-                timeout=10,
+            _request(
+                url, method="POST", data=json.dumps({"body": body}).encode("utf-8")
             ).read()
         else:
             url = f"{api}/repos/{repo}/issues"
-            urllib.request.urlopen(
-                urllib.request.Request(
-                    url,
-                    data=json.dumps(
-                        {
-                            "title": sink.issue_title,
-                            "body": body,
-                            "labels": [sink.issue_label],
-                        }
-                    ).encode("utf-8"),
-                    method="POST",
-                    headers={**hdr, "Content-Type": "application/json"},
-                ),
-                timeout=10,
+            _request(
+                url,
+                method="POST",
+                data=json.dumps(
+                    {
+                        "title": sink.issue_title,
+                        "body": body,
+                        "labels": [sink.issue_label],
+                    }
+                ).encode("utf-8"),
             ).read()
     except Exception as e:  # noqa: BLE001
         logger.warning("github_issue sink: write failed: %s", e)
@@ -237,14 +247,25 @@ class HealthMonitor:
     """Pure-config health monitor — no business logic, just probes + sinks."""
 
     @staticmethod
-    def run(config: HealthMonitorConfig) -> int:
-        """Run all probes, emit to all sinks. Return non-zero on failure."""
+    def run(
+        config: HealthMonitorConfig,
+        *,
+        repo: str | None = None,
+        token: str | None = None,
+        namespace: str | None = None,
+    ) -> int:
+        """Run all probes, emit to all sinks. Return non-zero on failure.
+
+        ``repo``, ``token`` and ``namespace`` are caller-supplied (ADP-010):
+        Layer 1 knows no organisation and no CI system, so the ``github_issue``
+        sink's target repository, its credential, and the rate-limit metric
+        namespace all arrive here as arguments — never as a literal and never
+        read from the environment.
+        """
         if not config.enabled or not config.checks:
             logger.info("HealthMonitor: disabled or no checks; skipping.")
             return 0
         results = [_probe(c) for c in config.checks]
-        repo = os.environ.get("GITHUB_REPOSITORY")
-        token = os.environ.get("GITHUB_TOKEN")
         for sink in config.sinks:
             try:
                 if sink.type == "stdout":
@@ -260,7 +281,7 @@ class HealthMonitor:
                     else:
                         _emit_webhook(results, sink)
                 elif sink.type == "github_issue":
-                    _emit_github_issue(results, sink, repo, token)
+                    _emit_github_issue(results, sink, repo, token, namespace)
                 else:
                     logger.warning("unknown sink type %r — skipping", sink.type)
             except Exception as e:  # noqa: BLE001
@@ -294,6 +315,21 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="org section name (default: first top-level key in the YAML)",
     )
+    p.add_argument(
+        "--repo",
+        default=None,
+        help="OWNER/REPO the github_issue sink reports against (supplied by the caller)",
+    )
+    p.add_argument(
+        "--token",
+        default=None,
+        help="API token the github_issue sink authenticates with (supplied by the caller)",
+    )
+    p.add_argument(
+        "--rate-limit-namespace",
+        default=None,
+        help="namespace label for rate-limit metrics (supplied by the caller)",
+    )
     p.add_argument("--verbose", "-v", action="store_true")
     args = p.parse_args(argv)
     logging.basicConfig(
@@ -301,7 +337,12 @@ def main(argv: list[str] | None = None) -> int:
         format="%(levelname)s %(name)s: %(message)s",
     )
     cfg = _load_config(args.config, args.org)
-    return HealthMonitor.run(cfg)
+    return HealthMonitor.run(
+        cfg,
+        repo=args.repo,
+        token=args.token,
+        namespace=args.rate_limit_namespace,
+    )
 
 
 if __name__ == "__main__":

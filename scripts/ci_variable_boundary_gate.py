@@ -74,27 +74,35 @@ read error.
 """
 
 import argparse
+import ast
 import re
 import sys
 from pathlib import Path
 
-# Hosts whose ``OWNER/REPO`` is a forge **destination** this kind of workflow is
-# prohibited from naming as a literal. github.com covers the mirror's git remote
-# and any github.com/OWNER/REPO fetch that is not a whitelisted supplier;
-# gitlab.com, codeberg.org, git.sr.ht and the Forgejo host cover the shape a
-# layover that later points a second (web/git-form) destination would write, so
-# the refusal is explicit rather than a github-only special case. GitLab's API
-# rides on gitlab.com itself and Forgejo's on its own host, so their API paths
-# are refused through this same set; only github.com keeps its REST/upload
-# endpoints on dedicated subdomains, which is why ``api.github.com`` and
-# ``uploads.github.com`` are a separate, host-name-only refusal (below).
+# The UNIVERSAL set of hosts whose ``OWNER/REPO`` is a forge **destination** this
+# kind of workflow is prohibited from naming as a literal — the public forges any
+# adopter recognises, no organisation knowledge. github.com covers the mirror's
+# git remote and any github.com/OWNER/REPO fetch that is not a whitelisted
+# supplier; gitlab.com, codeberg.org and git.sr.ht cover the shape a layover that
+# later points a second (web/git-form) destination would write, so the refusal is
+# explicit rather than a github-only special case. GitLab's API rides on
+# gitlab.com itself, so its API paths are refused through this same set; only
+# github.com keeps its REST/upload endpoints on dedicated subdomains, which is why
+# ``api.github.com`` and ``uploads.github.com`` are a separate, host-name-only
+# refusal (below).
+#
+# A self-hosted instance is NOT in this set: an organisation's own forge host is
+# organisation knowledge and arrives from the config layer via ``--dest-hosts``
+# (a file of hosts, one per line), exactly as the org vocabulary arrives via
+# ``--org-vocab`` and the CI variable names via ``--ci-env`` on the ``src/`` side.
+# With no ``--dest-hosts`` file the gate still refuses only the universal set,
+# and an organisation that declares no forge host gets no check for one.
 _DESTINATION_HOSTS = (
     "github.com",
     "www.github.com",
     "gitlab.com",
     "codeberg.org",
     "git.sr.ht",
-    "git.langevc.com",
 )
 
 # Forge **API** hosts, refused by host name alone. Naming an API host by value is
@@ -214,21 +222,23 @@ def _is_tool_supplier(path_token):
     return triple in _TOOL_SUPPLIERS
 
 
-def _iter_multipart_host_literals(line):
+def _iter_multipart_host_literals(line, dest_hosts):
     """Yield all forge repository literals in one line (http or scp transport).
 
+    ``dest_hosts`` is the destination-host set to refuse against: the universal
+    set plus any organisation hosts the caller supplied via ``--dest-hosts``.
     Yields the full ``HOST/OWNER/REPO[...]`` matched run per http-scoped match,
     and the full ``git@HOST:OWNER/REPO[.git]`` run per scp match, each as a
     single reportable token.
     """
     for m in _DEST_PATH.finditer(line):
         host = m.group("host")
-        if host not in _DESTINATION_HOSTS:
+        if host not in dest_hosts:
             continue
         yield line[m.start("host"):m.end()]
     for m in _SCP_PATH.finditer(line):
         host = m.group("host")
-        if host not in _DESTINATION_HOSTS:
+        if host not in dest_hosts:
             continue
         yield line[m.start():m.end()]
 
@@ -246,14 +256,14 @@ def _vis_api_host_offence(line, lineno):
         yield lineno, m.group(0)
 
 
-def _vis_dest_offence(line, lineno):
-    for token in _iter_multipart_host_literals(line):
+def _vis_dest_offence(line, lineno, dest_hosts):
+    for token in _iter_multipart_host_literals(line, dest_hosts):
         if _is_tool_supplier(token):
             continue
         yield lineno, token
 
 
-def _scan_text(path, text):
+def _scan_text(path, text, dest_hosts):
     """Return a sorted list of (path, lineno, token, kind) offences in one file."""
     offences = []
     for lineno, line in enumerate(text.splitlines(), start=1):
@@ -262,18 +272,199 @@ def _scan_text(path, text):
             offences.append((path, ln, token, "ci-variable"))
         for ln, token in _vis_api_host_offence(line, lineno):
             offences.append((path, ln, token, "api-host"))
-        for ln, token in _vis_dest_offence(line, lineno):
+        for ln, token in _vis_dest_offence(line, lineno, dest_hosts):
             offences.append((path, ln, token, "destination"))
     return sorted(offences)
 
 
-def _scan_file(path):
+def _scan_file(path, dest_hosts):
     try:
         text = Path(path).read_text(encoding="utf-8")
     except OSError as exc:
         print(f"ci_variable_boundary_gate: ERROR reading {path}: {exc}", file=sys.stderr)
         raise
-    return _scan_text(str(path), text)
+    return _scan_text(str(path), text, dest_hosts)
+
+
+# ── Python layer-boundary scan (ADP-010) ────────────────────────────────────
+#
+# The destination boundary above covers WHERE a workflow may take a forge
+# destination from. This second scan covers the ENGINE's own Python source:
+# Layer 1 (the ``src/`` tree) must know no organisation and no CI system. Two
+# shapes are refused in executing Python, both located by parsing the source
+# with ``ast`` — never by regex, so the distinction between a documentation
+# mention and a live value is a node in the parse tree, not a pattern:
+#
+# * *an organisation name as a live value.* A string literal (``ast.Constant``
+#   of ``str``) whose value equals a term the caller supplies via
+#   ``--org-vocab``. The historical case is the rate-limit decorator
+#   ``@track_rate_limit(namespace="capacium-ops")`` in ``health_monitor.py`` —
+#   an organisation name baked into executing code, where it must instead
+#   arrive as configuration or an argument.
+#
+# * *a direct CI-environment read.* ``os.environ.get("NAME")`` (or
+#   ``os.getenv("NAME")``) whose variable name is a term the caller supplies via
+#   ``--ci-env``. The historical case is ``os.environ.get("GITHUB_REPOSITORY")``
+#   (and ``GITHUB_TOKEN``) in ``health_monitor.py`` — the engine reaching into
+#   one CI system's variable store, where the value must instead arrive from the
+#   workflow that invokes it.
+#
+# A documentation mention is NOT refused: a module/class/function docstring is a
+# specific ``ast`` node (the first ``Expr`` holding a ``Constant`` string in its
+# body) and its value is skipped, so the same organisation name that is refused
+# as a live value passes when it appears in a docstring. Comments never reach
+# the AST at all. This is the parsing distinction, not a pattern: a docstring is
+# a node, and ``ast`` locates the exact line of every offence.
+#
+# The vocabulary is supplied from outside, never shipped in the gate (REL-011's
+# principle, applied to the engine): ``--org-vocab`` is a file of organisation
+# names and ``--ci-env`` a file of CI environment variable names. With neither,
+# the scan refuses nothing — an adopting engine supplies the vocabulary that
+# matches its own ecosystem. The gate remains stdlib-only (``ast`` is standard
+# library) and never imports ``ops_engine``.
+
+
+def _load_vocab(path):
+    """Read one term per line; blank lines skipped; terms whitespace-stripped."""
+    terms = []
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        term = line.strip()
+        if term:
+            terms.append(term)
+    return terms
+
+
+def _docstring_value_ids(tree):
+    """Ids of the string ``Constant`` nodes that are a docstring's value.
+
+    A docstring is the first statement of a module, class, or function body, and
+    its value is the ``Constant`` string node. Recording those nodes lets the
+    scan skip exactly them — a documentation mention is that node, never a
+    ``re`` pattern.
+    """
+    ids = set()
+    for node in ast.walk(tree):
+        if isinstance(
+            node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+        ):
+            if node.body and isinstance(node.body[0], ast.Expr):
+                value = node.body[0].value
+                if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                    ids.add(id(value))
+    return ids
+
+
+def _ci_env_literal(node):
+    """The literal variable name of ``os.environ.get(...)``/``os.getenv(...)``.
+
+    Returns the string the call reads from the CI environment, or ``None`` when
+    the node is not such a call with a literal first argument. A read whose name
+    comes from configuration (``os.environ.get(cfg.var_name)``) is not a literal
+    and is not refused here.
+    """
+    if not isinstance(node, ast.Call):
+        return None
+    func = node.func
+    if not isinstance(func, ast.Attribute) or func.attr not in ("get", "getenv"):
+        return None
+    if func.attr == "get":
+        if not (
+            isinstance(func.value, ast.Attribute)
+            and isinstance(func.value.value, ast.Name)
+            and func.value.value.id == "os"
+            and func.value.attr == "environ"
+        ):
+            return None
+    else:  # getenv
+        if not (isinstance(func.value, ast.Name) and func.value.id == "os"):
+            return None
+    if (
+        node.args
+        and isinstance(node.args[0], ast.Constant)
+        and isinstance(node.args[0].value, str)
+    ):
+        return node.args[0].value
+    return None
+
+
+def _scan_python(text, path, org_terms, ci_env_vars):
+    """Return a sorted list of (path, lineno, token, kind) offences in one file.
+
+    Locates offences by parsing with ``ast``, not by pattern: a docstring's value
+    node is skipped (documentation), a live string constant equal to an
+    organisation term is refused, and an ``os.environ.get``/``os.getenv`` call
+    with a literal CI variable name is refused. Comments never reach the AST.
+    """
+    tree = ast.parse(text)
+    docstring_ids = _docstring_value_ids(tree)
+    offences = []
+    org_set = set(org_terms)
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and id(node) not in docstring_ids
+            and node.value in org_set
+        ):
+            offences.append((path, node.lineno, node.value, "org-name"))
+        elif isinstance(node, ast.Call):
+            varname = _ci_env_literal(node)
+            if varname is not None and varname in ci_env_vars:
+                offences.append((path, node.lineno, varname, "ci-env-read"))
+    return sorted(offences)
+
+
+def _run_python_scan(args):
+    """Scan every ``.py`` below ``--py-dir`` for a Layer-1 boundary bypass."""
+    org_terms = _load_vocab(args.org_vocab) if args.org_vocab else []
+    ci_env_vars = set(_load_vocab(args.ci_env)) if args.ci_env else set()
+    targets = sorted(p for p in Path(args.py_dir).rglob("*.py") if p.is_file())
+    if not targets:
+        print(
+            "ci_variable_boundary_gate: ERROR: --py-dir %r contains no .py files"
+            % args.py_dir,
+            file=sys.stderr,
+        )
+        return 2
+
+    all_offences = []
+    for path in targets:
+        try:
+            text = Path(path).read_text(encoding="utf-8")
+        except OSError as exc:
+            print(
+                f"ci_variable_boundary_gate: ERROR reading {path}: {exc}",
+                file=sys.stderr,
+            )
+            return 2
+        all_offences.extend(_scan_python(text, str(path), org_terms, ci_env_vars))
+
+    if all_offences:
+        for filepath, lineno, token, kind in sorted(all_offences):
+            if kind == "org-name":
+                sys.stderr.write(
+                    "Layer1BoundaryError: %s:%d: organisation name %r appears as a "
+                    "live value in executing Python. Layer 1 (the engine) must "
+                    "know no organisation; the name must arrive as configuration "
+                    "or an argument, never as a literal. A docstring or comment "
+                    "carrying the same name is documentation and is permitted.\n"
+                    % (filepath, lineno, token)
+                )
+            else:
+                sys.stderr.write(
+                    "Layer1BoundaryError: %s:%d: direct CI-environment read of %r "
+                    "in executing Python. Layer 1 must know no CI system; the "
+                    "value must arrive from the caller (the workflow), never read "
+                    "from the environment here.\n"
+                    % (filepath, lineno, token)
+                )
+        return 1
+
+    sys.stdout.write(
+        "layer-1 boundary gate: PASS - no organisation name appears as a live "
+        "value and no CI environment variable is read directly in src/.\n"
+    )
+    return 0
 
 
 def _collect_targets(args):
@@ -317,12 +508,41 @@ def main(argv=None):
         help="scan every .yml/.yaml below PATH",
     )
     parser.add_argument(
+        "--py-dir",
+        metavar="PATH",
+        default=None,
+        help="scan every .py below PATH for a Layer-1 boundary bypass",
+    )
+    parser.add_argument(
+        "--org-vocab",
+        metavar="PATH",
+        default=None,
+        help="file of organisation names (one per line) refused as live values",
+    )
+    parser.add_argument(
+        "--ci-env",
+        metavar="PATH",
+        default=None,
+        help="file of CI environment variable names (one per line) refused as direct reads",
+    )
+    parser.add_argument(
+        "--dest-hosts",
+        metavar="PATH",
+        default=None,
+        help="file of organisation forge hosts (one per line) refused as destinations, "
+        "added to the universal set (github.com, www.github.com, gitlab.com, "
+        "codeberg.org, git.sr.ht)",
+    )
+    parser.add_argument(
         "workflow",
         nargs="*",
         metavar="WORKFLOW",
         help="one or more workflow files to check (default: .forgejo/workflows)",
     )
     args = parser.parse_args(argv)
+
+    if args.py_dir is not None:
+        return _run_python_scan(args)
 
     try:
         targets = _collect_targets(args)
@@ -337,10 +557,14 @@ def main(argv=None):
         )
         return 2
 
+    dest_hosts = set(_DESTINATION_HOSTS)
+    if args.dest_hosts is not None:
+        dest_hosts.update(_load_vocab(args.dest_hosts))
+
     all_offences = []
     for path in targets:
         try:
-            all_offences.extend(_scan_file(path))
+            all_offences.extend(_scan_file(path, dest_hosts))
         except OSError:
             return 2
 
