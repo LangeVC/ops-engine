@@ -23,12 +23,21 @@
 # existing shell build checks already do). If the module is missing the test
 # ERRORS rather than skipping, because an environment that cannot build the
 # artifact cannot verify the artifact either.
+#
+# ADP-013 — the three content-checking tests each built a full sdist, so this
+# one file cost more than the rest of the suite combined. Those three now share
+# a single module-scoped build (`sdist_members`); the sweep proof below keeps
+# its own second build because it must build an sdist with the allowlist
+# REMOVED — a different artifact the shared build cannot serve.
 
+import re
 import shutil
 import subprocess
 import tarfile
 import tempfile
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -61,34 +70,64 @@ def _repo_relative(member_path: str) -> str:
     return member_path.split("/", 1)[1]
 
 
-def _sdist_members() -> set[str]:
-    """Build the sdist from a throwaway clone and return its member paths."""
-    tmp = Path(tempfile.mkdtemp(prefix="adp005-"))
+def _clone_repo(tmp: Path) -> Path:
+    """Clone the repository into a throwaway directory and return its path."""
+    clone_root = tmp / "clone"
+    subprocess.run(
+        ["git", "clone", "-q", str(REPO_ROOT), str(clone_root)],
+        check=True,
+        capture_output=True,
+    )
+    return clone_root
+
+
+def _build_sdist_members(clone_root: Path) -> set[str]:
+    """Build the sdist in ``clone_root`` and return its member paths."""
+    subprocess.run(
+        ["python3", "-m", "build", "--sdist"],
+        cwd=clone_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    sdist = list((clone_root / "dist").glob("*.tar.gz"))
+    if len(sdist) != 1:
+        raise AssertionError(f"expected exactly one sdist, found {len(sdist)}")
+    with tarfile.open(sdist[0]) as tf:
+        return {n for n in tf.getnames() if n and not n.endswith("/")}
+
+
+@pytest.fixture(scope="module")
+def sdist_members() -> set[str]:
+    """One shared build serves every assertion that only inspects contents."""
+    tmp = Path(tempfile.mkdtemp(prefix="adp013-"))
     try:
-        clone_root = tmp / "clone"
-        subprocess.run(
-            ["git", "clone", "-q", str(REPO_ROOT), str(clone_root)],
-            check=True,
-            capture_output=True,
-        )
-        subprocess.run(
-            ["python3", "-m", "build", "--sdist"],
-            cwd=clone_root,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        sdist = list((clone_root / "dist").glob("*.tar.gz"))
-        if len(sdist) != 1:
-            raise AssertionError(f"expected exactly one sdist, found {len(sdist)}")
-        with tarfile.open(sdist[0]) as tf:
-            return {n for n in tf.getnames() if n and not n.endswith("/")}
+        clone_root = _clone_repo(tmp)
+        return _build_sdist_members(clone_root)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def test_sdist_is_an_allowlist_not_a_sweep() -> None:
-    members = _sdist_members()
+def _drop_allowlist(clone_root: Path) -> None:
+    """Remove the sdist ``only-include`` allowlist from the clone's pyproject.
+
+    With the allowlist gone, hatchling falls back to whole-tree VCS selection
+    and sweeps every tracked file — the behaviour the allowlist exists to stop.
+    """
+    pyproject = clone_root / "pyproject.toml"
+    text = pyproject.read_text(encoding="utf-8")
+    new_text = re.sub(
+        r"^[ \t]*only-include[ \t]*=[ \t]*.*$",
+        "",
+        text,
+        flags=re.MULTILINE,
+    )
+    assert new_text != text, "expected to remove the sdist only-include allowlist"
+    pyproject.write_text(new_text, encoding="utf-8")
+
+
+def test_sdist_is_an_allowlist_not_a_sweep(sdist_members: set[str]) -> None:
+    members = sdist_members
 
     top_level = {_top_entry(m) for m in members}
     allowed = ALLOWED_TOP_LEVEL | _ALWAYS_PRESENT
@@ -98,9 +137,33 @@ def test_sdist_is_an_allowlist_not_a_sweep() -> None:
         f"these top-level entries: {stray}"
     )
 
+    # The sweep proof: the shared build proves nothing is stray ONCE the
+    # allowlist is applied. This second build drops the allowlist and commits a
+    # stray file by hand, proving the allowlist is the only thing keeping that
+    # file out — without it, hatchling sweeps the stray in.
+    tmp = Path(tempfile.mkdtemp(prefix="adp013-sweep-"))
+    try:
+        clone_root = _clone_repo(tmp)
+        stray_file = clone_root / "STRAY_LEAK.txt"
+        stray_file.write_text("a stray file a CI edit might leave behind\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", str(clone_root), "add", "STRAY_LEAK.txt", "pyproject.toml"],
+            check=True,
+            capture_output=True,
+        )
+        _drop_allowlist(clone_root)
+        swept = _build_sdist_members(clone_root)
+        swept_top = {_top_entry(m) for m in swept}
+        assert "STRAY_LEAK.txt" in swept_top, (
+            "dropping the allowlist must sweep a committed stray file into the "
+            "sdist; if it does not, the allowlist guards nothing"
+        )
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
-def test_sdist_packages_the_committed_source() -> None:
-    members = _sdist_members()
+
+def test_sdist_packages_the_committed_source(sdist_members: set[str]) -> None:
+    members = sdist_members
     archived = {_repo_relative(m) for m in members if _top_entry(m) == "src"}
     # The source of truth for "what must ship" is the git index, not the
     # filesystem: a pytest run generates __pycache__/.pyc bytecode under src/
@@ -120,8 +183,10 @@ def test_sdist_packages_the_committed_source() -> None:
     )
 
 
-def test_sdist_has_no_forgejo_no_venv_no_absolute_entries() -> None:
-    members = _sdist_members()
+def test_sdist_has_no_forgejo_no_venv_no_absolute_entries(
+    sdist_members: set[str],
+) -> None:
+    members = sdist_members
     top_level = {_top_entry(m) for m in members}
     assert ".forgejo" not in top_level, (
         "sdist still carries .forgejo/; source distributions must not ship "
