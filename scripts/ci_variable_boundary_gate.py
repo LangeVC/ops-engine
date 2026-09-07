@@ -329,6 +329,27 @@ def _scan_file(path, dest_hosts):
 # distinction, not a pattern: a docstring is a node, and ``ast`` locates the
 # exact line of every offence.
 #
+# A documentation mention is NOT refused: a module/class/function docstring is a
+# specific ``ast`` node (the first ``Expr`` holding a ``Constant`` string in its
+# body) and its value is skipped, so the same organisation name, organisation
+# host, or CI variable that is refused as a live value passes when it appears in
+# a docstring. Comments never reach the AST at all. This is the parsing
+# distinction, not a pattern: a docstring is a node, and ``ast`` locates the
+# exact line of every offence.
+#
+# The two scans do not reach every tree at once. The org-name and ci-env-read
+# shapes are Layer-1 constraints, so they are enforced over ``src/`` and carved
+# out for ``scripts/`` and ``tests/``: an operator tool is the calling layer and
+# may legitimately name the organisation it operates on or read a CI variable the
+# workflow hands it, exactly what a template may not. The org-host shape is not
+# Layer-1-only: an operator tool must still receive the organisation's forge base
+# URL as input (ADP-014), never default it, so the org-host check is enforced
+# over ``src/`` AND ``scripts/`` and carved out only for ``tests/`` fixtures that
+# name the organisation's own forge to assert the gate itself. The wiring that
+# exercised this scope (release-gate.yml) scans ``src/`` and ``scripts/``; the
+# test tree is not scanned, and the carve-outs here record that tree decision
+# rather than leaving an unscanned tree to drift.
+#
 # The vocabulary is supplied from outside, never shipped in the gate (REL-011's
 # principle, applied to the engine): ``--org-vocab`` is a file of organisation
 # names, ``--ci-env`` a file of CI environment variable names, and
@@ -410,29 +431,39 @@ def _scan_python(text, path, org_terms, ci_env_vars, dest_hosts):
     ``os.environ.get``/``os.getenv`` call with a literal CI variable name is
     refused. Comments never reach the AST.
 
-    The organisation forge host check is scoped to production source and operator
-    scripts, never the test tree: a file under a ``tests/`` directory legitimately
-    names the organisation's own forge to assert this gate's behaviour (and the
-    adapter surface it guards), so those fixtures are not refused. The boundary
-    the gate protects is the engine's own Layer-1 source and its operator tools —
-    exactly the ``src/`` and ``scripts/`` trees the release gate scans.
+    The three shapes do not all reach the same trees. Layer 1 is the engine's own
+    ``src/`` tree; only Layer 1 knows no organisation and no CI system, so the
+    org-name and CI-environment-read shapes are enforced on ``src/`` and carved
+    out for the operator tools (``scripts/``) and the test tree (``tests/``). An
+    operator tool is the calling layer, not the engine: it legitimately names the
+    organisation it operates on and reads a CI environment variable the workflow
+    hands it, so it may carry what a template may not. The org-host shape is
+    different and is enforced one tree wider: an operator tool must still receive
+    the organisation's forge base URL as input, never as a literal default (the
+    ADP-014 defect lived in ``scripts/mirror-destination-propose.py``), so it is
+    enforced on ``src/`` AND ``scripts/`` and carved out only for the test tree,
+    whose fixtures name the organisation's own forge to assert the gate itself.
     """
     tree = ast.parse(text)
     docstring_ids = _docstring_value_ids(tree)
     offences = []
     org_set = set(org_terms)
     host_set = set(dest_hosts)
-    in_tests = "tests" in Path(path).parts
+    parts = Path(path).parts
+    is_operator_tool = "scripts" in parts
+    is_test_fixture = "tests" in parts
     for node in ast.walk(tree):
         if (
-            isinstance(node, ast.Constant)
+            not is_operator_tool
+            and not is_test_fixture
+            and isinstance(node, ast.Constant)
             and isinstance(node.value, str)
             and id(node) not in docstring_ids
             and node.value in org_set
         ):
             offences.append((path, node.lineno, node.value, "org-name"))
         elif (
-            not in_tests
+            not is_test_fixture
             and isinstance(node, ast.Constant)
             and isinstance(node.value, str)
             and id(node) not in docstring_ids
@@ -440,7 +471,11 @@ def _scan_python(text, path, org_terms, ci_env_vars, dest_hosts):
             and any(h in node.value for h in host_set)
         ):
             offences.append((path, node.lineno, node.value, "org-host"))
-        elif isinstance(node, ast.Call):
+        elif (
+            not is_operator_tool
+            and not is_test_fixture
+            and isinstance(node, ast.Call)
+        ):
             varname = _ci_env_literal(node)
             if varname is not None and varname in ci_env_vars:
                 offences.append((path, node.lineno, varname, "ci-env-read"))

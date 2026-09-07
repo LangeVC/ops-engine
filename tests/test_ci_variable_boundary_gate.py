@@ -626,6 +626,86 @@ def test_whole_src_scripts_tests_pass_py_dir_scan_with_org_hosts_supplied():
             assert r.returncode == 0, (rel, r.stdout + r.stderr)
 
 
+# --- Tree carve-out: which rule reaches which tree (the ADP-014 rework). -------
+#
+# The three Layer-1 shapes do not all reach the same tree. Layer 1 is src/ only,
+# so the org-name and ci-env-read shapes are enforced on src/ and carved out for
+# scripts/ (the operator tools are the calling layer) and tests/. The org-host
+# shape is enforced one tree wider — src/ AND scripts/ — because an operator tool
+# must receive the forge base URL as input, never default it (ADP-014). A file
+# under scripts/ may therefore name the organisation and read a CI variable, but
+# may not carry the organisation's forge host as a live value.
+
+
+def _scan_py_dir(py_dir, org_vocab=None, ci_env=None, dest_hosts=None):
+    argv = [sys.executable, str(GATE), "--py-dir", str(py_dir)]
+    if org_vocab is not None:
+        argv += ["--org-vocab", str(org_vocab)]
+    if ci_env is not None:
+        argv += ["--ci-env", str(ci_env)]
+    if dest_hosts is not None:
+        argv += ["--dest-hosts", str(dest_hosts)]
+    return subprocess.run(argv, capture_output=True, text=True)
+
+
+def test_operator_tool_may_name_org_and_read_ci_env():
+    """A file under scripts/ is the calling layer, not the engine: it may carry
+    an organisation name as a live value and read a CI variable directly, while
+    a src/ file naming the same org or reading the same variable is refused."""
+    operator_tool = '''\
+import os
+ORG = "LangeVC"
+tok = os.environ.get("GITHUB_TOKEN")
+'''
+    with tempfile.TemporaryDirectory() as tmp:
+        org = _dest_hosts_file(tmp, ["Capacium", "capacium", "capacium-ops",
+                                     "LangeVC", "langevc", "lvc-ops"],
+                               name="org.txt")
+        ci = _dest_hosts_file(tmp, ["GITHUB_REPOSITORY", "GITHUB_TOKEN"],
+                              name="ci.txt")
+        # scripts/ -> PASS (carve-out)
+        scripts_dir = Path(tmp) / "scripts"
+        scripts_dir.mkdir()
+        _write_py_intmp(scripts_dir, operator_tool, "tool.py")
+        r = _scan_py_dir(scripts_dir, org_vocab=org, ci_env=ci)
+        assert r.returncode == 0, r.stdout + r.stderr
+        # src/ -> FAIL (Layer 1 knows no organisation and no CI system)
+        src_dir = Path(tmp) / "src"
+        src_dir.mkdir()
+        _write_py_intmp(src_dir, operator_tool, "engine.py")
+        r = _scan_py_dir(src_dir, org_vocab=org, ci_env=ci)
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert "Layer1BoundaryError" in r.stderr
+        assert "LangeVC" in r.stderr
+        assert "GITHUB_TOKEN" in r.stderr
+
+
+def test_operator_tool_may_not_default_the_org_forge_host():
+    """The org-host shape is enforced over scripts/ too: an operator tool that
+    names the organisation's forge host as a live value is refused even though
+    its org name and CI-variable read pass the carve-out."""
+    tool_with_host = '''\
+import os
+ORG = "LangeVC"
+tok = os.environ.get("GITHUB_TOKEN")
+API = "https://git.langevc.com/api/v1"
+'''
+    with tempfile.TemporaryDirectory() as tmp:
+        org = _dest_hosts_file(tmp, ["Capacium", "capacium", "capacium-ops",
+                                     "LangeVC", "langevc", "lvc-ops"],
+                               name="org.txt")
+        ci = _dest_hosts_file(tmp, ["GITHUB_REPOSITORY", "GITHUB_TOKEN"],
+                              name="ci.txt")
+        hosts = _dest_hosts_file(tmp, ["git.langevc.com"])
+        scripts_dir = Path(tmp) / "scripts"
+        scripts_dir.mkdir()
+        _write_py_intmp(scripts_dir, tool_with_host, "tool.py")
+        r = _scan_py_dir(scripts_dir, org_vocab=org, ci_env=ci, dest_hosts=hosts)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "Layer1BoundaryError" in r.stderr
+    assert "git.langevc.com" in r.stderr
+
+
 # --- Criterion 4 (F4): comment text is documentation, not a destination. ------
 
 
@@ -846,6 +926,16 @@ def test_gate_is_wired_to_fail_the_build_in_ci():
     assert "--dest-hosts" in text
     assert "github.server_url" in text
     assert "git.langevc.com" not in text
+
+
+def test_gate_scans_scripts_for_the_org_host_shape():
+    """The ADP-014 defect lived in scripts/mirror-destination-propose.py. The
+    wired Layer-1 step must scan scripts/ — not only src/ — so a reintroduced
+    forge-host default in an operator tool fails the build. The org-name and
+    ci-env shapes stay src/-scoped; only the org-host shape reaches scripts/."""
+    text = _release_gate_text()
+    assert "--py-dir src" in text
+    assert "--py-dir scripts" in text
 
 
 def test_deliberately_reintroduced_destination_fails_the_wired_build():

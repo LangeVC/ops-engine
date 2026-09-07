@@ -49,6 +49,15 @@ name: Release gate
 # documentation and passes; a live value fails before any release step can
 # publish. The forge host is derived from github.server_url — the same bare host
 # the destination gate derives — so no organisation host literal lives here.
+#
+# The Layer-1 gate also scans scripts/. The operator tools (scripts/) are the
+# calling layer, not the engine, so they may name the organisation they operate
+# on and read a CI variable the workflow hands them — the org-name and ci-env
+# shapes are not enforced there. But they must still receive the organisation's
+# forge base URL as input, never default it: the ADP-014 defect lived in
+# scripts/mirror-destination-propose.py, so the org-host shape IS enforced over
+# scripts/ too. The gate script records this tree decision (operator-tool and
+# test carve-outs), so the scan and the wiring agree on what each tree may name.
 on:
   push:
     tags: ["v*"]
@@ -95,6 +104,11 @@ jobs:
           printf '%s\n' "$SERVER_HOST" > "$DEST_HOSTS"
           python3 scripts/ci_variable_boundary_gate.py \
             --py-dir src \
+            --org-vocab "$ORG_VOCAB" \
+            --ci-env "$CI_ENV_VOCAB" \
+            --dest-hosts "$DEST_HOSTS"
+          python3 scripts/ci_variable_boundary_gate.py \
+            --py-dir scripts \
             --org-vocab "$ORG_VOCAB" \
             --ci-env "$CI_ENV_VOCAB" \
             --dest-hosts "$DEST_HOSTS"
