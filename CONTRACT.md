@@ -623,6 +623,80 @@ exception that vanishes and not a silent success. The return value is a
 serializes that state to a plain dict so a cockpit (or an operator) can see
 that a mirror is behind without parsing log lines.
 
+## What the published artifacts carry (ADP-005 / ADP-012)
+
+The source distribution is governed by an explicit allowlist
+(`[tool.hatch.build.targets.sdist] only-include = ["src/ops_engine"]` in
+`pyproject.toml`), not by hatchling's default whole-tree VCS sweep — the sweep
+ships `.forgejo/` in every release and, through the same gap, once shipped
+roughly seven hundred virtual-environment files (REL-008). The allowlist is a
+**holdover of a deliberate decision**, not an accident. What follows sets down,
+as decisions, the three exclusions the allowlist produces as a side effect, so
+`tests/test_sdist_contents.py` guards what was *decided* and not merely what the
+allowlist happens to admit.
+
+The **shipped top-level set is fixed** and asserted exactly two ways (extra and
+missing both fail the contents suite):
+
+- the package tree, `src/ops_engine/` — the source a consumer rebuilds a wheel
+  from;
+- the four core metadata files hatchling force-includes with it: `pyproject.toml`,
+  `README.md`, `LICENSE` and — admitted by hatchling's VCS-force-include, not by
+  the allowlist's rule — `.gitignore` (plus `PKG-INFO`, generated at build time).
+
+The wheel target carries exactly the same one package
+(`[tool.hatch.build.targets.wheel] packages = ["src/ops_engine"]`), so the sdist
+and the wheel package the same tree; the sdist is the *source* form of that same
+wheel, not a second product.
+
+### Decision 1 — the test suite and developer tooling do not ship (setup is a checkout step)
+
+`tests/`, `scripts/`, `docs/`, `examples/` and the repository's CI under `.forgejo/`
+are **deliberately absent** from the source distribution. The sdist is a
+source distribution of one Python package: it carries nothing a consumer of that
+package does not need to rebuild it. The test suite that verifies an Apache-2.0
+distribution is **repository** content, consumed by running `python3 -m pytest`
+against a **source checkout** — the place `[project.optional-dependencies] dev`
+(pytest, pytest-asyncio, respx, ruff) targets. A maintainer of a distribution
+therefore runs the suite in CI over the checkout that built the artifact — the
+release gate at `.forgejo/workflows/release-gate.yml` and the engine's own strict
+contents tests (`tests/test_sdist_contents.py`) are that check — not from within
+an unpacked sdist. Because the sdist ships neither the tests nor those fixtures,
+the `dev` extra is scoped to a checkout and is documented as such in `pyproject.toml`;
+installing `ops-engine[dev]` from the published artifact gives the tooling but not
+the tests, which is why no prose here or in the README suggests the artifact can
+self-verify. Verification of the published artifact happens over the git tree the
+artifact was built from.
+
+### Decision 2 — `constraints.txt` does not travel, so reproducibility is **from the checkout**
+
+`constraints.txt` pins the *build* resolution (`uv pip compile pyproject.toml`).
+It is a repository commit that the release workflow installs into its isolated
+build venv **before** building, together with a fixed `SOURCE_DATE_EPOCH`. It does
+**not** ship in the sdist (the allowlist admits only `src/ops_engine` and the
+force-included metadata). Consequently the byte-identical reproducibility the
+release workflow produces — two builds of one tag, identical resolution, identical
+archives — holds **of the checkout**, never **of the artifact**: a consumer who
+unpacks the sdist does not receive the file that pins the build set, so two
+rebuilds of that sdist by two people at two different times are byte-identical
+only if they happen to install the same build dependencies. Building a wheel
+*from the sdist alone* is guaranteed and reproduces the wheel exactly **for the
+same hatchling and build inputs**; what is **not** guaranteed from the sdist alone
+is the cross-environment byte identity the release's committed `constraints.txt`
+provides. Every statement of reproducibility in this file and in `README.md`
+therefore carries the **from the source checkout** qualifier, and no statement
+claims reproducible-from-artifact.
+
+### Decision 3 — `.gitignore` ships, admitted by hatchling, not by any allowlist rule
+
+`.gitignore` is present in the sdist because hatchling force-includes the VCS
+exclusion file alongside `pyproject.toml`, `README.md`, `LICENSE` and `PKG-INFO`
+regardless of the allowlist — it is not a member any `only-include` rule admits.
+It is harmless (it excludes nothing a consumer wants) and it is **kept**: encoding
+an `exclude` to strip it would fight hatchling's force-include for no consumer
+benefit. The contents test names it in the decided set alongside the other
+force-included metadata, so its presence is asserted, not assumed.
+
 ## Variable-name constants — deprecated
 
 `MIRROR_OWNER_VARIABLE` and `MIRROR_REPO_VARIABLE` live in the unpromised

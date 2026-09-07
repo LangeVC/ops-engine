@@ -246,6 +246,28 @@ pip install -e ".[dev]"
 pytest tests/ -v
 ```
 
+The `dev` extra (pytest, pytest-asyncio, respx, ruff) is for developing this
+source checkout, which carries `tests/`. `pip install -e ".[dev]"` targets a
+checkout; the published source distribution does not ship the test suite or
+toolchain fixtures, so run the suite against a checkout, not an unpacked
+distribution.
+
+## Distribution
+
+The published source distribution (`.tar.gz`) carries exactly one thing: the
+`src/ops_engine` package tree, `pyproject.toml`, `README.md`, `LICENSE`, and
+`.gitignore` (admitted by the build backend, not by an allowlist rule). It does
+**not** carry `tests/`, `scripts/`, `docs/`, or `.forgejo/` — those are this
+repository's development and CI content, verified in CI over the checkout that
+made the artifact. It also does not carry `constraints.txt`, the committed file
+that pins the release build's dependency resolution. Reproducibility therefore
+holds **from the source checkout**: two builds of one tag from a checkout that
+installs and pins the committed build set produce byte-identical archives.
+Reproducible-from-artifact is not claimed, because the file that makes the build
+deterministic does not ship with the artifact — building a wheel from the unpacked
+sdist reproduces the wheel for the same build inputs, nothing more. The full
+decision set is recorded in [CONTRACT.md](CONTRACT.md).
+
 ---
 
 ## Community & Support
