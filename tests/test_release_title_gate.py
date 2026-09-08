@@ -21,6 +21,7 @@ through the same constraint by real subprocess runs. It runs two ways:
 
 import subprocess
 import sys
+import tempfile
 import textwrap
 from pathlib import Path
 
@@ -139,13 +140,20 @@ def test_embedded_interpreter_is_what_the_run_block_executes():
 # --- Criterion 2: the contract decision and its machine check. ----------
 
 
-def test_contract_carries_the_rel022_decision_with_answered_questions():
-    assert CONTRACT_HEADING in CONTRACT_CONTENT
-    section = CONTRACT_CONTENT.split(CONTRACT_HEADING, 1)[1]
-    next_heading = "## Test enforcement"
-    section_body = section.split(next_heading, 1)[0]
+def _rel022_section_body(contract_text: str) -> str:
+    """Return the REL-022 decision section: from its heading to the next
+    top-level heading, holding the three question-and-answer pairs verbatim."""
+    assert CONTRACT_HEADING in contract_text
+    section = contract_text.split(CONTRACT_HEADING, 1)[1]
+    section_body = section.split("## Test enforcement", 1)[0]
     for q in QUESTIONS:
         assert q in section_body, f"missing verbatim question: {q}"
+    return section_body
+
+
+def test_contract_carries_the_rel022_decision_with_answered_questions():
+    section_body = _rel022_section_body(CONTRACT_CONTENT)
+    for q in QUESTIONS:
         answer = _answer_after(section_body, q)
         assert answer and answer.strip(), (
             f"a heading has no non-empty answer: {q}"
@@ -153,14 +161,57 @@ def test_contract_carries_the_rel022_decision_with_answered_questions():
 
 
 def _answer_after(section_body: str, question: str) -> str:
-    """Return the text between ``question`` and the next bold heading or the end
-    of the section. A blank or whitespace-only answer therefore fails the
-    assert in the calling test."""
+    """Return the text that answers ``question``: from just after that heading's
+    closing ``**`` up to the next ``**``-opened heading (the following question)
+    or the end of the section. Because the answer is bounded by the next bold
+    heading and not by any later heading, a blank or whitespace-only answer
+    returns empty — it never borrows the following question's heading text and
+    therefore fails the assert in the calling test instead of silently passing
+    (the ADP-015 gate-that-does-not-gate form this rework closes)."""
     tail = section_body.split(question, 1)[1]
-    for chunk in tail.split("**"):
-        if chunk.strip():
-            return chunk
-    return ""
+    next_bold = tail.find("**")
+    if next_bold != -1:
+        tail = tail[:next_bold]
+    return tail
+
+
+def _blank_answer_in_text(contract_text: str, question: str) -> str:
+    """Return ``contract_text`` with the answer text under ``question`` removed,
+    so the next content after that heading is the following heading (or the end
+    of the decision section) — the missing-answer shape this rework's criterion
+    demands the gate catch. The blanking is bounded to the REL-022 decision
+    section so a bold term in a later section can never widen or misplace it."""
+    section = contract_text.split(CONTRACT_HEADING, 1)[1]
+    section_end = section.find("\n## ")
+    if section_end != -1:
+        section = section[:section_end]
+    abs_start = contract_text.find(CONTRACT_HEADING) + len(CONTRACT_HEADING)
+    start = section.find(question) + len(question)
+    end = section.find("**", start)
+    if end == -1:
+        end = len(section)
+    return contract_text[: abs_start + start] + contract_text[abs_start + end :]
+
+
+def test_a_blank_answer_under_any_question_fails_the_machine_check():
+    """A present-but-ungating assertion is the ADP-015 defect form (an assertion
+    that passes no matter what), so this test is a red proof per question: for
+    EACH of the three questions a copy of CONTRACT.md in a tmp dir has that one
+    answer emptied, and the emptied answer MUST register as blank — i.e. the
+    gate's own predicate must fail — rather than borrow the following question's
+    heading text as the answer. It runs on a throwaway copy, never on the
+    tracked file."""
+    for q in QUESTIONS:
+        with tempfile.TemporaryDirectory() as tmp:
+            copy = Path(tmp) / "CONTRACT.md"
+            copy.write_text(
+                _blank_answer_in_text(CONTRACT_CONTENT, q), encoding="utf-8"
+            )
+            body = _rel022_section_body(copy.read_text(encoding="utf-8"))
+            answer = _answer_after(body, q)
+            assert not (answer and answer.strip()), (
+                f"a blank answer under {q} was not detected"
+            )
 
 
 def _title_gate_run_block() -> str:
