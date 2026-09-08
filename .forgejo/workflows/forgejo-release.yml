@@ -142,10 +142,18 @@ jobs:
       # complete. The engine therefore classifies nothing by shape: it refuses
       # a ticket-shaped token only when its prefix is among the prefixes THIS
       # step declares via --ticket-prefixes. The engine ships no organisation
-      # vocabulary — but this repository is a LangeVC repository, so this
-      # workflow (the config layer) declares LangeVC's tracker prefixes below
-      # and this repository's own notes stay gated. A layover that copies this
-      # workflow adapts that one line to its own organisation's prefixes.
+      # vocabulary — the template cannot know one organisation's tracker.
+      #
+      # REL-021 — the prefixes arrive from the config layer, never as a literal
+      # in this file. This step reads a ``tracker_prefixes`` list from the
+      # committed .ops.yaml (the same Layer-3 config layer ADP-008 moved the
+      # release destinations into) and writes it one-prefix-per-line for the
+      # gate. With no ``tracker_prefixes`` declared — the correct default for a
+      # template, and the audience gate's own "refuse nothing" case — the file
+      # is empty and nothing is refused. A layover declares its own prefixes in
+      # its own .ops.yaml and never edits this workflow. The literal list this
+      # step used to write is refused by ci_variable_boundary_gate.py
+      # (--ticket-prefixes) if it is ever reintroduced.
       # ops-engine ships no withheld-vocabulary forbid file, so --forbid-file
       # is absent — an absent forbid file is the proven normal case.
       - name: Gate the release notes for an external audience
@@ -157,7 +165,28 @@ jobs:
           PREFIXES_FILE="$(mktemp)"
           trap 'rm -f "$NOTES_FILE" "$PREFIXES_FILE"' EXIT
           printf '%s\n' "$NOTES" > "$NOTES_FILE"
-          printf '%s\n' LVC OME CORE LNF DST REL CFG FFR > "$PREFIXES_FILE"
+          python3 - "$PREFIXES_FILE" <<'PREFIXES_PY'
+          import sys
+          from pathlib import Path
+
+          out = sys.argv[1]
+          prefixes = []
+          ops = Path(".ops.yaml")
+          if ops.exists():
+              for raw in ops.read_text(encoding="utf-8").splitlines():
+                  line = raw.split("#", 1)[0].strip()
+                  if not line.startswith("tracker_prefixes:"):
+                      continue
+                  value = line[len("tracker_prefixes:"):].strip()
+                  if value.startswith("[") and value.endswith("]"):
+                      value = value[1:-1]
+                  for item in value.split(","):
+                      item = item.strip().strip("'\"")
+                      if item:
+                          prefixes.append(item)
+          Path(out).write_text("\n".join(prefixes) + ("\n" if prefixes else ""),
+                               encoding="utf-8")
+          PREFIXES_PY
           python3 scripts/release_notes_audience_gate.py \
             --ticket-prefixes "$PREFIXES_FILE" "$NOTES_FILE"
 

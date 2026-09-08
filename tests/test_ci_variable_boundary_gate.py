@@ -1078,6 +1078,139 @@ def test_contract_documents_the_permitted_set():
     assert "universal" in contract
 
 
+# --- REL-021: a tracker prefix is organisation vocabulary, not template data. ---
+#
+# A tracker prefix (LVC, OME, CORE, LNF, DST, REL, CFG, FFR for LangeVC) is
+# organisation knowledge: a template cannot know one adopter's tracker, exactly
+# as ADP-010 established for organisation names and ADP-014 for forge hosts. The
+# boundary gate learns this category the same way it learned the others — a
+# ``--ticket-prefixes`` file supplied by the config layer, with the same
+# refuse-nothing-when-absent default. The historical defect is
+# ``.forgejo/workflows/forgejo-release.yml`` writing
+# ``printf '%s\\n' LVC OME CORE LNF DST REL CFG FFR > "$PREFIXES_FILE"`` as a
+# literal every adopter inherits.
+
+# The exact historical literal line (from git show b42409c), the shape the gate
+# must refuse when armed with the organisation's prefixes.
+TRACKER_PREFIX_LITERAL = """\
+name: Regression
+on:
+  push:
+    tags: ["v*"]
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Gate the release notes
+        run: |
+          set -euo pipefail
+          PREFIXES_FILE="$(mktemp)"
+          printf '%s\n' LVC OME CORE LNF DST REL CFG FFR > "$PREFIXES_FILE"
+          python3 scripts/release_notes_audience_gate.py \\
+            --ticket-prefixes "$PREFIXES_FILE" notes.md
+"""
+
+ORG_TRACKER_PREFIXES = "LVC\nOME\nCORE\nLNF\nDST\nREL\nCFG\nFFR\n"
+
+
+def _ticket_prefixes_file(tmp, prefixes=ORG_TRACKER_PREFIXES, name="prefixes.txt"):
+    path = Path(tmp) / name
+    path.write_text(prefixes, encoding="utf-8")
+    return path
+
+
+def _scan_file_with_ticket_prefixes(path, prefixes_file):
+    return subprocess.run(
+        [sys.executable, str(GATE), "--ticket-prefixes", str(prefixes_file), str(path)],
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_tracker_prefix_literal_is_refused_when_supplied_red_proof():
+    """REL-021 red proof: restore the historical literal prefix line and run the
+    gate armed with --ticket-prefixes; every bare prefix is refused by name as a
+    TrackerPrefixBoundaryError with the offending file and line."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_intmp(tmp, TRACKER_PREFIX_LITERAL, "release.yml")
+        prefixes = _ticket_prefixes_file(tmp)
+        r = _scan_file_with_ticket_prefixes(path, prefixes)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "TrackerPrefixBoundaryError" in r.stderr
+    for prefix in ("LVC", "OME", "CORE", "LNF", "DST", "REL", "CFG", "FFR"):
+        assert "tracker prefix %r" % prefix in r.stderr, r.stderr
+    assert ":14:" in r.stderr  # the literal line in the fixture
+
+
+def test_tracker_prefix_literal_is_not_refused_without_supply():
+    """REL-021 green/default: with no --ticket-prefixes file the gate refuses
+    nothing — a template adopts no organisation's vocabulary, exactly the
+    default that already holds for --org-vocab/--dest-hosts/--ci-env."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_intmp(tmp, TRACKER_PREFIX_LITERAL, "release.yml")
+        r = _scan_file(path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "PASS" in r.stdout
+
+
+def test_the_current_tree_passes_with_prefixes_supplied_green_proof():
+    """REL-021 green proof: the current tree carries no literal tracker prefix,
+    so the workflow scan over .forgejo passes with --ticket-prefixes supplied."""
+    with tempfile.TemporaryDirectory() as tmp:
+        prefixes = _ticket_prefixes_file(tmp)
+        r = subprocess.run(
+            [sys.executable, str(GATE), "--dir", str(WORKFLOW_DIR),
+             "--ticket-prefixes", str(prefixes)],
+            capture_output=True,
+            text=True,
+        )
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "PASS" in r.stdout
+
+
+def test_hyphenated_and_namespaced_tokens_are_not_refused():
+    """A prefix that is part of a ticket reference (REL-021), a variable
+    ($REL, ${REL}), or member access (steps.REL.outputs) is not a bare literal
+    and is not refused — only a standalone prefix token is."""
+    body = (
+        "name: Regression\non: push\njobs:\n  x:\n    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - name: a\n"
+        "        run: |\n"
+        "          echo \"REL-021 and ${REL} and $REL and steps.REL.outputs\"\n"
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_intmp(tmp, body, "rel.yml")
+        prefixes = _ticket_prefixes_file(tmp, "REL\n")
+        r = _scan_file_with_ticket_prefixes(path, prefixes)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "PASS" in r.stdout
+
+
+def test_the_workflow_reads_prefixes_from_ops_yaml_not_a_literal():
+    """REL-021 — criterion 1: the release workflow no longer writes the prefix
+    list as a literal; it reads a tracker_prefixes value from the config layer
+    (.ops.yaml) and feeds it to --ticket-prefixes. A layover declares its own
+    prefixes in its own .ops.yaml, never in this file."""
+    wf = (WORKFLOW_DIR / "forgejo-release.yml").read_text(encoding="utf-8")
+    assert "printf '%s\\n' LVC OME CORE LNF DST REL CFG FFR" not in wf
+    assert ".ops.yaml" in wf
+    assert "tracker_prefixes" in wf
+    assert "--ticket-prefixes" in wf
+
+
+def test_malformed_ticket_prefix_file_is_a_named_refusal():
+    """A --ticket-prefixes file whose line is not one uppercase [A-Z]{2,5} token
+    is refused by name, never a silent partial vocabulary."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _write_intmp(tmp, TRACKER_PREFIX_LITERAL, "release.yml")
+        prefixes = _ticket_prefixes_file(tmp, "LVC-1\n", "bad.txt")
+        r = _scan_file_with_ticket_prefixes(path, prefixes)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "--ticket-prefixes" in r.stderr
+    assert "malformed" in r.stderr
+
+
 def _main() -> None:
     failures = []
     ran = 0

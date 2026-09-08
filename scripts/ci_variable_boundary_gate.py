@@ -129,6 +129,14 @@ _TOOL_SUPPLIERS = (("github.com", "actions", "checkout"),
 # A user-defined CI variable reference: ``vars.NAME`` inside ``${{ }}`` or bare.
 _VARS_REF = re.compile(r"\bvars\.[A-Za-z_][A-Za-z0-9_]*")
 
+# A tracker prefix standing ALONE as a literal (REL-021): an uppercase
+# ``[A-Z]{2,5}`` token that is not part of a longer word, not part of a
+# hyphenated identifier (``REL-021``), and not a variable reference (``$REL``,
+# ``${REL}``). Only a token whose value IS one of the caller-supplied
+# ``--ticket-prefixes`` is refused; the token shape alone names nothing.
+_TRACKER_PREFIX_RE = re.compile(r"(?<![\w${}.-])(?P<prefix>[A-Z]{2,5})(?![\w-])")
+_TRACKER_PREFIX_FORM = re.compile(r"[A-Z]{2,5}")
+
 # A literal ``HOST/OWNER/REPO`` destination path, optionally ``.git``-suffixed,
 # as it is written in a push remote or a URL that targets a forge repository.
 _DEST_PATH = re.compile(
@@ -263,7 +271,26 @@ def _vis_dest_offence(line, lineno, dest_hosts):
         yield lineno, token
 
 
-def _scan_text(path, text, dest_hosts):
+def _vis_ticket_prefix_offence(line, lineno, ticket_prefixes):
+    """Refuse a tracker prefix that stands alone as a literal on one line.
+
+    REL-021 — a template cannot know one organisation's tracker. ``--ticket-prefixes``
+    supplies that organisation's prefixes the same way ``--dest-hosts`` supplies its
+    forge hosts; a workflow line that writes one of them as a bare literal (the
+    ``printf '%s\\n' LVC OME CORE ...`` shape) took that vocabulary OUT of the config
+    layer. A prefix that is part of a longer word, a hyphenated identifier
+    (``REL-021``), or a variable reference (``$REL`` / ``${REL}``) is not a literal
+    and is not refused here. Comment text never reaches this visitor
+    (``_scan_line`` removed it)."""
+    if not ticket_prefixes:
+        return
+    for m in _TRACKER_PREFIX_RE.finditer(line):
+        token = m.group("prefix")
+        if token in ticket_prefixes:
+            yield lineno, token
+
+
+def _scan_text(path, text, dest_hosts, ticket_prefixes):
     """Return a sorted list of (path, lineno, token, kind) offences in one file."""
     offences = []
     for lineno, line in enumerate(text.splitlines(), start=1):
@@ -274,16 +301,18 @@ def _scan_text(path, text, dest_hosts):
             offences.append((path, ln, token, "api-host"))
         for ln, token in _vis_dest_offence(line, lineno, dest_hosts):
             offences.append((path, ln, token, "destination"))
+        for ln, token in _vis_ticket_prefix_offence(line, lineno, ticket_prefixes):
+            offences.append((path, ln, token, "tracker-prefix"))
     return sorted(offences)
 
 
-def _scan_file(path, dest_hosts):
+def _scan_file(path, dest_hosts, ticket_prefixes):
     try:
         text = Path(path).read_text(encoding="utf-8")
     except OSError as exc:
         print(f"ci_variable_boundary_gate: ERROR reading {path}: {exc}", file=sys.stderr)
         raise
-    return _scan_text(str(path), text, dest_hosts)
+    return _scan_text(str(path), text, dest_hosts, ticket_prefixes)
 
 
 # ── Python layer-boundary scan (ADP-010) ────────────────────────────────────
@@ -367,6 +396,27 @@ def _load_vocab(path):
         if term:
             terms.append(term)
     return terms
+
+
+def _load_ticket_prefixes(path):
+    """Read tracker prefixes, one per line, refusing a malformed line by name.
+
+    REL-021 — a tracker prefix is one uppercase ``[A-Z]{2,5}`` token (the prefix
+    of the code-and-number shape the audience gate matches). A file that carries a
+    non-prefix line is a named refusal, never a silent partial vocabulary that
+    would let a reintroduced literal prefix walk past the gate ungated."""
+    prefixes = set()
+    for lineno, line in enumerate(Path(path).read_text(encoding="utf-8").splitlines(), start=1):
+        term = line.strip()
+        if not term:
+            continue
+        if not _TRACKER_PREFIX_FORM.fullmatch(term):
+            raise ValueError(
+                "line %d is not a tracker prefix: %r must be one uppercase "
+                "[A-Z]{2,5} token" % (lineno, term)
+            )
+        prefixes.add(term)
+    return prefixes
 
 
 def _docstring_value_ids(tree):
@@ -616,6 +666,14 @@ def main(argv=None):
         "(github.com, www.github.com, gitlab.com, codeberg.org, git.sr.ht)",
     )
     parser.add_argument(
+        "--ticket-prefixes",
+        metavar="PATH",
+        default=None,
+        help="file of the organisation's own tracker prefixes (one per line, each an "
+        "uppercase [A-Z]{2,5} token) refused as a bare literal in a workflow file "
+        "(the printf '%%s\\n' LVC OME ... shape)",
+    )
+    parser.add_argument(
         "workflow",
         nargs="*",
         metavar="WORKFLOW",
@@ -643,10 +701,30 @@ def main(argv=None):
     if args.dest_hosts is not None:
         dest_hosts.update(_load_vocab(args.dest_hosts))
 
+    ticket_prefixes = set()
+    if args.ticket_prefixes is not None:
+        try:
+            ticket_prefixes = _load_ticket_prefixes(args.ticket_prefixes)
+        except FileNotFoundError:
+            print(
+                "ci_variable_boundary_gate: ERROR: --ticket-prefixes %r does not "
+                "resolve to a file. A prefix file that is named must be present."
+                % args.ticket_prefixes,
+                file=sys.stderr,
+            )
+            return 2
+        except ValueError as exc:
+            print(
+                "ci_variable_boundary_gate: ERROR: --ticket-prefixes %r is malformed: %s"
+                % (args.ticket_prefixes, exc),
+                file=sys.stderr,
+            )
+            return 2
+
     all_offences = []
     for path in targets:
         try:
-            all_offences.extend(_scan_file(path, dest_hosts))
+            all_offences.extend(_scan_file(path, dest_hosts, ticket_prefixes))
         except OSError:
             return 2
 
@@ -668,6 +746,15 @@ def main(argv=None):
                     "%r. Naming an API host by value splits the destination away "
                     "from the config layer; read the destination from .ops.yaml "
                     "instead.\n"
+                    % (filepath, lineno, token)
+                )
+            elif kind == "tracker-prefix":
+                sys.stderr.write(
+                    "TrackerPrefixBoundaryError: %s:%d: tracker prefix %r written "
+                    "as a literal. A template cannot know one organisation's "
+                    "tracker; the prefix must arrive from the config layer (the "
+                    "release workflow reads .ops.yaml), never as a literal in a "
+                    "workflow every adopter inherits.\n"
                     % (filepath, lineno, token)
                 )
             else:

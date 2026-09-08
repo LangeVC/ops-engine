@@ -870,16 +870,16 @@ prefixes, one per line, each an uppercase `[A-Z]{2,5}` token. ops-engine is the
 template and ships **no** organisation vocabulary, so with no `--ticket-prefixes`
 and no `--forbid-file` the gate refuses **nothing** — an organisation that
 supplies no vocabulary gets no vocabulary check. That is the correct default,
-not a hole. This repository's own release workflow *does* supply it: because
-ops-engine is a LangeVC repository, `.forgejo/workflows/forgejo-release.yml`
-declares LangeVC's tracker prefixes (`LVC`, `OME`, `CORE`, `LNF`, `DST`, `REL`,
-`CFG`, `FFR`) and this repository's own notes therefore stay gated. A layover
-that adopts the workflow adapts that prefix list to its own organisation; the
-vocabulary always arrives from the workflow (the config layer), never from the
-engine. A `--ticket-prefixes` file that is NAMED but missing or malformed (a
-line that is not one uppercase 2-5 letter token) is a named refusal, never a
-silent skip that would release without the tracker prefixes the organisation
-chose.
+not a hole. This repository's own release workflow *does* supply it (REL-021):
+because ops-engine is a LangeVC repository, `.forgejo/workflows/forgejo-release.yml`
+reads LangeVC's tracker prefixes (`LVC`, `OME`, `CORE`, `LNF`, `DST`, `REL`,
+`CFG`, `FFR`) from the committed `.ops.yaml` and this repository's own notes
+therefore stay gated. A layover declares its own prefixes in its own `.ops.yaml`
+(`tracker_prefixes: [ ... ]`) and never edits this workflow; the vocabulary
+always arrives from the config layer, never from the template. A
+`--ticket-prefixes` file that is NAMED but missing or malformed (a line that is
+not one uppercase 2-5 letter token) is a named refusal, never a silent skip that
+would release without the tracker prefixes the organisation chose.
 
 `--forbid-file` is optional and supplies organisation-supplied *withheld*
 vocabulary terms, one per line — product names and project codenames that must
@@ -895,6 +895,37 @@ The gate is **stdlib-only** and never imports `ops_engine` (REL-006): the bare
 release runner carries neither yaml nor pydantic, so nothing outside the
 standard library may execute there, and the gate's own tests likewise import
 nothing outside the standard library.
+
+## Tracker prefixes are organisation vocabulary (REL-021)
+
+A tracker prefix (`LVC`, `OME`, `CORE`, `LNF`, `DST`, `REL`, `CFG`, `FFR` for
+LangeVC) is organisation knowledge: a template cannot know one adopter's
+tracker, exactly as ADP-010 established for organisation names and ADP-014 for
+forge hosts. The release workflow once wrote LangeVC's prefix list as a literal
+— `printf '%s\n' LVC OME CORE LNF DST REL CFG FFR > "$PREFIXES_FILE"` — into the
+file every adopter inherits. That is the same Layer-1 violation the other
+categories were externalised to fix, and it is now closed two ways:
+
+- **The workflow reads the config layer.** `.forgejo/workflows/forgejo-release.yml`
+  no longer names any prefix. Its audience-gate step reads a `tracker_prefixes`
+  list from the committed `.ops.yaml` (the same Layer-3 file ADP-008 moved the
+  release destinations into) and writes it one-prefix-per-line for the audience
+  gate. With no `tracker_prefixes` declared — the correct template default, and
+  the audience gate's own "refuse nothing" case — the file is empty and nothing
+  is refused. A layover declares its own prefixes in its own `.ops.yaml`.
+- **The boundary gate refuses a reintroduction.** `scripts/ci_variable_boundary_gate.py`
+  gains `--ticket-prefixes PATH`, the same `--flag PATH` file route that supplies
+  `--org-vocab`, `--ci-env` and `--dest-hosts` — no fourth vocabulary channel was
+  invented. Armed with the organisation's prefixes, the workflow scan refuses a
+  bare literal prefix token as `TrackerPrefixBoundaryError`, naming the file,
+  the line, and the token. A prefix that is part of a ticket reference
+  (`REL-021`), a variable (`$REL`, `${REL}`), or member access is not a literal
+  and is not refused. With no `--ticket-prefixes` file the gate refuses nothing,
+  unchanged.
+
+The route is one and the default is unchanged: the vocabulary arrives from the
+config layer, never shipped in the template, and an absent vocabulary is the
+proven "refuse nothing" case — not a hole.
 
 ## Test enforcement
 
