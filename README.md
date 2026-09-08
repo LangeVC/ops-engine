@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-3.4.0-blue.svg" alt="Version 3.4.0">
+  <img src="https://img.shields.io/badge/version-3.4.1-blue.svg" alt="Version 3.4.1">
   <img src="https://img.shields.io/badge/python-3.10+-blue.svg" alt="Python 3.10+">
   <img src="https://img.shields.io/badge/License-Apache%202.0-green.svg" alt="License: Apache 2.0">
   <img src="https://img.shields.io/badge/architecture-config--driven-orange.svg" alt="Architecture: Config-Driven">
