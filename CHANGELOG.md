@@ -1,5 +1,48 @@
 # Changelog
 
+## 3.4.1
+
+A release tag on a mirror could point at the wrong commit, and the release notes gate
+carried one organisation's tracker vocabulary inside the template.
+
+### The mirror tag follows the release, not the branch
+
+Publishing created the mirror's tag through the forge API. When that tag did not yet exist
+on the mirror, the forge created it at whatever the mirror's default branch happened to
+point at — so the tag could name a version whose source said something else. Installing
+from such a tag delivered the older code under the newer name.
+
+The canonical tag is now pushed to the mirror before the release is created, so the forge
+finds it and uses its real target. After publishing, both tags are resolved to their
+commits and compared; a mismatch refuses the release by name and reports both.
+
+**If you install this package by tag from a mirror, re-resolve your pin.** A tag fetched
+before this version may not point where its name suggests.
+
+### The release notes gate learns your tracker, not ours
+
+The gate that keeps internal ticket references out of a published release read its list of
+tracker prefixes from a line written into the workflow itself. Those prefixes belonged to
+one organisation, so an adopter inherited a gate tuned to somebody else's issue tracker.
+
+The prefixes now come from the repository's own configuration, the same place the
+publication destinations already come from. Declare `tracker_prefixes` to have your
+references refused; declare nothing and nothing is refused, which is the right default for
+a project that does not use ticket prefixes at all.
+
+### Pre-release tags are understood, and what they mean is written down
+
+The release title check knew only `vX.Y.Z`, so a release candidate tag was refused by a
+gate that could not read it. It now accepts `vX.Y.Z-rcN` and still refuses a marker
+without a number, a trailing hyphen, an uppercase variant and anything else that only
+looks like one.
+
+What a pre-release means is answered rather than left to the reader. It publishes to every
+configured destination, mirrors included, because a mirror consumer deserves the same
+pinned artefact. It is **not** flagged as a pre-release on the forge — the capability
+exists in the adapters but nothing sets or reads it — and a pinned dependency should not
+point at one.
+
 ## 3.4.0
 
 Publishing a release to several forges no longer requires one credential to serve them
