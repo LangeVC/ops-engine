@@ -436,6 +436,7 @@ jobs:
           "$ENGINE_VENV/bin/python" - <<'PUBLISH_PY'
           import asyncio
           import os
+          import subprocess
           import sys
 
           from ops_engine.adapters.factory import Credential, adapters_for
@@ -509,7 +510,97 @@ jobs:
               }
           )
 
+          # REL-020 — the mirror tag is pushed from the CANONICAL tag object, never
+          # invented by the release API. https://github.com's POST /releases takes a
+          # ``tag_name`` and, when that tag does not yet exist on the mirror, CREATES
+          # it at the mirror's DEFAULT-BRANCH HEAD at that moment — so the mirror tag
+          # points at a commit this repository never tagged. v3.4.0 shipped exactly
+          # that: the mirror tag landed on the commit whose pyproject read 3.3.0,
+          # and a real ``pip install`` from the mirror tag delivered 3.4.0's name and
+          # 3.3.0's code. mirror.yml force-pushes the canonical tag ref too, but it
+          # runs on its own schedule and the release step must not race it.
+          #
+          # The two git operations below run with subprocess so no forge API is
+          # involved in where the tag points. They are:
+          #   1. push the canonical tag ref, verbatim, onto the mirror (the same
+          #      ``+refs/tags/x:refs/tags/x`` mirror.yml performs) so that the API's
+          #      create_release below finds the tag ALREADY PRESENT and uses its real
+          #      target — the API never gets the chance to invent one.
+          #   2. after publication, peel the tag to its commit on BOTH forges and
+          #      refuse by name when they differ.
+          mirror_dest = next(
+              (d for d in destinations if d.forge.strip().lower() == "github"), None
+          )
+
+          def _mirror_remote(github_repo: str) -> str:
+              """The github destination's push remote, built from the repo value the
+              config layer resolved plus the mirror credential. github.com is the
+              forge the mirror belongs to; the repository itself is never a literal
+              (its value came from load_ops_yaml above)."""
+              return f"https://x-access-token:{os.environ['GH_MIRROR_TOKEN']}@github.com/{github_repo}.git"
+
+          def _canonical_tag_target() -> str:
+              """The commit the canonical tag peels to (``refs/tags/<tag>^{}``). The
+              peel normalises annotated and lightweight tags onto their commit so the
+              comparison below is always commit-vs-commit."""
+              return subprocess.check_output(
+                  ["git", "rev-parse", f"refs/tags/{tag_name}^{{}}"],
+                  text=True,
+              ).strip()
+
+          def _push_mirror_tag(remote: str) -> None:
+              """Push the canonical tag ref verbatim onto the mirror, before the API
+              creates a release there. A missing mirror tag would otherwise make the
+              API invent one at the mirror's default-branch head."""
+              subprocess.run(
+                  [
+                      "git", "push", "--force", remote,
+                      f"refs/tags/{tag_name}:refs/tags/{tag_name}",
+                  ],
+                  check=True,
+              )
+
+          def _verify_mirror_tag(tag_name: str, canonical: str, remote: str) -> None:
+              """Compare the peeled tag target on both forges and refuse by name when
+              they differ. ``git ls-remote <remote> refs/tags/<tag>^{}`` returns the
+              peeled commit SHA for an annotated mirror tag; for a lightweight mirror
+              tag the peeled form emits no line and the bare ref IS the commit. Query
+              both and prefer the peeled form so the compare is always commit-vs-commit
+              against the canonical ``rev-parse ...^{}``."""
+              ls = subprocess.run(
+                  [
+                      "git", "ls-remote", remote,
+                      f"refs/tags/{tag_name}",
+                      f"refs/tags/{tag_name}^{{}}",
+                  ],
+                  capture_output=True,
+                  text=True,
+              )
+              targets = {}
+              for line in ls.stdout.splitlines():
+                  sha, _, ref = line.partition("\t")
+                  targets[ref] = sha.strip()
+              mirror_target = targets.get(f"refs/tags/{tag_name}^{{}}") or targets.get(
+                  f"refs/tags/{tag_name}", ""
+              )
+              if not mirror_target or mirror_target != canonical:
+                  print(
+                      f"::error::MirrorTagDriftError: tag {tag_name} targets "
+                      f"{canonical} on the canonical forge but "
+                      f"{mirror_target or '(absent)'} on the mirror "
+                      f"{remote}; the mirror tag does not mirror the "
+                      f"canonical tag. Refusing the release.",
+                      file=sys.stderr,
+                  )
+                  sys.exit(1)
+              print(f"mirror tag verified: {tag_name} -> {mirror_target}")
+
           async def main():
+              # REL-020 — push the canonical tag object onto the mirror BEFORE the
+              # engine publishes, so the github create_release cannot invent a tag.
+              if mirror_dest is not None:
+                  _push_mirror_tag(_mirror_remote(mirror_dest.repo))
+
               # ADP-011 — the factory serves the credential each destination's
               # forge declares, so the two forges' distinct tokens are mapped
               # in one call. A destination whose forge has no credential here
@@ -552,6 +643,15 @@ jobs:
                       "published to every destination; failed: " + failed
                   )
                   sys.exit(1)
+
+              # REL-020 — after publication, refuse by name if the mirror tag does
+              # not target the same commit the canonical tag does.
+              if mirror_dest is not None:
+                  _verify_mirror_tag(
+                      tag_name,
+                      _canonical_tag_target(),
+                      _mirror_remote(mirror_dest.repo),
+                  )
 
           asyncio.run(main())
           PUBLISH_PY
