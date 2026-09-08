@@ -20,3 +20,12 @@ destinations:
 # declares none gets no tracker check, which is the correct default rather than a
 # hole — the same shape an absent forge host and an absent layover register take.
 tracker_prefixes: [LVC, OME, CORE, LNF, DST, REL, CFG, FFR, ADP]
+
+# The organisation's canonical forge host (REL-023). The release gate reads this
+# from here and feeds it to the destination/host boundary gate as the org-host
+# vocabulary, so the gate refuses a hardcoded canonical host rather than a
+# runner-internal container address (github.server_url resolves to
+# http://forgejo:3000 on the runner, which is not the organisation's forge). A
+# dotless entry is refused by the gate by name; nothing here is restated as a
+# literal in .forgejo/.
+forge_hosts: [git.langevc.com]

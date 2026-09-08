@@ -137,6 +137,13 @@ _VARS_REF = re.compile(r"\bvars\.[A-Za-z_][A-Za-z0-9_]*")
 _TRACKER_PREFIX_RE = re.compile(r"(?<![\w${}.-])(?P<prefix>[A-Z]{2,5})(?![\w-])")
 _TRACKER_PREFIX_FORM = re.compile(r"[A-Z]{2,5}")
 
+# A forge host must carry a dot: a hostname names a domain. A dotless label is a
+# forge type (`forgejo`), a header prefix (`x-forgejo-event`) or a package name
+# before it is anybody's hostname, and handing the gate such a label makes it
+# refuse an ordinary word everywhere in src/ (REL-023). The register boundary
+# refuses a dotless entry by name, before any scan runs.
+_HOST_HAS_DOT = re.compile(r"\.")
+
 # A literal ``HOST/OWNER/REPO`` destination path, optionally ``.git``-suffixed,
 # as it is written in a push remote or a URL that targets a forge repository.
 _DEST_PATH = re.compile(
@@ -419,6 +426,32 @@ def _load_ticket_prefixes(path):
     return prefixes
 
 
+def _load_dest_hosts(path):
+    """Read organisation forge hosts, one per line, refusing a dotless label.
+
+    REL-023 — a forge host names a domain, so it must carry a dot. A dotless
+    label (`forgejo`, `localhost`) is a forge type, a header prefix or a package
+    name before it is anybody's hostname, and an internal container address must
+    never silently become an organisation's forge. Refusing a dotless entry here,
+    at the register boundary and before the scan runs, is what turns that wrong
+    input into a named refusal instead of a false rule the gate would apply
+    everywhere."""
+    hosts = []
+    for lineno, line in enumerate(Path(path).read_text(encoding="utf-8").splitlines(), start=1):
+        term = line.strip()
+        if not term:
+            continue
+        if not _HOST_HAS_DOT.search(term):
+            raise ValueError(
+                "line %d is not a forge host: %r carries no dot, so it is a forge "
+                "type, a header prefix or a package name rather than a hostname; "
+                "an internal address must not silently become an organisation's "
+                "forge" % (lineno, term)
+            )
+        hosts.append(term)
+    return hosts
+
+
 def _docstring_value_ids(tree):
     """Ids of the string ``Constant`` nodes that are a docstring's value.
 
@@ -536,7 +569,11 @@ def _run_python_scan(args):
     """Scan every ``.py`` below ``--py-dir`` for a Layer-1 boundary bypass."""
     org_terms = _load_vocab(args.org_vocab) if args.org_vocab else []
     ci_env_vars = set(_load_vocab(args.ci_env)) if args.ci_env else set()
-    dest_hosts = _load_vocab(args.dest_hosts) if args.dest_hosts else []
+    try:
+        dest_hosts = _load_dest_hosts(args.dest_hosts) if args.dest_hosts else []
+    except ValueError as exc:
+        sys.stderr.write("ForgeHostRegisterError: %s\n" % exc)
+        return 2
     targets = sorted(p for p in Path(args.py_dir).rglob("*.py") if p.is_file())
     if not targets:
         print(
@@ -699,7 +736,23 @@ def main(argv=None):
 
     dest_hosts = set(_DESTINATION_HOSTS)
     if args.dest_hosts is not None:
-        dest_hosts.update(_load_vocab(args.dest_hosts))
+        try:
+            dest_hosts.update(_load_dest_hosts(args.dest_hosts))
+        except FileNotFoundError:
+            print(
+                "ci_variable_boundary_gate: ERROR: --dest-hosts %r does not "
+                "resolve to a file. A host file that is named must be present."
+                % args.dest_hosts,
+                file=sys.stderr,
+            )
+            return 2
+        except ValueError as exc:
+            print(
+                "ForgeHostRegisterError: --dest-hosts %r is malformed: %s"
+                % (args.dest_hosts, exc),
+                file=sys.stderr,
+            )
+            return 2
 
     ticket_prefixes = set()
     if args.ticket_prefixes is not None:

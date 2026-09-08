@@ -921,11 +921,23 @@ def test_gate_is_wired_to_fail_the_build_in_ci():
     before the release step can publish anywhere."""
     text = _release_gate_text()
     assert "ci_variable_boundary_gate.py --dir .forgejo" in text
-    # The org forge host is derived from github.server_url, never a literal: the
-    # workflow names no organisation host, and the gate ships none.
+    # REL-023 — the org forge host comes from the config layer (.ops.yaml's
+    # forge_hosts), never from github.server_url and never as a literal: the
+    # workflow names no organisation host and derives none from the runner.
     assert "--dest-hosts" in text
-    assert "github.server_url" in text
+    assert "forge_hosts" in text
+    assert ".ops.yaml" in text
     assert "git.langevc.com" not in text
+    assert "${{ github.server_url }}" not in text
+
+
+def test_the_release_workflow_gates_before_it_releases():
+    """REL-023 — the release job declares `needs: gate`, so a red gate skips
+    publication rather than running beside it (the gate is a gate)."""
+    text = (WORKFLOW_DIR / "forgejo-release.yml").read_text(encoding="utf-8")
+    assert "needs: gate" in text
+    assert "ci_variable_boundary_gate.py" in text
+    assert "forge_hosts" in text
 
 
 def test_gate_scans_scripts_for_the_org_host_shape():
@@ -982,84 +994,122 @@ def test_gate_runs_without_site_packages():
     assert re.search(r"^import\s+ops_engine\b", GATE_CONTENT, re.MULTILINE) is None
 
 
-def _bare_host(server_url: str) -> str:
-    """The exact POSIX-sh derivation the wired release-gate step performs to
-    reduce github.server_url to a bare host: strip the scheme, then any path,
-    query or fragment separator, then an optional :port."""
-    host = server_url
-    if "://" in host:
-        host = host.split("://", 1)[1]
-    for sep in ("/", "?", "#"):
-        host = host.split(sep, 1)[0]
-    if ":" in host:
-        host = host.split(":", 1)[0]
-    return host
+def _forge_hosts_file(tmp, hosts, name="forge-hosts.txt"):
+    return _dest_hosts_file(tmp, hosts, name)
 
 
-def test_bare_host_derivation_reduces_every_server_url_shape():
-    """The wired step derives a BARE host, so a port, a trailing slash, a query
-    or a fragment all reduce to the plain host a reintroduced org literal
-    carries — and an empty/unparseable value reduces to the empty string the
-    step refuses by name."""
-    assert _bare_host("https://git.langevc.com") == "git.langevc.com"
-    assert _bare_host("https://git.langevc.com:9443") == "git.langevc.com"
-    assert _bare_host("https://git.langevc.com/") == "git.langevc.com"
-    assert _bare_host("https://git.langevc.com?x=1") == "git.langevc.com"
-    assert _bare_host("https://git.langevc.com#frag") == "git.langevc.com"
-    assert _bare_host("") == ""
+def test_dotless_forge_host_is_refused_by_name_red_proof():
+    """REL-023 red proof — a host register entry with no dot ('forgejo') is
+    refused by name at the register boundary, before the scan runs, so an
+    internal container label can never become an organisation's forge."""
+    with tempfile.TemporaryDirectory() as tmp:
+        hosts = _dest_hosts_file(tmp, ["forgejo"])
+        path = _write_intmp(tmp, PERMITTED_SECRET_EVENT)
+        r = _scan_file_with_dest_hosts(path, hosts)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "ForgeHostRegisterError" in r.stderr
+    assert "forgejo" in r.stderr
+    assert "no dot" in r.stderr
 
 
-def test_release_gate_derives_a_bare_host_not_a_scheme_stripped_remainder():
-    """The wired step must strip port/path/query/fragment, not only the scheme:
-    `${SERVER_URL#*://}` alone lets the org-host refusal silently vanish, so the
-    workflow must reduce to a bare host and refuse an empty result by name."""
-    text = _release_gate_text()
-    assert "SERVER_HOST=" in text
-    assert "${SERVER_URL#*://}" in text
-    assert "${SERVER_HOST%%[/?#]*}" in text
-    assert "${SERVER_HOST%%:*}" in text
-    assert "exit 1" in text
+def test_dotless_forge_host_is_refused_in_the_py_scan_too():
+    """The same dotless-entry refusal holds on the --py-dir side: the host file
+    is validated before any src/ scan, so 'forgejo' never reaches the Layer-1
+    scan as an org host."""
+    with tempfile.TemporaryDirectory() as tmp:
+        hosts = _dest_hosts_file(tmp, ["forgejo"])
+        r = subprocess.run(
+            [sys.executable, str(GATE), "--py-dir", str(REPO_ROOT / "src"),
+             "--dest-hosts", str(hosts)],
+            capture_output=True,
+            text=True,
+        )
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "ForgeHostRegisterError" in r.stderr
 
 
-def _derived_org_forge_literal(host: str) -> str:
-    return (
-        'name: X\non: push\njobs:\n  y:\n    runs-on: ubuntu-latest\n'
-        '    steps:\n      - name: a\n'
-        '        run: |\n          git push "https://x-access-token:${TOKEN}@'
-        + host + '/LangeVC/ops-engine.git"\n'
+def test_dotted_forge_host_passes_the_register_green_proof():
+    """REL-023 green proof — a register carrying the real host
+    'git.langevc.com' passes the boundary and the src/ scan exits 0."""
+    with tempfile.TemporaryDirectory() as tmp:
+        hosts = _dest_hosts_file(tmp, ["git.langevc.com"])
+        path = _write_intmp(tmp, PERMITTED_SECRET_EVENT)
+        r = _scan_file_with_dest_hosts(path, hosts)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "PASS" in r.stdout
+
+
+def _release_gate_forge_hosts_expander() -> str:
+    """The stdlib python release-gate.yml runs to read forge_hosts from .ops.yaml.
+
+    The workflow writes this heredoc under ``<<'FORGE_HOSTS_PY'``; extract and
+    dedent it the same way CI decodes a YAML block-scalar, so the test exercises
+    the exact bytes the runner renders."""
+    lines = _release_gate_text().splitlines()
+    start = next(
+        i for i, ln in enumerate(lines)
+        if "python3 - \"$DEST_HOSTS\" <<'FORGE_HOSTS_PY'" in ln
     )
+    body = []
+    for ln in lines[start + 1:]:
+        if ln.strip() == "FORGE_HOSTS_PY":
+            break
+        body.append(ln)
+    pad = min((len(ln) - len(ln.lstrip(" ")) for ln in body if ln.strip()))
+    return "\n".join(ln[pad:] if ln.strip() else ln for ln in body)
 
 
-def test_org_forge_is_refused_across_every_derived_server_url_shape():
-    """The org forge literal is refused for a clean AND a ported/pathed/queried
-    server_url, because the deduced bare host derives to the plain host the
-    reintroduced literal carries. Only the BARE host from _bare_host is fed to
-    --dest-hosts, so the org-host refusal never vanishes under a non-plain
-    server_url."""
-    for server_url in (
-        "https://git.langevc.com",
-        "https://git.langevc.com:9443",
-        "https://git.langevc.com/",
-        "https://git.langevc.com?x=1",
-    ):
-        bare = _bare_host(server_url)
-        assert bare == "git.langevc.com", server_url
-        with tempfile.TemporaryDirectory() as tmp:
-            hosts = _dest_hosts_file(tmp, [bare])
-            path = _write_intmp(tmp, _derived_org_forge_literal(bare), "org.yml")
-            r = _scan_file_with_dest_hosts(path, hosts)
-        assert r.returncode == 1, (server_url, r.stdout + r.stderr)
-        assert "DestinationBoundaryError" in r.stderr
+def test_host_reaches_the_gate_from_config_not_server_url():
+    """REL-023 criterion 1 — the host reaches the gate from .ops.yaml's
+    forge_hosts, not from github.server_url. The runner's server_url being the
+    internal container address no longer matters: the gate is armed with
+    git.langevc.com from the config layer, so the src/ scan passes (this engine
+    carries no org host as a live value), where the old derivation fed it
+    'forgejo' and failed on the forge type and x-forgejo-* headers."""
+    assert "${{ github.server_url }}" not in _release_gate_text()
+
+    expander = _release_gate_forge_hosts_expander()
+    with tempfile.TemporaryDirectory() as tmp:
+        hosts_path = Path(tmp) / "hosts.txt"
+        r = subprocess.run(
+            [sys.executable, "-c", expander, str(hosts_path)],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        assert r.returncode == 0, r.stderr
+        assert hosts_path.read_text(encoding="utf-8").strip() == "git.langevc.com"
+        scan = subprocess.run(
+            [sys.executable, str(GATE), "--py-dir", str(REPO_ROOT / "src"),
+             "--dest-hosts", str(hosts_path)],
+            capture_output=True,
+            text=True,
+        )
+    assert scan.returncode == 0, scan.stdout + scan.stderr
+    assert "PASS" in scan.stdout
 
 
-def test_empty_server_url_is_refused_not_a_silent_pass():
-    """An empty/unparseable server_url derives no bare host; the wired step must
-    refuse by name (never run the destination gate with an empty host set, which
-    would silently drop the org-host check it exists to run)."""
-    assert _bare_host("") == ""
-    assert _bare_host("https://") == ""
-    # The workflow names the refusal for an empty derived host.
-    assert "ServerUrlBoundaryError" in _release_gate_text()
+def test_a_reintroduced_org_forge_literal_is_refused_with_config_host():
+    """The config-layer host genuinely guards: a reintroduced git.langevc.com
+    literal in src/ is refused when the host comes from .ops.yaml's forge_hosts."""
+    expander = _release_gate_forge_hosts_expander()
+    with tempfile.TemporaryDirectory() as tmp:
+        hosts_path = Path(tmp) / "hosts.txt"
+        subprocess.run(
+            [sys.executable, "-c", expander, str(hosts_path)],
+            cwd=REPO_ROOT, capture_output=True, text=True,
+        )
+        py_dir = Path(tmp) / "py"
+        py_dir.mkdir()
+        _write_py_intmp(py_dir, 'API = "https://git.langevc.com/api/v1"\n', "m.py")
+        r = subprocess.run(
+            [sys.executable, str(GATE), "--py-dir", str(py_dir),
+             "--dest-hosts", str(hosts_path)],
+            capture_output=True, text=True,
+        )
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "Layer1BoundaryError" in r.stderr
+    assert "git.langevc.com" in r.stderr
 
 
 def test_contract_documents_the_permitted_set():
@@ -1076,6 +1126,10 @@ def test_contract_documents_the_permitted_set():
     assert "ci_variable_boundary_gate.py" in contract
     assert "--dest-hosts" in contract
     assert "universal" in contract
+    assert "forge_hosts" in contract
+    assert "## Release gate and release relationship (REL-023)" in contract
+    assert "A red release gate blocks the release" in contract
+    assert "needs: gate" in contract
 
 
 # --- REL-021: a tracker prefix is organisation vocabulary, not template data. ---
