@@ -20,12 +20,23 @@ jobs:
           fetch-depth: 0
 
       # REL-004 — the release title is a GATE, not an agreement. The name must
-      # be exactly "Ops Engine vX.Y.Z"; a tag whose rendered title does not
-      # conform is refused here with a named error, before any release object
-      # exists on either forge. The gate runs before any release object; the
-      # GitHub release is a byte-for-byte derivative of this one, published from
-      # this same job's workspace below, so a title that fails here can never
-      # produce a GitHub release either.
+      # be exactly "Ops Engine vX.Y.Z", or the taught prerelease form
+      # "Ops Engine vX.Y.Z-rcN"; a tag whose rendered title does not conform is
+      # refused here with a named error, before any release object exists on
+      # either forge. The gate runs before any release object; the GitHub
+      # release is a byte-for-byte derivative of this one, published from this
+      # same job's workspace below, so a title that fails here can never produce
+      # a GitHub release either.
+      #
+      # REL-022 — the gate deliberately knew only the stable form, so it refused
+      # an rc title it did not understand. It now knows ONE additional form, the
+      # organisation's decided prerelease shape: a lowercase "rc" immediately
+      # followed by at least one digit (-rc1). The refusal it already gave a
+      # malformed prerelease was correct and survives: "-rc" with no number,
+      # a trailing bare "-", an uppercase "-RC1", and any other suffix such as
+      # "-beta" still do not match and are still refused by name. This file
+      # commits to the pattern; CONTRACT.md section "Release titles and
+      # pre-releases (REL-022)" records the decision underneath it.
       - name: Gate the release title
         id: title
         env:
@@ -37,14 +48,16 @@ jobs:
           import re
           import sys
 
-          NAME_RE = re.compile(r"^Ops Engine v[0-9]+\.[0-9]+\.[0-9]+$")
+          NAME_RE = re.compile(
+              r"^Ops Engine v[0-9]+\.[0-9]+\.[0-9]+(?:-rc[0-9]+)?$"
+          )
           name = sys.argv[1]
           if not NAME_RE.match(name):
               sys.stderr.write(
                   "ReleaseTitleError: release name %r does not match the "
-                  "required convention ^Ops Engine v[0-9]+\\.[0-9]+\\.[0-9]+$. "
-                  "Refusing before any release object exists on either forge.\n"
-                  % name
+                  "required convention ^Ops Engine v[0-9]+\\.[0-9]+\\.[0-9]+$ "
+                  "or its prerelease form ...-rc[0-9]+$. Refusing before any "
+                  "release object exists on either forge.\n" % name
               )
               sys.exit(2)
           sys.stdout.write("title gate: %r conforms\n" % name)
