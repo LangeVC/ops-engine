@@ -13,3 +13,10 @@ destinations:
     repo: LangeVC/ops-engine
     role: release
     visibility: public
+
+# The organisation's tracker prefixes (REL-021). The release workflow reads them
+# from here and hands them to the audience gate, so no workflow carries an
+# organisation's vocabulary as a literal. An adopter declares their own; one that
+# declares none gets no tracker check, which is the correct default rather than a
+# hole — the same shape an absent forge host and an absent layover register take.
+tracker_prefixes: [LVC, OME, CORE, LNF, DST, REL, CFG, FFR, ADP]
