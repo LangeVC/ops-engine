@@ -1,5 +1,34 @@
 # Changelog
 
+## 3.4.2
+
+The check that guards a release could fail while the release published anyway, and the
+host it compared against was never the one it was meant to compare against.
+
+### A failing gate now stops the release
+
+The gate and the publication ran as separate workflows on overlapping triggers, so they
+could reach opposite conclusions without anything noticing. Two releases went out while
+the gate that was supposed to guard them had failed. Publication now depends on the gate:
+if it fails, nothing is published.
+
+### The forge host comes from configuration, not from the runner
+
+The gate refuses a canonical forge address written into a workflow instead of taken from
+configuration. To do that it needs to know which host is yours — and it derived that from
+the CI system's own server address, which on a self-hosted runner is an internal container
+name rather than your forge.
+
+The effect was worse than useless: a single-label name such as `forgejo` matches ordinary
+code — a forge type, an HTTP header prefix, a package name — so the check refused the
+project's own source while never once comparing against the real host. It now reads
+`forge_hosts` from the repository's configuration, alongside the destinations and tracker
+prefixes already declared there. Declare none and the check reports that it has nothing to
+compare, which is the correct default rather than a hole.
+
+A host register entry without a dot is refused by name. An internal address is not a
+forge, and silently treating one as a forge is how this defect survived two releases.
+
 ## 3.4.1
 
 A release tag on a mirror could point at the wrong commit, and the release notes gate
