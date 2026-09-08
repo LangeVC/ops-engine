@@ -346,6 +346,42 @@ That refusal-first property is what keeps a file the real loader accepts AND
 this scanner does not misread from silently choosing a remote a reviewer never
 saw.
 
+### The mirror tag is pushed, not invented (REL-020)
+
+The GitHub release API's `POST /repos/{repo}/releases` accepts a `tag_name` and,
+when that tag does not yet exist on the mirror, **creates it at the mirror's
+default-branch head at that moment** — the mirror tag then points at a commit
+this repository never tagged. The bug is a race, not a wrong tag: `mirror.yml`
+already force-pushes the canonical tag ref, but it runs on its own schedule and
+the release step can publish first. v3.4.0's mirror tag landed on the commit
+whose `pyproject` read 3.3.0; a real `pip install` from that tag delivered
+3.4.0's release name and 3.3.0's code.
+
+The release workflow closes the race itself, in the `Create Release` step of
+`.forgejo/workflows/forgejo-release.yml`, with two real-git operations (run via
+`subprocess`, so no forge API decides where the tag points):
+
+1. **Push first.** Before the engine publishes, the canonical tag ref
+   (`refs/tags/<tag>`, always present because the checkout uses `fetch-depth: 0`)
+   is pushed verbatim onto the mirror with `git push --force <remote>
+   refs/tags/<tag>:refs/tags/<tag>` — the same ref the mirror workflow pushes.
+   The API's `create_release` then finds the tag already present and uses its
+   real target; it never gets the chance to invent one.
+2. **Verify after.** Once publication completes, the tag is peeled to its commit
+   on *both* forges — `git rev-parse refs/tags/<tag>^{}` on the canonical side,
+   and `git ls-remote <mirror> refs/tags/<tag>` plus `refs/tags/<tag>^{}` on the
+   mirror (the peeled form names the commit for an annotated tag; for a
+   lightweight tag the bare ref already is the commit). A mismatch is refused by
+   name as `MirrorTagDriftError` with a non-zero exit, so a mirror tag that does
+   not target the canonical commit fails the run instead of shipping a release
+   whose tag resolves to different code than its version claims.
+
+The mirror destination the push and verify reach is the `github` entry of the
+committed `.ops.yaml`, resolved through `load_ops_yaml` — the same config layer
+ADP-008 moved the release destination into. `github.com` appears only as the
+forge host; the repository value never recurs as a literal, so the destination
+boundary (ADP-009) still refuses nothing and still passes.
+
 ### Destination boundary (ADP-009)
 
 The destination must come from the config layer; this section fixes *where a

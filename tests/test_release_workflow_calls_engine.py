@@ -19,6 +19,9 @@ from config (not a literal), and that the literal-laden publication path is
 gone.
 """
 
+import subprocess
+import sys
+import tempfile
 import textwrap
 from pathlib import Path
 
@@ -185,3 +188,166 @@ def test_config_from_the_workflow_shape_resolves_two_destinations():
         ("forgejo", "langevc/ops-engine"),
         ("github", "LangeVC/ops-engine"),
     ]
+
+
+# --- REL-020: the mirror tag is pushed from the canonical tag object, not ----
+# --- invented by the release API. -------------------------------------------
+
+
+def _create_release_run_block() -> str:
+    """The Create Release step's ``run`` block, rendered from the YAML exactly as
+    the runner decodes it (the block scalar is the run text)."""
+    wf = yaml.safe_load(FORGEJO_RELEASE.read_text(encoding="utf-8"))
+    for job in wf["jobs"].values():
+        for step in job["steps"]:
+            if step.get("name") == "Create Release":
+                return step["run"]
+    raise AssertionError("Create Release step not found")
+
+
+def _extract_toplevel_def(name: str) -> str:
+    """Extract one top-level (``def``/``async def``) function body from the run
+    block's embedded Python, de-indented and self-contained enough to run."""
+    lines = _create_release_run_block().splitlines()
+    start = end = None
+    for i, line in enumerate(lines):
+        if "<<'PUBLISH_PY'" in line:
+            start = i
+        if start is not None and line.strip() == "PUBLISH_PY" and i > start:
+            end = i
+            break
+    assert start is not None and end is not None, "PUBLISH_PY block not found"
+    body = textwrap.dedent("\n".join(lines[start + 1 : end]) + "\n")
+    body_lines = body.splitlines()
+    # locate the named def and copy through to the next top-level def.
+    begin = None
+    for i, line in enumerate(body_lines):
+        if line.startswith(f"def {name}("):
+            begin = i
+            break
+    assert begin is not None, f"def {name} not found in PUBLISH_PY"
+    snippet = [body_lines[begin]]
+    for line in body_lines[begin + 1 :]:
+        if line.startswith("def ") or line.startswith("async def "):
+            break
+        snippet.append(line)
+    return "\n".join(snippet) + "\n"
+
+
+def _run_verify(tag, canonical_sha, remote_path):
+    """Run the extracted ``_verify_mirror_tag`` against a LOCAL bare mirror repo,
+    exercising the exact git commands the workflow runs."""
+    fn = _extract_toplevel_def("_verify_mirror_tag")
+    driver = (
+        "import subprocess, sys\n"
+        "import sys as _sys\n"
+        + fn
+        + f"_verify_mirror_tag({tag!r}, {canonical_sha!r}, {remote_path!r})\n"
+    )
+    return subprocess.run(
+        [sys.executable, "-c", driver], capture_output=True, text=True
+    )
+
+
+def test_rel020_publishes_from_peeled_canonical_tag_object_never_the_api():
+    """The tag the mirror receives is pushed from ``refs/tags/<tag>`` by real git
+    (``git push --force <remote> refs/tags/<tag>:refs/tags/<tag>``, the exact
+    verbatim mirror mirror.yml performs), and that push runs BEFORE the engine's
+    ``publish_release`` (whose github create_release would otherwise invent the
+    tag at the mirror's default-branch head). This is the mechanism, asserted on
+    the rendered run block, not on a comment that claims it."""
+    block = _publish_block()
+    assert "refs/tags/{tag_name}:refs/tags/{tag_name}" in block
+    assert '"git", "push", "--force", remote' in block
+    # The push is invoked before the publish in main(); the verify after.
+    publish_idx = block.index("publish_release(")
+    assert block.index("_push_mirror_tag(_mirror_remote") < publish_idx
+    assert block.rindex("_verify_mirror_tag(") > publish_idx
+
+
+def test_rel020_mirror_tag_verify_passes_when_targets_match():
+    """Green proof: the extracted verify, run against a matching local mirror tag,
+    exits zero and reports the target."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        canonical = root / "canonical"
+        _git_init_repo(canonical)
+        commit_a = _commit(canonical, "release content")
+        _git(canonical, "tag", "vtest")
+        mirror = _bare_repo(root / "mirror.git")
+        _git(canonical, "push", str(mirror), "refs/tags/vtest:refs/tags/vtest")
+        r = _run_verify("vtest", commit_a, str(mirror))
+    assert r.returncode == 0, r.stderr
+    assert commit_a in r.stdout
+
+
+def test_rel020_mirror_tag_verify_refuses_by_name_when_targets_differ():
+    """Red proof: point the mirror tag elsewhere by hand and show the exact check
+    failing with the named MirrorTagDriftError and a non-zero exit."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        canonical = root / "canonical"
+        _git_init_repo(canonical)
+        commit_a = _commit(canonical, "release content")
+        _git(canonical, "tag", "vtest")
+        mirror = _bare_repo(root / "mirror.git")
+        # The mirror tag is moved ELSEWHERE by hand (as in v3.4.0).
+        commit_b = _commit(canonical, "wrong, older content")
+        _git(canonical, "push", "--force", str(mirror), f"{commit_b}:refs/tags/vtest")
+        r = _run_verify("vtest", commit_a, str(mirror))
+    assert r.returncode != 0, r.stdout
+    assert "MirrorTagDriftError" in r.stderr
+    assert commit_a in r.stderr
+    assert commit_b in r.stderr
+
+
+def test_rel020_run_block_is_sound_as_the_runner_renders_it():
+    """Criterion 3: render the run block from the YAML, prove the shell parses
+    (``bash -n``), and prove the embedded PUBLISH_PY interpreter compiles — the
+    runner renders the block and runs the interpreter, so this is the seam the
+    distinction from a local re-run is guarding."""
+    run_block = _create_release_run_block()
+    with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as fh:
+        fh.write(run_block)
+        script = fh.name
+    r = subprocess.run(["bash", "-n", script], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    # The embedded interpreter is the PUBLISH_PY block; compile it.
+    body = _publish_block()
+    src = tempfile.NamedTemporaryFile(suffix=".py", delete=False)
+    src.write(body.encode("utf-8"))
+    src.close()
+    import py_compile
+
+    py_compile.compile(src.name, doraise=True)
+    Path(src.name).unlink()
+    Path(script).unlink()
+
+
+def _git(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repo), *args], capture_output=True, text=True, check=True
+    ).stdout
+
+
+def _git_init_repo(repo: Path) -> None:
+    repo.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "t@t"], check=True
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.name", "t"], check=True
+    )
+
+
+def _commit(repo: Path, content: str) -> str:
+    (repo / "f.txt").write_text(content, encoding="utf-8")
+    _git(repo, "add", "f.txt")
+    _git(repo, "commit", "-qm", content)
+    return _git(repo, "rev-parse", "HEAD").strip()
+
+
+def _bare_repo(path: Path) -> Path:
+    subprocess.run(["git", "init", "-q", "--bare", str(path)], check=True)
+    return path
