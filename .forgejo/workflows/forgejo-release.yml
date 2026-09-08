@@ -12,7 +12,101 @@ on:
         type: string
 
 jobs:
+  # REL-023 — the gate is a GATE: the release job cannot run unless the boundary
+  # and version gate here passes. The gate job and the release job were two
+  # independent workflows whose verdicts could disagree unnoticed (a red
+  # release-gate shipped v3.4.0 and v3.4.1 anyway). The boundary and version
+  # gates below are the same checks release-gate.yml runs, but placed BEFORE the
+  # release in the same workflow so a red gate skips publication instead of
+  # running beside it. CONTRACT.md section "Release gate and release
+  # relationship (REL-023)" states the decision.
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: https://github.com/actions/checkout@v4
+      - name: Refuse a forge destination outside the config layer
+        run: |
+          set -euo pipefail
+          DEST_HOSTS="$(mktemp)"
+          trap 'rm -f "$DEST_HOSTS"' EXIT
+          python3 - "$DEST_HOSTS" <<'FORGE_HOSTS_PY'
+          import sys
+          from pathlib import Path
+
+          out = sys.argv[1]
+          hosts = []
+          ops = Path(".ops.yaml")
+          if ops.exists():
+              for raw in ops.read_text(encoding="utf-8").splitlines():
+                  line = raw.split("#", 1)[0].strip()
+                  if not line.startswith("forge_hosts:"):
+                      continue
+                  value = line[len("forge_hosts:"):].strip()
+                  if value.startswith("[") and value.endswith("]"):
+                      value = value[1:-1]
+                  for item in value.split(","):
+                      item = item.strip().strip("'\"")
+                      if item:
+                          hosts.append(item)
+          Path(out).write_text("\n".join(hosts) + ("\n" if hosts else ""),
+                               encoding="utf-8")
+          FORGE_HOSTS_PY
+          python3 scripts/ci_variable_boundary_gate.py --dir .forgejo \
+            --dest-hosts "$DEST_HOSTS"
+      - name: Refuse a Layer-1 boundary bypass (org name or CI env read in src)
+        run: |
+          set -euo pipefail
+          ORG_VOCAB="$(mktemp)"
+          CI_ENV_VOCAB="$(mktemp)"
+          DEST_HOSTS="$(mktemp)"
+          trap 'rm -f "$ORG_VOCAB" "$CI_ENV_VOCAB" "$DEST_HOSTS"' EXIT
+          printf '%s\n' Capacium capacium capacium-ops LangeVC langevc lvc-ops \
+            > "$ORG_VOCAB"
+          printf '%s\n' GITHUB_REPOSITORY GITHUB_TOKEN > "$CI_ENV_VOCAB"
+          python3 - "$DEST_HOSTS" <<'FORGE_HOSTS_PY'
+          import sys
+          from pathlib import Path
+
+          out = sys.argv[1]
+          hosts = []
+          ops = Path(".ops.yaml")
+          if ops.exists():
+              for raw in ops.read_text(encoding="utf-8").splitlines():
+                  line = raw.split("#", 1)[0].strip()
+                  if not line.startswith("forge_hosts:"):
+                      continue
+                  value = line[len("forge_hosts:"):].strip()
+                  if value.startswith("[") and value.endswith("]"):
+                      value = value[1:-1]
+                  for item in value.split(","):
+                      item = item.strip().strip("'\"")
+                      if item:
+                          hosts.append(item)
+          Path(out).write_text("\n".join(hosts) + ("\n" if hosts else ""),
+                               encoding="utf-8")
+          FORGE_HOSTS_PY
+          python3 scripts/ci_variable_boundary_gate.py \
+            --py-dir src \
+            --org-vocab "$ORG_VOCAB" \
+            --ci-env "$CI_ENV_VOCAB" \
+            --dest-hosts "$DEST_HOSTS"
+          python3 scripts/ci_variable_boundary_gate.py \
+            --py-dir scripts \
+            --org-vocab "$ORG_VOCAB" \
+            --ci-env "$CI_ENV_VOCAB" \
+            --dest-hosts "$DEST_HOSTS"
+      - name: Check tag against the declared version
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF##refs/tags/}"
+          args=(check-tag "$tag")
+          version="${tag#v}"
+          if [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z.-]+$ ]]; then
+            args+=(--allow-prereleases)
+          fi
+          python3 scripts/version-sync.py "${args[@]}"
   release:
+    needs: gate
     runs-on: ubuntu-latest
     steps:
       - uses: https://github.com/actions/checkout@v4

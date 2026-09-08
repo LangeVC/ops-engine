@@ -454,17 +454,16 @@ The destination-host register the gate refuses against ships only its
 not in that set: an organisation's own forge host is organisation knowledge and
 arrives from the config layer via the `--dest-hosts` file, exactly as the
 organisation names arrive via `--org-vocab` and the CI variable names via
-`--ci-env` on the `src/` side (see the Layer-1 boundary below). With no
-`--dest-hosts` file the gate refuses only the universal five; an organisation
-that declares no forge host gets no check for one. The release gate derives the
-**bare** forge host from `github.server_url` — Forgejo-provided event context
-that names this instance — stripping the scheme and any port, path, query or
-fragment, and feeds it through `--dest-hosts`, so this repository's own
-workflows stay gated on its private forge while neither the engine nor the gate
-nor the workflow names a LangeVC host by value. A `server_url` that does not
-reduce to a bare host (an empty or otherwise unparseable value) makes the
-derivation refuse by name rather than silently disable the destination gate: the
-step fails, never passes with an empty host set.
+`--ci-env`. The organisation's forge host is declared as `forge_hosts` in
+`.ops.yaml` — the config layer where every other piece of organisation
+vocabulary lives — not derived from `github.server_url`, which names the
+runner's own internal container address (`http://forgejo:3000`), not the
+organisation's forge. A `forge_hosts` entry that carries **no dot** is refused
+by name at the register boundary, before any scan runs: a dotless label is a
+forge type, a header prefix or a package name before it is anybody's hostname,
+and an internal address must never silently become an organisation's forge.
+With no `--dest-hosts` file the gate refuses only the universal five; an
+organisation that declares no forge host gets no check for one.
 
 ## Layer-1 boundary (ADP-010)
 
@@ -547,9 +546,22 @@ matches its own ecosystem. The release gate
 engine's `src/` and `scripts/` stay gated the way this repository's release notes
 stay gated:
 the vocabulary arrives from the workflow (the config layer), never from the
-engine. The organisation forge host is derived from `github.server_url` in the
-workflow (the same bare host the destination gate derives), so the Layer-1 gate
-and the destination gate share one vocabulary file shape and one derivation.
+engine. The organisation forge host is read from `.ops.yaml`'s `forge_hosts` in
+the workflow — the same config-layer value the destination gate reads — so the
+Layer-1 gate and the destination gate share one vocabulary file shape and one
+source, and no organisation host is derived from a runner-internal address.
+
+## Release gate and release relationship (REL-023)
+
+A red release gate blocks the release. `forgejo-release.yml` runs the same
+boundary and version gate as `.forgejo/workflows/release-gate.yml` **before** its
+`release` job, and the `release` job declares `needs: gate`, so a gate that fails
+skips publication instead of running beside it. Before REL-023 the two were
+independent workflows on overlapping tag filters: the `gate` job and the
+`release` job could disagree unnoticed, and both v3.4.0 and v3.4.1 shipped with
+the release-gate red while the release job succeeded. That ambiguity is the
+defect; the decision is that a red gate is not a warning — it is the release
+not happening.
 
 ## Layover pin drift (ADP-015)
 
