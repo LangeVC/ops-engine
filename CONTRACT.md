@@ -927,6 +927,54 @@ The route is one and the default is unchanged: the vocabulary arrives from the
 config layer, never shipped in the template, and an absent vocabulary is the
 proven "refuse nothing" case — not a hole.
 
+## Release titles and pre-releases (REL-022)
+
+The release-title gate enforced in `.forgejo/workflows/forgejo-release.yml`
+knew only the stable form, `Ops Engine vX.Y.Z`, and therefore refused an rc
+title it did not understand. This section is the decision underneath the wider
+pattern: what a pre-release means for publication, for how the forge marks it,
+and for whether a layover pin may point at one. Widening the title pattern
+without answering these questions would leave the gate honest about titles and
+silent about everything else, so each of the three questions carries an answer:
+
+**Does a pre-release publish to both forges, or only the canonical one?**
+
+A pre-release publishes to both. The release job is a single build published to
+every destination resolved from the committed `.ops.yaml` — Forgejo first, then
+the GitHub mirror (release-gate.yml's destination boundary names both) — and a
+prerelease title that passes this workflow's gates reaches that same
+single-build path, so it is published to every configured destination, the
+mirror included. The GitHub mirror release is a byte-for-byte derivative of the
+canonical release produced in the same job, and a pre-release is not exempt:
+no step in this repository restricts a prerelease to the canonical forge alone,
+and none should, because a mirror consumer deserves the same pinned artefact as
+a Forgejo consumer.
+
+**Is it marked prerelease on the forge, and does anything downstream read that?**
+
+Not supported. The engine model and both adapters expose a `prerelease` flag
+and forward it to each forge's create-release API, but the release workflow
+never turns that flag on for a prerelease tag: `publish_release` is invoked
+with `prerelease` at its default of `False`, and no code derives `True` from a
+`-rcN` tag. Nothing downstream reads a pre-release flag either. Recording the
+wish that an rc title is visually marked as a pre-release on each forge would
+claim a behaviour the wiring does not yet perform, so this answer is: prerelease
+flagging is not supported today, and nothing downstream reads it. Making the
+flag true for the taught `-rcN` form is a future, separate change — this task
+only taught the title gate the form.
+
+**May a layover pin ever point at one?**
+
+Not supported. A layover's pin is compared against the engine's own declared
+stable version (pin-drift-check reads `version = "d.d.d"` from pyproject.toml)
+by numeric triplet only. A prerelease pin like `@v3.5.0-rc.1` does not parse to
+a numeric triplet in that check, so no current path expresses a rule about
+whether a layover may pin one — the check neither refuses it cleanly nor accepts
+it. The decided policy is that a layover pins a stable release only, so a
+prerelease pin is drift; but putting that policy into the numeric-only drift
+check is not implemented, and is out of scope of this task, which changed only
+the title gate.
+
 ## Test enforcement
 
 `tests/test_public_surface.py` asserts, at CI time, that this declaration and
