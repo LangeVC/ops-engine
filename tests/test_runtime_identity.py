@@ -20,13 +20,37 @@ def test_version_comes_from_importlib_metadata_at_runtime():
     assert runtime_identity().version == metadata.version("ops-engine")
 
 
-def test_hash_is_sha256_of_exact_bytes_the_loader_read(tmp_path):
+def test_ops_yaml_alone_does_not_set_the_config_hash(tmp_path):
+    _reset()
+    (tmp_path / ".ops.yaml").write_bytes(b"{}\n")
+    config_loader.load_ops_yaml(tmp_path)
+    assert runtime_identity().config_sha256 == UNKNOWN
+
+
+def test_later_ops_yaml_load_does_not_overwrite_the_config_hash(tmp_path):
     _reset()
     raw = b"orgs:\r\n  acme: {}\n# trailing bytes \xe2\x9c\x93\n"
-    path = tmp_path / ".ops.yaml"
-    path.write_bytes(raw)
-    config_loader.load_ops_yaml(tmp_path)
+    cfg_path = tmp_path / "config.yml"
+    cfg_path.write_bytes(raw)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".ops.yaml").write_bytes(b"{}\n# override\n")
+    config_loader.load_config_file(cfg_path)
+    config_loader.load_ops_yaml(repo)
     assert runtime_identity().config_sha256 == hashlib.sha256(raw).hexdigest()
+
+
+def test_config_that_fails_to_parse_is_not_recorded(tmp_path):
+    _reset()
+    path = tmp_path / "config.yml"
+    path.write_bytes(b"orgs: [unclosed\n")
+    try:
+        config_loader.load_config_file(path)
+    except Exception:
+        pass
+    else:
+        raise AssertionError("expected a parse failure")
+    assert runtime_identity().config_sha256 == UNKNOWN
 
 
 def test_load_config_file_records_hash_of_read_bytes(tmp_path):

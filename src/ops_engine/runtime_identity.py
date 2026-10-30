@@ -1,8 +1,8 @@
 """Runtime identity of the running engine.
 
 Reports which ops-engine version is running (as ``importlib.metadata`` reports
-it at runtime) and the SHA-256 of the exact config bytes the config loader last
-read. A value that cannot be determined is the named value ``"unknown"``; this
+it at runtime) and the SHA-256 of the exact Layer-2 config.yml bytes the config
+loader loaded. A value that cannot be determined is the named value ``"unknown"``; this
 module never raises.
 """
 
@@ -38,7 +38,7 @@ def _config_sha256() -> str:
 
 
 def runtime_identity() -> RuntimeIdentity:
-    """Return the running version and the hash of the config bytes last read.
+    """Return the running version and the hash of the loaded config.yml bytes.
 
     Each field falls back to ``"unknown"`` independently; this never raises.
     """

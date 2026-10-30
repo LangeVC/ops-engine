@@ -17,13 +17,14 @@ from pydantic import BaseModel, Field, ValidationError
 _DESTINATION_REMOVAL_VERSION = "4.0.0"
 _OPS_YAML_FILENAME = ".ops.yaml"
 
-# SHA-256 (hex) of the exact bytes the loader last read from a config file, or
-# None when no config file has been read yet. Read via ``last_config_sha256``.
+# SHA-256 (hex) of the exact Layer-2 ``config.yml`` bytes the process loaded
+# successfully, or None when none has been loaded. Only ``load_config_file``
+# writes it, and only after the file parsed. Read via ``last_config_sha256``.
 _last_config_sha256: Optional[str] = None
 
 
 def last_config_sha256() -> Optional[str]:
-    """Return the SHA-256 (hex) of the config bytes the loader last read, if any."""
+    """Return the SHA-256 (hex) of the Layer-2 config bytes last loaded, if any."""
     return _last_config_sha256
 
 
@@ -33,11 +34,8 @@ def _reset_last_config_sha256() -> None:
 
 
 def _read_config_bytes(path: Path) -> bytes:
-    """Read ``path`` as bytes and record their SHA-256 as the last-read config."""
-    global _last_config_sha256
-    data = path.read_bytes()
-    _last_config_sha256 = hashlib.sha256(data).hexdigest()
-    return data
+    """Read ``path`` as bytes; recording the hash is the Layer-2 loader's job."""
+    return path.read_bytes()
 
 
 def canonical_org_key(repository: dict[str, Any]) -> str:
@@ -644,8 +642,12 @@ def load_config_file(path: Path | str) -> OpsEngineConfig:
     """Load the Layer-2 org config file into a typed :class:`OpsEngineConfig`.
 
     The SHA-256 of the exact bytes read is recorded for
-    :func:`last_config_sha256`.
+    :func:`last_config_sha256` once the file has parsed; a config that fails to
+    parse is not recorded, and ``.ops.yaml`` loads never touch it.
     """
-    text = _read_config_bytes(Path(path)).decode("utf-8")
-    raw = yaml.safe_load(text)
-    return OpsEngineConfig.load(raw if raw is not None else {})
+    global _last_config_sha256
+    data = _read_config_bytes(Path(path))
+    raw = yaml.safe_load(data.decode("utf-8"))
+    config = OpsEngineConfig.load(raw if raw is not None else {})
+    _last_config_sha256 = hashlib.sha256(data).hexdigest()
+    return config
