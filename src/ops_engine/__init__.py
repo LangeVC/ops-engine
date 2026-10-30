@@ -19,6 +19,9 @@ from .config_loader import (
     MigrationSourceConfig,
     MigrationTargetConfig,
 )
+# Importable as ops_engine.runtime_identity; deliberately not in __all__ until
+# CONTRACT.md declares it (tests/test_public_surface.py keeps the two in step).
+from .runtime_identity import RuntimeIdentity, runtime_identity
 from .modules.triage import TriageHandler
 from .modules.dependency_trigger import DependencyTriggerHandler
 from .modules.stale_manager import StaleManager

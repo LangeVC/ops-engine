@@ -5,6 +5,7 @@ v2.1: Added MigrationSourceConfig and MigrationTargetConfig (CORE-007).
 v3.2: Added Destination (DST-001) — the forge becomes a value, not a key name.
 """
 
+import hashlib
 import warnings
 from pathlib import Path
 from typing import Any, Optional
@@ -15,6 +16,28 @@ from pydantic import BaseModel, Field, ValidationError
 
 _DESTINATION_REMOVAL_VERSION = "4.0.0"
 _OPS_YAML_FILENAME = ".ops.yaml"
+
+# SHA-256 (hex) of the exact bytes the loader last read from a config file, or
+# None when no config file has been read yet. Read via ``last_config_sha256``.
+_last_config_sha256: Optional[str] = None
+
+
+def last_config_sha256() -> Optional[str]:
+    """Return the SHA-256 (hex) of the config bytes the loader last read, if any."""
+    return _last_config_sha256
+
+
+def _reset_last_config_sha256() -> None:
+    global _last_config_sha256
+    _last_config_sha256 = None
+
+
+def _read_config_bytes(path: Path) -> bytes:
+    """Read ``path`` as bytes and record their SHA-256 as the last-read config."""
+    global _last_config_sha256
+    data = path.read_bytes()
+    _last_config_sha256 = hashlib.sha256(data).hexdigest()
+    return data
 
 
 def canonical_org_key(repository: dict[str, Any]) -> str:
@@ -598,8 +621,8 @@ def load_ops_yaml(repo_dir: Path | str) -> Optional[RepoConfig]:
     if not path.exists():
         return None
     try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as exc:
+        text = _read_config_bytes(path).decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
         raise OpsYamlError(path, detail=f"cannot read: {exc}") from exc
     try:
         raw = yaml.safe_load(text)
@@ -615,3 +638,14 @@ def load_ops_yaml(repo_dir: Path | str) -> Optional[RepoConfig]:
         return RepoConfig.model_validate(raw)
     except ValidationError as exc:
         raise OpsYamlError(path, detail=str(exc)) from exc
+
+
+def load_config_file(path: Path | str) -> OpsEngineConfig:
+    """Load the Layer-2 org config file into a typed :class:`OpsEngineConfig`.
+
+    The SHA-256 of the exact bytes read is recorded for
+    :func:`last_config_sha256`.
+    """
+    text = _read_config_bytes(Path(path)).decode("utf-8")
+    raw = yaml.safe_load(text)
+    return OpsEngineConfig.load(raw if raw is not None else {})
