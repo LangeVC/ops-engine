@@ -65,3 +65,24 @@ def test_never_raises_on_arbitrary_failures(monkeypatch):
 
 def test_public_export():
     assert ops_engine.runtime_identity is runtime_identity
+
+
+def test_hash_names_loaded_config_after_file_is_replaced_on_disk(tmp_path):
+    """RED proof: the reported hash is of the bytes read, not of the file now on disk.
+
+    An implementation that re-hashes the file at report time would name config B
+    here and fail.
+    """
+    _reset()
+    raw_a = b"orgs:\n  acme: {}\n"
+    raw_b = b"orgs:\n  other: {}\n# replaced after load\n"
+    path = tmp_path / "config.yml"
+    path.write_bytes(raw_a)
+    config_loader.load_config_file(path)
+
+    path.write_bytes(raw_b)
+
+    reported = runtime_identity().config_sha256
+    assert reported == hashlib.sha256(raw_a).hexdigest()
+    assert reported != hashlib.sha256(raw_b).hexdigest()
+    assert reported != hashlib.sha256(path.read_bytes()).hexdigest()
