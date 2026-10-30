@@ -88,7 +88,10 @@ def test_never_raises_on_arbitrary_failures(monkeypatch):
 
 
 def test_public_export():
-    assert ops_engine.runtime_identity is runtime_identity
+    assert "get_runtime_identity" in ops_engine.__all__
+    assert ops_engine.get_runtime_identity is runtime_identity
+    assert "runtime_identity" not in ops_engine.__all__
+    assert ops_engine.runtime_identity is ri_module
 
 
 def test_hash_names_loaded_config_after_file_is_replaced_on_disk(tmp_path):

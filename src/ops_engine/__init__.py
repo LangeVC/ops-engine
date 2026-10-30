@@ -19,9 +19,11 @@ from .config_loader import (
     MigrationSourceConfig,
     MigrationTargetConfig,
 )
-# Importable as ops_engine.runtime_identity; deliberately not in __all__ until
-# CONTRACT.md declares it (tests/test_public_surface.py keeps the two in step).
-from .runtime_identity import RuntimeIdentity, runtime_identity
+# The function is exported as get_runtime_identity so that its name differs from
+# its module's name (tests/test_public_surface.py rejects a name equal to a
+# reachable submodule); the module stays reachable as ops_engine.runtime_identity.
+from .runtime_identity import RuntimeIdentity
+from .runtime_identity import runtime_identity as get_runtime_identity
 from .modules.triage import TriageHandler
 from .modules.dependency_trigger import DependencyTriggerHandler
 from .modules.stale_manager import StaleManager
@@ -84,4 +86,6 @@ __all__ = [
     "runner_from_config",
     # Utils
     "ChangelogParser",
+    # Runtime identity
+    "get_runtime_identity",
 ]

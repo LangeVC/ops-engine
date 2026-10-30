@@ -7,7 +7,7 @@ the top-level package:
 from ops_engine import <name>
 ```
 
-As of this contract, `ops_engine.__all__` declares 35 names. Every name is
+As of this contract, `ops_engine.__all__` declares 36 names. Every name is
 classified below as either **contract** (consumers may rely on it) or
 **internal** (exposed only because Python has no hard privacy; not a promise).
 
@@ -40,7 +40,7 @@ mirror-destination methods named in prose below, the ones whose semantics are
 promised. Other methods on public classes are not signature-guarded here.
 
 By the same line, a model declared `contract: true` promises the **name**, not
-the **shape**. `MirrorConfig` is one of the 35 exports and is classified
+the **shape**. `MirrorConfig` is one of the 36 exports and is classified
 `contract: true` by name only: the `methods` array above gates the
 mirror-destination methods on `MirrorHandler`, not the fields of any model. A
 consumer may rely on the name `MirrorConfig` remaining importable and classified
@@ -90,7 +90,8 @@ of scope for this revision.
     {"name": "CheckResult",                   "kind": "class",    "contract": true},
     {"name": "ApplyResult",                   "kind": "class",    "contract": true},
     {"name": "runner_from_config",            "kind": "function", "contract": true},
-    {"name": "ChangelogParser",               "kind": "class",    "contract": true}
+    {"name": "ChangelogParser",               "kind": "class",    "contract": true},
+    {"name": "get_runtime_identity",          "kind": "function", "contract": true}
   ],
   "methods": [
     {
@@ -130,6 +131,21 @@ contract. In particular:
   surface.
 - The module-side loader `ops_engine.config_loader` is **internal** to this
   dispatch and may not be modified or promised by it.
+
+## Runtime identity
+
+`get_runtime_identity` (a `contract` name above) is the function
+`ops_engine.runtime_identity.runtime_identity`, exported under a different name
+so that it does not collide with its module's name.
+
+```python
+get_runtime_identity() -> RuntimeIdentity
+```
+
+It takes **no parameters**. It returns the running ops-engine version and the
+SHA-256 of the Layer-2 `config.yml` bytes the config loader loaded; a value
+that cannot be determined is the string `"unknown"`, and the call never raises.
+The `RuntimeIdentity` return type is not itself a promised name.
 
 ## Unpromised names
 
