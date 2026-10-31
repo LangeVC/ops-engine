@@ -88,6 +88,7 @@ import asyncio
 import fnmatch
 import logging
 import os
+import re
 import tempfile
 import warnings
 from dataclasses import dataclass, field
@@ -103,6 +104,9 @@ from ops_engine.config_loader import (
 )
 
 logger = logging.getLogger(__name__)
+
+# A full object id (SHA-1 or SHA-256) in lower-case hex; nothing else reaches argv.
+_OBJECT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 
 # The two Actions variables that carry the legacy, DEPRECATED mirror override
 # (removed in 4.0.0 — DEC-003). The concrete strings below are the single
@@ -432,7 +436,9 @@ class MirrorHandler:
         """Push exactly the triggering ref to every mirror destination (OE-022).
 
         On a push event the single ref named by the webhook is pushed with the
-        refspec ``+<ref>:<ref>`` (force, one ref). Never ``--prune``, never
+        refspec ``+<sha>:<ref>`` (force, one ref; ``<sha>`` is the payload's
+        ``after``, the very object the visibility gate judged, so what is sent
+        is what was checked). Never ``--prune``, never
         ``--mirror``, never ``--all``/``--tags``: nothing but the triggering ref
         moves, and nothing on the destination is deleted. Only destinations with
         ``role == "mirror"`` on a forge with a known remote host are pushed.
@@ -464,11 +470,21 @@ class MirrorHandler:
         sha = raw.get("after") or (raw.get("head_commit") or {}).get("id") or ""
         if event.get("event_type") != "push" or not ref or not sha:
             return lines
+        if not _OBJECT_ID.fullmatch(sha):
+            line = (
+                f"mirror-refused ref={ref} sha={sha[:80]!r} reason=invalid-sha "
+                "nothing-pushed"
+            )
+            lines.append(line)
+            if audit is not None:
+                audit.append(line)
+            logger.warning(line)
+            return lines
         if set(sha) == {"0"}:  # ref deletion: there is nothing to push
             return lines
 
         run = runner or _run_git
-        refspec = f"+{ref}:{ref}"
+        refspec = f"+{sha}:{ref}"
         globs = (
             tuple(candidate_globs)
             if candidate_globs is not None

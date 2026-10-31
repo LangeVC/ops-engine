@@ -58,7 +58,7 @@ def test_pushes_exactly_the_triggering_ref_to_every_mirror_destination():
     for argv, cwd in runner.calls:
         assert cwd == "/work/repo"
         assert argv[:2] == ["git", "push"]
-        assert argv[-1] == "+refs/heads/feature-x:refs/heads/feature-x"
+        assert argv[-1] == f"+{SHA}:refs/heads/feature-x"
     assert runner.calls[0][0][2] == "https://github.com/LangeVC/ops-engine.git"
     assert runner.calls[1][0][2] == "https://gitlab.com/langevc/ops-engine.git"
 
@@ -75,7 +75,7 @@ def test_never_prunes_or_mirrors_and_pushes_one_refspec():
 def test_tag_ref_is_pushed_as_itself():
     runner = Runner()
     _run(_event(ref="refs/tags/v1.2.3"), _dests(), runner, [])
-    assert runner.calls[0][0][-1] == "+refs/tags/v1.2.3:refs/tags/v1.2.3"
+    assert runner.calls[0][0][-1] == f"+{SHA}:refs/tags/v1.2.3"
 
 
 def test_one_audit_line_per_push():
@@ -91,7 +91,7 @@ def test_one_audit_line_per_push():
 
 def test_failed_push_is_audited_and_does_not_stop_the_other_destination():
     runner = Runner(
-        codes={"+refs/heads/feature-x:refs/heads/feature-x": 1}
+        codes={f"+{SHA}:refs/heads/feature-x": 1}
     )
     audit = []
     _run(_event(), _dests(), runner, audit)
@@ -278,7 +278,7 @@ def test_clean_ref_is_mirrored_to_public_and_private():
     assert len(_pushes(runner)) == 2
 
 
-def test_payload_default_branch_is_accepted_and_unreadable_history_refuses():
+def test_payload_default_branch_has_no_effect_and_unreadable_history_refuses():
     # The fork-point lookup (and with it the default branch) no longer decides
     # a ref; the payload value is still accepted. What stays: a history that
     # cannot be read refuses on public (fail closed) and still reaches private.
@@ -502,3 +502,36 @@ def test_real_git_first_push_of_default_branch_judges_the_whole_tree(real):
     assert not _has_ref(pub, "refs/heads/main")
     assert _has_ref(priv, "refs/heads/main")
     assert any(l.startswith("mirror-refused") and ".skillweave/x.md" in l for l in lines)
+
+
+# -- judged == pushed: the object that is sent is the object that was checked ------
+
+def test_m1_ref_moved_after_the_event_does_not_ship_the_newer_commit(tmp_path, monkeypatch):
+    g = _GatedRepo(tmp_path, monkeypatch)
+    g.commit({"a.txt": "a\n"})
+    g.branch("feat")
+    a = g.commit({"b.txt": "b\n"})
+    b = g.commit({".skillweave/prd.json": "{}\n"})  # local ref moved on to B
+    lines = g.push_event("refs/heads/feat", a, [], before=ZERO)
+    assert g.rev(g.pub, "refs/heads/feat") == a  # exactly what was judged
+    assert not _public_holds(g, b)
+    assert not any(l.startswith("mirror-refused") for l in lines)
+
+
+def test_m2_after_of_another_branch_cannot_carry_the_dirty_ref(tmp_path, monkeypatch):
+    g = _GatedRepo(tmp_path, monkeypatch)
+    clean = g.commit({"a.txt": "a\n"})
+    g.branch("dirty")
+    dirty = g.commit({".skillweave/prd.json": "{}\n"})
+    g.push_event("refs/heads/dirty", clean, [], before=ZERO)
+    assert not _public_holds(g, dirty)
+    assert g.rev(g.pub, "refs/heads/dirty") == clean
+
+
+@pytest.mark.parametrize("after", ["--upload-pack=touch /tmp/x", "-f", "zz" * 20, "A" * 40, "abc"])
+def test_invalid_after_is_refused_audited_and_nothing_is_pushed(after):
+    runner, audit = Runner(), []
+    lines = _run_gated(_event(after=after), runner, audit)
+    assert runner.calls == []
+    assert len(lines) == 1 and lines == audit
+    assert lines[0].startswith("mirror-refused") and "reason=invalid-sha" in lines[0]
