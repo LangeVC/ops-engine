@@ -520,6 +520,8 @@ class MirrorHandler:
         runner: Optional[Callable[[list[str], str], Awaitable[tuple[int, str]]]] = None,
         audit: Optional[list[str]] = None,
         workdir: Optional[str] = None,
+        candidate_globs: Optional[Sequence[str]] = None,
+        default_branch: str = "main",
     ) -> list[str]:
         """Push every canonical head and tag to every mirror destination (OE-023).
 
@@ -536,9 +538,24 @@ class MirrorHandler:
         One audit line per push attempt (appended to ``audit`` when given, and
         logged). A failed push is audited and does not stop the remaining
         destinations. Returns the audit lines of this call.
+
+        Visibility gate (OE-035, same rule as :meth:`push_event`). A destination
+        whose ``visibility`` is ``"public"`` does not receive a head or tag whose
+        commits touch a candidate path (``candidate_globs``, default
+        ``DEFAULT_VISIBILITY_CANDIDATE_GLOBS``), judged in the fresh clone from
+        the fork point with ``default_branch``; the whole tree for a ref that is
+        itself at the fork point. Each such ref is audited as ``mirror-refused``
+        naming the paths, and the remaining refs are pushed to that destination
+        as explicit refspecs. An unresolvable fork point refuses (fail closed).
+        Destinations that are not ``"public"`` still receive every ref.
         """
         lines: list[str] = []
         run = runner or _run_git
+        globs = (
+            tuple(candidate_globs)
+            if candidate_globs is not None
+            else tuple(DEFAULT_VISIBILITY_CANDIDATE_GLOBS)
+        )
 
         def record(line: str) -> None:
             lines.append(line)
@@ -555,6 +572,9 @@ class MirrorHandler:
                     f"exit={code} nothing-written"
                 )
                 return lines
+            # Refs and their refused paths, computed once and only when a public
+            # destination exists: ref -> (sha, touched candidate paths; empty = clean).
+            gated: Optional[dict[str, tuple[str, list[str]]]] = None
             for dest in destinations:
                 if dest.role != "mirror":
                     continue
@@ -566,14 +586,28 @@ class MirrorHandler:
                     )
                     continue
                 remote = f"https://{host}/{dest.repo}.git"
-                pcode, _perr = await run(
-                    [
-                        "git", "push", remote,
-                        "+refs/heads/*:refs/heads/*",
-                        "+refs/tags/*:refs/tags/*",
-                    ],
-                    clone,
-                )
+                refspecs = [
+                    "+refs/heads/*:refs/heads/*",
+                    "+refs/tags/*:refs/tags/*",
+                ]
+                if dest.visibility == "public":
+                    if gated is None:
+                        gated = await MirrorHandler._gate_clone_refs(
+                            run, clone, default_branch, globs
+                        )
+                    refused = {r: (sha, p) for r, (sha, p) in gated.items() if p}
+                    if refused:
+                        for ref, (sha, paths) in refused.items():
+                            record(
+                                f"mirror-refused ref={ref} "
+                                f"dest={dest.forge}:{dest.repo} "
+                                f"sha={sha} "
+                                f"paths={','.join(paths)}"
+                            )
+                        refspecs = [f"+{r}:{r}" for r in gated if r not in refused]
+                        if not refspecs:
+                            continue
+                pcode, _perr = await run(["git", "push", remote, *refspecs], clone)
                 record(f"mirror-state-push dest={dest.forge}:{dest.repo} exit={pcode}")
         return lines
 
@@ -677,6 +711,43 @@ class MirrorHandler:
                         f"exit={dcode}"
                     )
         return lines
+
+    @staticmethod
+    async def _gate_clone_refs(
+        run: Callable[[list[str], str], Awaitable[tuple[int, str]]],
+        clone: str,
+        default: str,
+        globs: Sequence[str],
+    ) -> dict[str, tuple[str, list[str]]]:
+        """Judge every head and tag of ``clone`` against the candidate paths.
+
+        Returns ``ref -> (commit sha, touched candidate paths)``; an empty path
+        list means the ref is clean. A ref list that cannot be read yields a
+        single ``refs`` entry that refuses (fail closed).
+        """
+        code, out = await run(
+            [
+                "git", "for-each-ref",
+                "--format=%(refname) %(objectname) %(*objectname)",
+                "refs/heads", "refs/tags",
+            ],
+            clone,
+        )
+        if code != 0:
+            return {"refs": ("", ["<refs unreadable>"])}
+        result: dict[str, tuple[str, list[str]]] = {}
+        for row in out.splitlines():
+            parts = row.split()
+            if len(parts) < 2:
+                continue
+            ref, sha = parts[0], parts[-1]  # peeled commit for annotated tags
+            result[ref] = (
+                sha,
+                await MirrorHandler._touched_candidates(
+                    run, clone, ref, sha, "", default, globs
+                ),
+            )
+        return result
 
     @staticmethod
     async def _touched_candidates(
