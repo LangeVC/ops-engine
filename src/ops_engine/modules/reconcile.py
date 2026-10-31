@@ -24,10 +24,8 @@ from ops_engine.adapters.factory import adapters_for
 from ops_engine.config_loader import Destination, ReconcileConfig, ReleaseConfig
 from ops_engine.modules.mirror import MirrorHandler, resolve_destinations
 from ops_engine.modules.release import (
-    DEFAULT_NAME_TEMPLATE,
     ReleaseContext,
     _release_tag,
-    render_release_name,
 )
 
 logger = logging.getLogger(__name__)
@@ -227,7 +225,8 @@ class ReconcileHandler:
         already holds the release is left alone.
 
         A tag that is refused or fails is recorded in the report and the other
-        tags still run. A repository without ``release.enabled`` is not read.
+        tags still run. A repository without ``release.enabled``, or with ``release.reconcile`` set
+        to false (the switch that disables the reconcile), is not read.
         This never calls the mirror state sync.
 
         ``reconcile_config.since`` (a tag or an ISO date, D17) is required: only
@@ -236,7 +235,7 @@ class ReconcileHandler:
         call. A date is compared with ``commit_date(repo, sha)``.
         """
         report = ReleaseReconcileReport(repo=repo)
-        if not release_config.enabled:
+        if not release_config.enabled or not release_config.reconcile:
             return report
         since = reconcile_config.since if reconcile_config else None
         if not since:
@@ -294,43 +293,6 @@ class ReconcileHandler:
             if not await dest_adapter.release_exists(destination.repo, tag_name):
                 return True
         return False
-
-    @staticmethod
-    async def reconcile_releases(
-        adapter: ForgeAdapter,
-        repo: str,
-        tag_names: Iterable[str],
-        config: ReleaseConfig,
-    ) -> list[str]:
-        """Create a release for every tag that exists but lacks one.
-
-        A reconcile run detects the ``tag exists, release missing`` state and
-        then creates the missing release for each such tag. The release name is
-        rendered from the configured ``name_template`` (falling back to the
-        generic default when none is set), so the reconcile path and the normal
-        release path name a release identically.
-
-        Idempotent: only tags whose release is absent are created, and the
-        existence check is made before every create, so running the reconcile
-        again over the same tags creates nothing new.
-
-        Returns the tag names for which a release was created.
-        """
-        missing = await ReconcileHandler.detect_missing_releases(adapter, repo, tag_names)
-        created: list[str] = []
-        for tag_name in missing:
-            name_template = getattr(config, "name_template", None) or DEFAULT_NAME_TEMPLATE
-            release_name = render_release_name(name_template, repo, tag_name)
-            await adapter.create_release(
-                repo_full_name=repo,
-                tag_name=tag_name,
-                name=release_name,
-                body=f"Release {tag_name}",
-                draft=getattr(config, "draft", False),
-            )
-            created.append(tag_name)
-            logger.info(f"Created release {tag_name} on {repo} ({release_name!r})")
-        return created
 
     @staticmethod
     async def query_mirror_state(

@@ -265,3 +265,86 @@ def test_reconcile_since_resolves_from_the_layover_config():
         {"orgs": {"exampleorg": {"reconcile": {"since": "v1.0.0"}, "repositories": {"engine": {}}}}}
     )
     assert config.get_repo_config("exampleorg", "engine").reconcile.since == "v1.0.0"
+
+
+@pytest.mark.asyncio
+async def test_a_refused_tag_is_reported_once_with_its_reason_and_not_published(
+    tmp_path, monkeypatch, caplog
+):
+    source = _source(["v1.2.1", "v1.2.3"])
+    target = _target()
+    context, _ = _context(tmp_path, [target], monkeypatch)
+
+    with caplog.at_level("ERROR"):
+        report = await ReconcileHandler.reconcile_release_tags(
+            source, REPO, CONFIG, context, SINCE
+        )
+
+    assert list(report.failed) == ["v1.2.1"]
+    assert "MissingChangelogEntryError" in report.failed["v1.2.1"]
+    assert [c.kwargs["tag_name"] for c in target.create_release.call_args_list] == ["v1.2.3"]
+    refused = [r for r in caplog.records if "v1.2.1" in r.getMessage()]
+    assert len(refused) == 1
+    assert "MissingChangelogEntryError" in refused[0].getMessage()
+
+
+@pytest.mark.asyncio
+async def test_a_tag_already_released_is_left_alone_over_two_cycles(tmp_path, monkeypatch):
+    source = _source(["v1.2.3"])
+    created: set[str] = set()
+    target = _target()
+
+    async def release_exists(repo, tag):
+        return tag in created
+
+    async def create_release(**kwargs):
+        created.add(kwargs["tag_name"])
+        return {"id": 1}
+
+    target.release_exists = AsyncMock(side_effect=release_exists)
+    target.create_release = AsyncMock(side_effect=create_release)
+    context, identity = _context(tmp_path, [target], monkeypatch)
+
+    first = await ReconcileHandler.reconcile_release_tags(source, REPO, CONFIG, context, SINCE)
+    second = await ReconcileHandler.reconcile_release_tags(source, REPO, CONFIG, context, SINCE)
+
+    assert first.published == ["v1.2.3"]
+    assert second.published == [] and second.up_to_date == ["v1.2.3"]
+    target.create_release.assert_called_once()
+    identity.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_tag_pushed_while_stopped_gets_a_release_on_every_release_destination(
+    tmp_path, monkeypatch
+):
+    """RED proof (criterion 3): one cycle publishes on both release destinations."""
+    source = _source(["v1.2.3"], ops_yaml=OPS_YAML_TWO)
+    forgejo, github = _target(), _target()
+    context, _ = _context(tmp_path, [forgejo, github], monkeypatch)
+
+    report = await ReconcileHandler.reconcile_release_tags(
+        source, REPO, CONFIG, context, SINCE
+    )
+
+    assert report.published == ["v1.2.3"]
+    forgejo.create_release.assert_called_once()
+    github.create_release.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_with_reconcile_disabled_the_same_tag_gets_no_release(tmp_path, monkeypatch):
+    source = _source(["v1.2.3"], ops_yaml=OPS_YAML_TWO)
+    forgejo, github = _target(), _target()
+    context, identity = _context(tmp_path, [forgejo, github], monkeypatch)
+    disabled = ReleaseConfig(enabled=True, tag_pattern="v*", reconcile=False)
+
+    report = await ReconcileHandler.reconcile_release_tags(
+        source, REPO, disabled, context, SINCE
+    )
+
+    assert report.published == [] and report.failed == {}
+    source.list_tags.assert_not_called()
+    forgejo.create_release.assert_not_called()
+    github.create_release.assert_not_called()
+    identity.assert_not_called()

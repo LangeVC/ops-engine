@@ -253,6 +253,9 @@ class ReleaseConfig(BaseModel):
     # leaves the artifact root is refused. Read from the layover's own config,
     # never from a repository's ``.ops.yaml`` (D18).
     artifact_dir: Optional[str] = Field(default=None)
+    # Switch for the release reconcile cycle (OE-010): false disables it, so a
+    # tag pushed while the layover was stopped gets no release from the cycle.
+    reconcile: bool = Field(default=True)
 
 
 class ReconcileConfig(BaseModel):
