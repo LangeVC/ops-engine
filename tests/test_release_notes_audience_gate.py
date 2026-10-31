@@ -358,6 +358,37 @@ def test_workflow_runs_the_gate_on_extracted_notes_before_release_creation():
     assert notes_idx < gate_idx < create_idx
 
 
+def test_script_delegates_the_ticket_check_to_the_engine_gate():
+    """OE-007: the script holds no ticket-shape pattern of its own; it loads
+    ``check_release_notes_audience`` from the engine module by its path, and
+    its refusal is that function's refusal, word for word."""
+    assert "release_gates.py" in GATE_CONTENT
+    assert "check_release_notes_audience" in GATE_CONTENT
+    assert "INTERNAL_TICKET_RE" not in GATE_CONTENT
+    assert not re.search(r"re\.compile\([^)]*\[A-Z\]\{2,5\}-", GATE_CONTENT)
+
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "release_gates",
+        REPO_ROOT / "src" / "ops_engine" / "modules" / "release_gates.py",
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    try:
+        module.check_release_notes_audience(TICKETED_NOTES, ["LVC"])
+    except module.ReleaseNotesAudienceError as exc:
+        expected = str(exc)
+    else:
+        raise AssertionError("the engine gate did not refuse the ticketed notes")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        prefixes_path = _write(tmp, "LVC\n", "prefixes.txt")
+        r = _run_gate("--ticket-prefixes", prefixes_path, stdin_text=TICKETED_NOTES)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert expected in r.stderr
+
+
 def test_workflow_invokes_the_committed_script_not_an_inline_copy():
     """The gate logic lives in scripts/, not duplicated in the workflow: the
     step names the script path and the workflow contains no inline copy of the

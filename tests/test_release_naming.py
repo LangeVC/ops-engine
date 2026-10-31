@@ -207,8 +207,22 @@ class TestReleaseTitleGate:
     def _gate_source(self) -> str:
         return _extract_py_block(FORGEJO_RELEASE_CONTENT, "TITLE_GATE_PY")
 
+    def _run_gate(self, title: str) -> subprocess.CompletedProcess:
+        """Run the step's interpreter (OE-007: it loads the engine's gate by its
+        path) with the tag the step is handed and the template it declares, from
+        the repository root and without site-packages."""
+        template = "Ops Engine {tag_name}"
+        head = template.split("{tag_name}")[0]
+        tag = title[len(head):] if title.startswith(head) else title
+        return subprocess.run(
+            [sys.executable, "-S", "-c", self._gate_source(), tag, template],
+            capture_output=True,
+            text=True,
+            cwd=str(Path(__file__).resolve().parents[1]),
+        )
+
     def test_title_gate_accepts_a_conforming_title(self):
-        r = _run_py(self._gate_source(), "Ops Engine v3.2.0")
+        r = self._run_gate("Ops Engine v3.2.0")
         assert r.returncode == 0, r.stdout + r.stderr
         assert "conforms" in r.stdout
 
@@ -219,10 +233,10 @@ class TestReleaseTitleGate:
             "ops-engine v3.2.0",       # wrong case / missing product prefix
             "Ops Engine 3.2.0",        # missing 'v'
             "Ops Engine v3.2",         # wrong segment count
-            "v3.2.0",                  # bare tag, pre-REL-004 form
+            "V3.2.0",                  # uppercase V in the tag
             "Ops Engine v3.2.0-beta",  # prerelease suffix
         ):
-            r = _run_py(self._gate_source(), bad)
+            r = self._run_gate(bad)
             assert r.returncode != 0, f"{bad!r} was accepted"
             assert "ReleaseTitleError" in r.stderr, r.stderr
 

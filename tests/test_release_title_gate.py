@@ -1,13 +1,15 @@
 """REL-022 — the release title gate knows the prerelease form it cut.
 
-The gate refreshes in ``.forgejo/workflows/forgejo-release.yml`` as an inline,
-heredoc-delimited Python block (``TITLE_GATE_PY``). It must reject a
-malformed prerelease (``v3.5.0-rc``, ``v3.5.0-``, uppercase ``v3.5.0-RC1``)
-while accepting the decided lowercase ``v3.5.0-rc1`` prerelease form. "Each by
-name" is proven the way the runner experiences it: the run block is rendered
-from the YAML, bash -n'd, and the embedded interpreter is extracted and
-executed against each title — not a regex copy in this file, which would be a
-different artefact from the gate the runner actually runs (REL-004).
+Since OE-007 the gate is ``check_release_title`` of
+``src/ops_engine/modules/release_gates.py``; ``.forgejo/workflows/forgejo-
+release.yml`` carries no copy of it, only a heredoc-delimited block
+(``TITLE_GATE_PY``) that loads the module by its path and calls it. The gate
+must reject a malformed prerelease (``v3.5.0-rc``, ``v3.5.0-``, uppercase
+``v3.5.0-RC1``) while accepting the decided lowercase ``v3.5.0-rc1`` form.
+"Each by name" is proven the way the runner experiences it: the run block is
+rendered from the YAML, bash -n'd, and the embedded interpreter is extracted
+and executed against each tag under ``python -S`` (no site-packages: no yaml,
+no pydantic) — the same refusals as before, now through the seam (REL-004).
 
 This file deliberately imports nothing outside the standard library and never
 imports ``ops_engine`` or pytest: the gate must run on a bare release runner
@@ -19,6 +21,7 @@ through the same constraint by real subprocess runs. It runs two ways:
     plain asserts, so no non-stdlib import is required either way.
 """
 
+import re
 import subprocess
 import sys
 import tempfile
@@ -70,16 +73,31 @@ def _extract_py_block(marker: str, workflow_text: str = WORKFLOW_CONTENT) -> str
     return textwrap.dedent("\n".join(lines[start + 1 : end]) + "\n")
 
 
+def _name_template() -> str:
+    """The ``NAME_TEMPLATE`` the gate step passes, read from the workflow."""
+    found = re.search(r'^\s+NAME_TEMPLATE: "(.*)"$', WORKFLOW_CONTENT, re.MULTILINE)
+    assert found, "the gate step declares no NAME_TEMPLATE"
+    return found.group(1)
+
+
 def _run_title_gate(*titles: str) -> list:
-    """Execute the gate's embedded interpreter exactly once per title."""
+    """Execute the gate's embedded interpreter exactly once per title.
+
+    ``titles`` are the rendered release names; the interpreter is handed the tag
+    (the name without the template's head) and the template, as the step does.
+    It runs from the repository root, as the runner's checkout, under ``-S``.
+    """
     source = _extract_py_block(TITLE_MARKER)
+    head = _name_template().split("{tag_name}")[0]
     results = []
     for title in titles:
+        tag = title[len(head):] if title.startswith(head) else title
         results.append(
             subprocess.run(
-                [sys.executable, "-c", source, title],
+                [sys.executable, "-S", "-c", source, tag, _name_template()],
                 capture_output=True,
                 text=True,
+                cwd=str(REPO_ROOT),
             )
         )
     return results
@@ -133,8 +151,46 @@ def test_embedded_interpreter_is_what_the_run_block_executes():
     gate the runner runs — not a copy invented by this test."""
     block = _title_gate_run_block()
     assert TITLE_MARKER in block
-    assert "Ops Engine ${TAG_NAME}" in block
-    assert _extract_py_block(TITLE_MARKER, block).strip()
+    assert "NAME_TEMPLATE" in block
+    interpreter = _extract_py_block(TITLE_MARKER, block)
+    assert interpreter.strip()
+    # The seam: the interpreter loads the engine's module by its path and calls
+    # the engine's gate; it holds no pattern of its own.
+    assert "src/ops_engine/modules/release_gates.py" in interpreter
+    assert "check_release_title" in interpreter
+    assert "re.compile" not in interpreter
+    assert "NAME_RE" not in interpreter
+
+
+def test_the_step_as_the_runner_runs_it_writes_the_release_name():
+    """Run the whole rendered run block under bash, the runner's shell: a
+    conforming tag writes ``release_name`` to ``$GITHUB_OUTPUT``; a malformed
+    one exits non-zero, names the error, and writes nothing."""
+    block = _title_gate_run_block()
+    for tag, ok in (("v3.5.0-rc1", True), ("v3.5.0-RC1", False)):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "github_output"
+            out.write_text("", encoding="utf-8")
+            run = subprocess.run(
+                ["bash", "-eo", "pipefail", "-c", block],
+                capture_output=True,
+                text=True,
+                cwd=str(REPO_ROOT),
+                env={
+                    "PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
+                    "TAG_NAME": tag,
+                    "NAME_TEMPLATE": _name_template(),
+                    "GITHUB_OUTPUT": str(out),
+                },
+            )
+            written = out.read_text(encoding="utf-8")
+        if ok:
+            assert run.returncode == 0, run.stdout + run.stderr
+            assert written == "release_name=Ops Engine %s\n" % tag
+        else:
+            assert run.returncode != 0
+            assert "ReleaseTitleError" in run.stderr
+            assert written == ""
 
 
 # --- Criterion 2: the contract decision and its machine check. ----------

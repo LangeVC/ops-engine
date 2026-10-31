@@ -1,0 +1,10 @@
+## [1.10.1](https://github.com/fusionAIze/faigrid/compare/v1.10.0...v1.10.1) (2026-09-25)
+## [1.10.0](https://github.com/fusionAIze/faigrid/compare/v1.9.0...v1.10.0) (2026-09-25)
+## [1.9.0](https://github.com/fusionAIze/faigrid/compare/v1.8.0...v1.9.0) (2026-09-24)
+## [1.8.0](https://github.com/fusionAIze/faigrid/compare/v1.7.0...v1.8.0) (2026-08-22)
+### Closeout (FAI-207, C1–C11)
+## [1.7.0](https://github.com/fusionAIze/faigrid/compare/v1.6.2...v1.7.0) (2026-04-14)
+## [1.6.2](https://github.com/fusionAIze/faigrid/compare/v1.6.1...v1.6.2) (2026-04-14)
+## [1.6.1](https://github.com/fusionAIze/faigrid/compare/v1.6.0...v1.6.1) (2026-04-02)
+## [1.6.0] — 2026-04-02
+## [1.5.1] — 2025 (previous)

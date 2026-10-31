@@ -19,6 +19,7 @@ from config (not a literal), and that the literal-laden publication path is
 gone.
 """
 
+import re
 import subprocess
 import sys
 import tempfile
@@ -153,6 +154,62 @@ def test_publish_block_constructs_one_adapter_per_destination():
     # The two credentials are distinct tokens, not one shared one.
     assert "FORGEJO_TOKEN" in block
     assert "GH_MIRROR_TOKEN" in block
+
+
+# --- OE-007: the three release gates are the engine's, loaded by path ---------
+
+GATES_REL_PATH = "src/ops_engine/modules/release_gates.py"
+PRE_PUBLISH_STEPS = [
+    "Gate the release title",
+    "Extract release notes from CHANGELOG",
+    "Gate the release notes for an external audience",
+]
+
+
+def _step_text(name: str) -> str:
+    """One step's text, from its ``- name:`` line to the next step."""
+    start = WORKFLOW_CONTENT.index(f"- name: {name}")
+    rest = WORKFLOW_CONTENT[start + 1 :]
+    nxt = re.search(r"^      - name: ", rest, re.MULTILINE)
+    return WORKFLOW_CONTENT[start : start + 1 + nxt.start()] if nxt else WORKFLOW_CONTENT[start:]
+
+
+def test_title_and_notes_steps_load_the_engine_module_by_its_path():
+    for name in PRE_PUBLISH_STEPS[:2]:
+        step = _step_text(name)
+        assert GATES_REL_PATH in step, name
+        assert "spec_from_file_location" in step, name
+        # never the package: it pulls in yaml and pydantic (REL-006).
+        assert "import ops_engine" not in step, name
+        assert "from ops_engine" not in step, name
+
+
+def test_audience_step_runs_the_script_which_loads_the_engine_module():
+    step = _step_text(PRE_PUBLISH_STEPS[2])
+    assert "scripts/release_notes_audience_gate.py" in step
+    script = (REPO_ROOT / "scripts" / "release_notes_audience_gate.py").read_text(
+        encoding="utf-8"
+    )
+    assert "release_gates.py" in script
+    assert "check_release_notes_audience" in script
+
+
+def test_the_workflow_carries_no_copy_and_fetches_no_copy_of_a_gate():
+    """No inline pattern of a gate survives, and no step downloads gate code."""
+    for copy in ("NAME_RE", "HEADER_PATTERN", "INTERNAL_TICKET_RE", "changelog_parser"):
+        assert copy not in WORKFLOW_CONTENT, copy
+    for line in WORKFLOW_CONTENT.splitlines():
+        if "curl" in line or "wget" in line:
+            for gate in ("release_gates", "audience_gate", "title_gate", "changelog"):
+                assert gate not in line, line
+
+
+def test_no_package_install_precedes_the_three_gates():
+    """The gates run on the bare checkout: the first pip install comes after
+    the last of them."""
+    last_gate = WORKFLOW_CONTENT.index(PRE_PUBLISH_STEPS[2])
+    first_pip = WORKFLOW_CONTENT.index("pip install")
+    assert last_gate < first_pip
 
 
 # --- The destination-to-adapter wiring actually runs (real execution) ---------
