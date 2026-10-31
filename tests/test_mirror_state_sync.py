@@ -268,3 +268,54 @@ def test_real_git_unreachable_canonical_writes_nothing(world, tmp_path):
     assert len(lines) == 1 and lines[0].startswith("mirror-state-aborted")
     assert (_refs(gh), _refs(gl)) == before
     assert os.listdir(tmp_path / "work")  # unrelated sanity: workdir untouched
+
+
+# -- criterion 3: RED proof, end to end with real git -------------------------
+
+
+def _all_refs(*bares):
+    return tuple(_refs(b) for b in bares)
+
+
+def test_real_git_branch_deleted_on_canonical_disappears_only_through_the_sweep(
+    world, tmp_path
+):
+    work, canon, gh, gl = world
+    wd = str(tmp_path)
+    asyncio.run(MirrorHandler.sync_state(CANON, _dests(), workdir=wd))
+    assert "refs/heads/feature" in _refs(gh) and "refs/heads/feature" in _refs(gl)
+
+    # the branch is deleted on the canonical (Forgejo) repository
+    _git(work, "push", "-q", str(canon), ":refs/heads/feature")
+    assert "refs/heads/feature" not in _refs(canon)
+
+    # state sync, even repeated, leaves it on the mirrors
+    for _ in range(2):
+        asyncio.run(MirrorHandler.sync_state(CANON, _dests(), workdir=wd))
+    assert "refs/heads/feature" in _refs(gh) and "refs/heads/feature" in _refs(gl)
+
+    # only the sweep removes it, from every mirror, and nothing else
+    lines = asyncio.run(MirrorHandler.sweep_deleted_refs(CANON, _dests(), workdir=wd))
+    deleted = [l for l in lines if l.startswith("mirror-ref-deleted")]
+    assert len(deleted) == 2 and all("ref=refs/heads/feature" in l for l in deleted)
+    assert _refs(gh) == _refs(gl) == {"refs/heads/main", "refs/tags/v1"}
+
+
+def test_real_git_failing_canonical_clone_makes_neither_path_write(world, tmp_path):
+    work, canon, gh, gl = world
+    wd = str(tmp_path)
+    asyncio.run(MirrorHandler.sync_state(CANON, _dests(), workdir=wd))
+    # mirrors now hold a ref that canonical lacks and canonical gained a new one
+    _git(work, "branch", "fresh")
+    _git(work, "push", "-q", str(canon), "fresh")
+    _git(work, "push", "-q", f"file://{gh}", "feature:refs/heads/extra")
+    before = _all_refs(gh, gl)
+    bad = "https://forgejo.example/langevc/does-not-exist.git"
+
+    synced = asyncio.run(MirrorHandler.sync_state(bad, _dests(), workdir=wd))
+    swept = asyncio.run(MirrorHandler.sweep_deleted_refs(bad, _dests(), workdir=wd))
+
+    assert synced[0].startswith("mirror-state-aborted") and len(synced) == 1
+    assert swept[0].startswith("mirror-sweep-aborted") and len(swept) == 1
+    assert _all_refs(gh, gl) == before
+    assert "refs/heads/fresh" not in _refs(gh) and "refs/heads/extra" in _refs(gh)
