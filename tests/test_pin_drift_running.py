@@ -204,3 +204,56 @@ def test_script_docstring_documents_both_names():
     doc = mod.__doc__
     assert "health_url" in doc
     assert "version" in doc and "RuntimeIdentity" in doc
+
+
+BASE_SHA = "b1dbfd922741330f34dac45dc3b9f9bb5a2da619"  # last commit before OE-002
+
+
+def _pin_only_script_at_base(tmp_path: Path) -> Path | None:
+    """The pin-only check as it was at the base commit, or None if unavailable."""
+    shown = subprocess.run(
+        ["git", "-C", str(REPO), "show", f"{BASE_SHA}:scripts/pin-drift-check.py"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if shown.returncode != 0:
+        return None
+    path = tmp_path / "pin-drift-check-base.py"
+    path.write_text(shown.stdout, encoding="utf-8")
+    return path
+
+
+def test_red_proof_older_running_version_fails_where_pin_only_passes(
+    tmp_path, health_server
+):
+    """RED proof: the declared pin is current, the layover actually runs older.
+
+    The pin-only check (the same register without ``health_url``, and the
+    script as it was at the base commit) passes this fixture; the running-version
+    check exits non-zero.
+    """
+    health_server.body = json.dumps({"version": "0.0.1", "config_sha256": "x"}).encode()
+    entry = {"name": "a-ops", "pin": ENGINE_VERSION}
+    with_health = _register(tmp_path, [{**entry, "health_url": health_server.url}])
+    pin_only = tmp_path / "pin-only.json"
+    pin_only.write_text(
+        json.dumps({"schema": 1, "package": "ops_engine", "layovers": [entry]}),
+        encoding="utf-8",
+    )
+
+    assert _run(pin_only).returncode == 0  # pin-only behaviour passes the fixture
+    checked = _run(with_health)
+    assert checked.returncode != 0
+    assert "0.0.1" in checked.stderr
+
+    base_script = _pin_only_script_at_base(tmp_path)
+    if base_script is not None:
+        base = subprocess.run(
+            [sys.executable, str(base_script), "--layovers", str(with_health),
+             "--repo", str(REPO)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert base.returncode == 0, base.stderr  # the base check cannot see it
