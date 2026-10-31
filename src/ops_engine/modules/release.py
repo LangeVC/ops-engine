@@ -11,6 +11,7 @@ from ops_engine.adapters.base import ForgeAdapter
 from ops_engine.adapters.factory import adapters_for
 from ops_engine.config_loader import Destination, OpsEngineConfig, ReleaseConfig
 from ops_engine.modules.mirror import resolve_destinations
+from ops_engine.modules.notification import NotificationHandler
 from ops_engine.modules.release_gates import (
     MissingChangelogEntryError,
     check_release_notes_audience,
@@ -169,6 +170,7 @@ class ReleaseContext:
     ticket_prefixes: Iterable[str] = ()
     prerelease: bool = False
     adapters: Optional[list[ForgeAdapter]] = None
+    audit: Optional[list[str]] = None
 
 
 def _resolve_artifact_dir(root: str | Path, configured: Optional[str]) -> Path:
@@ -283,6 +285,7 @@ class ReleaseHandler:
         repo_dir: str | Path | None = None,
         roles: Iterable[str] | None = None,
         skip_existing: bool = False,
+        audit: Optional[list[str]] = None,
     ) -> "PublicationReport":
         """Publish a built release to every destination resolved from config.
 
@@ -319,6 +322,13 @@ class ReleaseHandler:
         that publish to a known-empty destination keep their exact call
         sequence.
 
+        ``audit`` follows the ``MirrorHandler.push_event`` convention: when a
+        list is given, one line per destination is appended to it
+        (``release-publish tag=... dest=... result=published|failed|skipped``).
+        A destination skipped because its release already exists is not a
+        failure. When any destination failed, one warning line is logged for
+        the whole call (the engine has no event log, D20).
+
         Raises:
             ValueError: a supplied ``adapters`` list does not match the resolved
                 destination count.
@@ -352,6 +362,7 @@ class ReleaseHandler:
                 ):
                     logger.info(f"Release {tag_name} already exists on {label}, skipping")
                     report.skipped.append(label)
+                    _audit_destination(audit, tag_name, label, "skipped")
                     continue
                 await _publish_to_destination(
                     adapter,
@@ -366,15 +377,51 @@ class ReleaseHandler:
             except Exception as exc:  # noqa: BLE001 (record — the report, not abort)
                 logger.error(f"partial publication: {label} failed: {exc}")
                 report.failed.append(label)
+                _audit_destination(audit, tag_name, label, "failed")
             else:
                 report.published.append(label)
+                _audit_destination(audit, tag_name, label, "published")
 
-        if report.failed:
-            logger.error(
-                f"release {tag_name} partially published: "
-                f"failed destinations {report.failed}"
+        if report.partial:
+            logger.warning(
+                f"release-partial tag={tag_name} repo={repo} "
+                f"published={report.published} failed={report.failed}"
             )
         return report
+
+
+def _audit_destination(
+    audit: Optional[list[str]], tag_name: str, label: str, result: str
+) -> None:
+    if audit is not None:
+        audit.append(f"release-publish tag={tag_name} dest={label} result={result}")
+
+
+async def _notify_partial(
+    ops_config: OpsEngineConfig, repo: str, tag_name: str, report: PublicationReport
+) -> None:
+    """Report a partial publication through the notification channel.
+
+    The channels come from the Layer-2 config only (a repository's ``.ops.yaml``
+    at the tag cannot add a channel URL). No channels configured: nothing is
+    sent. The event carries no delivery id, so a retry is never deduplicated
+    away.
+    """
+    org, _, name = repo.partition("/")
+    notifications = ops_config.get_repo_config(org, name).notifications
+    if notifications is None:
+        return
+    await NotificationHandler.process_event(
+        {"event_type": "release", "repo": repo, "action": "partial_failure"},
+        notifications,
+        {
+            "tag_name": tag_name,
+            "body": (
+                "FAILED: partial publication. "
+                f"published={report.published} failed={report.failed}"
+            ),
+        },
+    )
 
 
 async def _publish_to_destination(
@@ -533,9 +580,10 @@ async def _release_tag(
             repo_dir=layer3_dir,
             roles=("release",),
             skip_existing=True,
+            audit=context.audit,
         )
     if report.partial:
-        logger.error(f"release {tag_name} partially published: {report.to_dict()}")
+        await _notify_partial(context.ops_config, repo, tag_name, report)
 
 
 def _extract_tag_name(event_type: str, raw: dict[str, Any]) -> str | None:

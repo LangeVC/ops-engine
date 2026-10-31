@@ -288,3 +288,120 @@ async def test_repo_ops_yaml_cannot_set_artifact_dir(tmp_path, monkeypatch):
     await ReleaseHandler.process_event(source, _event(), _config(), context)
     # The value at the tag is ignored: the root's files are attached as usual.
     target.upload_release_asset.assert_awaited_once()
+
+
+# --- OE-009 criterion 2: two release destinations, partial publication (D20) --
+
+TWO_RELEASE_OPS_YAML = """\
+destinations:
+  - {forge: forgejo, repo: exampleorg/engine, role: release}
+  - {forge: github, repo: exampleorg/engine-pub, role: release}
+"""
+
+
+def _notifying_config() -> OpsEngineConfig:
+    return OpsEngineConfig.load(
+        {
+            "orgs": {
+                "exampleorg": {
+                    "repositories": {
+                        "engine": {
+                            "notifications": {
+                                "enabled": True,
+                                "channels": [
+                                    {"type": "slack", "url": "https://hooks.example/x"}
+                                ],
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    )
+
+
+def _two_destination_setup(tmp_path, monkeypatch, second_fails=False, second_exists=False):
+    import dataclasses
+
+    from ops_engine.modules import notification
+
+    rec, source, first, identity, context, _ = _setup(
+        tmp_path, monkeypatch, ops_yaml=TWO_RELEASE_OPS_YAML
+    )
+    second = AsyncMock()
+    second.release_exists = AsyncMock(return_value=second_exists)
+    if second_fails:
+        second.create_release = AsyncMock(side_effect=RuntimeError("second forge down"))
+    else:
+        second.create_release = AsyncMock(return_value={"id": 8})
+    audit: list[str] = []
+    context = dataclasses.replace(
+        context,
+        ops_config=_notifying_config(),
+        adapters=[first, second],
+        audit=audit,
+    )
+    sent: list[str] = []
+
+    async def fake_send(channel, message):
+        sent.append(message)
+
+    monkeypatch.setattr(notification, "_send_notification", fake_send)
+    notification.NotificationHandler.reset()
+    return source, first, second, context, audit, sent
+
+
+@pytest.mark.asyncio
+async def test_two_release_destinations_are_both_published(tmp_path, monkeypatch, caplog):
+    source, first, second, context, audit, sent = _two_destination_setup(tmp_path, monkeypatch)
+    with caplog.at_level("WARNING"):
+        await ReleaseHandler.process_event(source, _event(), CONFIG, context)
+
+    first.create_release.assert_awaited_once()
+    second.create_release.assert_awaited_once()
+    second.upload_release_asset.assert_awaited_once()
+    assert audit == [
+        f"release-publish tag={TAG} dest=forgejo:{REPO} result=published",
+        f"release-publish tag={TAG} dest=github:exampleorg/engine-pub result=published",
+    ]
+    assert sent == []
+    assert [r for r in caplog.records if r.levelname == "WARNING"] == []
+
+
+@pytest.mark.asyncio
+async def test_partial_publication_is_audited_notified_and_warned_once(
+    tmp_path, monkeypatch, caplog
+):
+    source, first, second, context, audit, sent = _two_destination_setup(
+        tmp_path, monkeypatch, second_fails=True
+    )
+    with caplog.at_level("WARNING"):
+        await ReleaseHandler.process_event(source, _event(), CONFIG, context)
+
+    # The first destination was published; the failure did not stop or undo it.
+    first.create_release.assert_awaited_once()
+    assert audit == [
+        f"release-publish tag={TAG} dest=forgejo:{REPO} result=published",
+        f"release-publish tag={TAG} dest=github:exampleorg/engine-pub result=failed",
+    ]
+    # One failure notification through the notification channel.
+    assert len(sent) == 1
+    assert "FAILED" in sent[0] and TAG in sent[0] and "github:exampleorg/engine-pub" in sent[0]
+    # Exactly one warning line in the layover's log.
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert "release-partial" in warnings[0] and "github:exampleorg/engine-pub" in warnings[0]
+
+
+@pytest.mark.asyncio
+async def test_skipped_existing_destination_is_not_a_failure(tmp_path, monkeypatch, caplog):
+    source, first, second, context, audit, sent = _two_destination_setup(
+        tmp_path, monkeypatch, second_exists=True
+    )
+    with caplog.at_level("WARNING"):
+        await ReleaseHandler.process_event(source, _event(), CONFIG, context)
+
+    second.create_release.assert_not_called()
+    assert audit[-1] == f"release-publish tag={TAG} dest=github:exampleorg/engine-pub result=skipped"
+    assert sent == []
+    assert [r for r in caplog.records if r.levelname == "WARNING"] == []
