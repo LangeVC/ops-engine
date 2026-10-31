@@ -405,3 +405,70 @@ async def test_skipped_existing_destination_is_not_a_failure(tmp_path, monkeypat
     assert audit[-1] == f"release-publish tag={TAG} dest=github:exampleorg/engine-pub result=skipped"
     assert sent == []
     assert [r for r in caplog.records if r.levelname == "WARNING"] == []
+
+
+# --- OE-009 criterion 3: RED proof, tag without a CHANGELOG section ------------
+
+NO_SECTION_CHANGELOG = "# Changes\n\n## v1.2.2\n\n- Older.\n"
+
+
+async def _process(source, config, context):
+    """Drive the tag push through the handler as it exists at the checked-out commit.
+
+    The 3.4.2 handler takes no ``ReleaseContext``; the OE-009 handler requires one.
+    The same scenario is driven through whichever signature is present, so the
+    contrast test below runs unchanged against the base commit.
+    """
+    import inspect
+
+    params = inspect.signature(ReleaseHandler.process_event).parameters
+    args = (source, _event(), config) + ((context,) if "context" in params else ())
+    await ReleaseHandler.process_event(*args)
+
+
+@pytest.mark.asyncio
+async def test_tag_without_changelog_section_is_refused_on_every_destination(
+    tmp_path, monkeypatch
+):
+    source, first, second, context, audit, sent = _two_destination_setup(tmp_path, monkeypatch)
+    # Same scenario as the contrast test: CHANGELOG has no section for v1.2.3.
+    async def get_file_content(repo, path, ref="main"):
+        return {"CHANGELOG.md": NO_SECTION_CHANGELOG, ".ops.yaml": TWO_RELEASE_OPS_YAML}[path]
+
+    source.get_file_content = get_file_content
+
+    with pytest.raises(MissingChangelogEntryError, match="1.2.3|v1.2.3"):
+        await ReleaseHandler.process_event(source, _event(), CONFIG, context)
+
+    # No release object on ANY destination, and no placeholder body anywhere.
+    for adapter in (source, first, second):
+        adapter.create_release.assert_not_called()
+        adapter.upload_release_asset.assert_not_called()
+    assert audit == []
+
+
+@pytest.mark.asyncio
+async def test_contrast_no_release_vx_fallback_body_is_ever_created(tmp_path, monkeypatch):
+    """At 3.4.2 this scenario created a release with the body 'Release v1.2.3' on the
+    event forge. It must create no release at all, and certainly not that one."""
+    source, first, second, context, audit, sent = _two_destination_setup(tmp_path, monkeypatch)
+
+    async def get_file_content(repo, path, ref="main"):
+        return {"CHANGELOG.md": NO_SECTION_CHANGELOG, ".ops.yaml": TWO_RELEASE_OPS_YAML}[path]
+
+    source.get_file_content = get_file_content
+    source.release_exists = AsyncMock(return_value=False)
+    source.create_release = AsyncMock(return_value={"id": 1})
+
+    try:
+        await _process(source, CONFIG, context)
+    except MissingChangelogEntryError:
+        pass
+
+    bodies = [
+        call.kwargs.get("body")
+        for adapter in (source, first, second)
+        for call in adapter.create_release.await_args_list
+    ]
+    assert f"Release {TAG}" not in bodies
+    assert bodies == []
