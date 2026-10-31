@@ -1,0 +1,16 @@
+# Release title forms of faigrid (reference clone, read-only, origin/main).
+# prefix: .release-title-prefix. name_template: the form its release job renders.
+# Columns are tab separated: verdict, tag_name.
+prefix	fusionAIze Grid
+name_template	fusionAIze Grid {tag_name}
+accept	v1.10.1
+accept	v1.10.0
+accept	v1.6.0
+accept	v1.10.1-rc1
+accept	v2.0.0-rc12
+refuse	v1.10.1-rc
+refuse	v1.10.1-
+refuse	v1.10.1-RC1
+refuse	v1.10.1-beta
+refuse	1.10.1
+refuse	v1.10

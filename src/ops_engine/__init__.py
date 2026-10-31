@@ -43,6 +43,15 @@ from .modules.migration_runner import (
     runner_from_config,
 )
 from .utils.changelog_parser import ChangelogParser
+# The release gates (OE-007). The module is release_gates; no exported name equals it.
+from .modules.release_gates import (
+    ReleaseTitleError,
+    MissingChangelogEntryError,
+    ReleaseNotesAudienceError,
+    check_release_title,
+    extract_changelog_section,
+    check_release_notes_audience,
+)
 
 __all__ = [
     # Core
@@ -88,4 +97,11 @@ __all__ = [
     "ChangelogParser",
     # Runtime identity
     "get_runtime_identity",
+    # Release gates (OE-007)
+    "check_release_title",
+    "extract_changelog_section",
+    "check_release_notes_audience",
+    "ReleaseTitleError",
+    "MissingChangelogEntryError",
+    "ReleaseNotesAudienceError",
 ]

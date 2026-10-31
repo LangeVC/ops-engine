@@ -91,7 +91,13 @@ of scope for this revision.
     {"name": "ApplyResult",                   "kind": "class",    "contract": true},
     {"name": "runner_from_config",            "kind": "function", "contract": true},
     {"name": "ChangelogParser",               "kind": "class",    "contract": true},
-    {"name": "get_runtime_identity",          "kind": "function", "contract": true}
+    {"name": "get_runtime_identity",          "kind": "function", "contract": true},
+    {"name": "check_release_title",           "kind": "function", "contract": true},
+    {"name": "extract_changelog_section",     "kind": "function", "contract": true},
+    {"name": "check_release_notes_audience",  "kind": "function", "contract": true},
+    {"name": "ReleaseTitleError",             "kind": "class",    "contract": true},
+    {"name": "MissingChangelogEntryError",    "kind": "class",    "contract": true},
+    {"name": "ReleaseNotesAudienceError",     "kind": "class",    "contract": true}
   ],
   "methods": [
     {
@@ -146,6 +152,46 @@ It takes **no parameters**. It returns the running ops-engine version and the
 SHA-256 of the Layer-2 `config.yml` bytes the config loader loaded; a value
 that cannot be determined is the string `"unknown"`, and the call never raises.
 The `RuntimeIdentity` return type is not itself a promised name.
+
+## Release gates
+
+`check_release_title`, `extract_changelog_section`,
+`check_release_notes_audience` and the three errors `ReleaseTitleError`,
+`MissingChangelogEntryError`, `ReleaseNotesAudienceError` (all `contract`
+names above) are the functions and errors of
+`ops_engine.modules.release_gates`, exported under names that differ from
+their module's name. Each gate refuses with its named error; each error is a
+`ValueError`.
+
+```python
+check_release_title(tag_name, name_template=None, prefix=None) -> str
+```
+
+`tag_name` is the tag being released. Exactly one of `name_template` (it
+contains `{tag_name}` once) or `prefix` (rendered as `"<prefix> <tag_name>"`)
+names the title form; neither or both is refused. It returns the rendered
+title when `tag_name` is `vX.Y.Z` or the prerelease form `vX.Y.Z-rcN`
+(lowercase `rc`, at least one digit), and raises `ReleaseTitleError` naming the
+title otherwise.
+
+```python
+extract_changelog_section(changelog, tag_name) -> str
+```
+
+`changelog` is the text of `CHANGELOG.md`; `tag_name` may carry the leading
+`v`. It returns the notes of that version's section and raises
+`MissingChangelogEntryError` when the section is absent or its body is empty.
+
+```python
+check_release_notes_audience(notes, ticket_prefixes=None) -> None
+```
+
+`ticket_prefixes` are the organisation's own tracker prefixes, each one
+uppercase `[A-Z]{2,5}` token. It raises `ReleaseNotesAudienceError`, quoting
+each token and its line, when `notes` holds `PREFIX-<digits>` for a declared
+prefix. A prefix that is not an uppercase 2-5 letter token is refused the same
+way, never skipped. With no prefixes it refuses nothing: the engine carries no
+organisation vocabulary.
 
 ## Unpromised names
 
