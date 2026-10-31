@@ -88,6 +88,7 @@ import asyncio
 import fnmatch
 import logging
 import os
+import re
 import tempfile
 import warnings
 from dataclasses import dataclass, field
@@ -99,9 +100,13 @@ from ops_engine.config_loader import (
     Destination,
     MirrorConfig,
     OpsEngineConfig,
+    VALID_DESTINATION_VISIBILITIES,
 )
 
 logger = logging.getLogger(__name__)
+
+# A full object id (SHA-1 or SHA-256) in lower-case hex; nothing else reaches argv.
+_OBJECT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 
 # The two Actions variables that carry the legacy, DEPRECATED mirror override
 # (removed in 4.0.0 — DEC-003). The concrete strings below are the single
@@ -427,12 +432,13 @@ class MirrorHandler:
         runner: Optional[Callable[[list[str], str], Awaitable[tuple[int, str]]]] = None,
         audit: Optional[list[str]] = None,
         candidate_globs: Optional[Sequence[str]] = None,
-        default_branch: str = "main",
     ) -> list[str]:
         """Push exactly the triggering ref to every mirror destination (OE-022).
 
         On a push event the single ref named by the webhook is pushed with the
-        refspec ``+<ref>:<ref>`` (force, one ref). Never ``--prune``, never
+        refspec ``+<sha>:<ref>`` (force, one ref; ``<sha>`` is the payload's
+        ``after``, the very object the visibility gate judged, so what is sent
+        is what was checked). Never ``--prune``, never
         ``--mirror``, never ``--all``/``--tags``: nothing but the triggering ref
         moves, and nothing on the destination is deleted. Only destinations with
         ``role == "mirror"`` on a forge with a known remote host are pushed.
@@ -446,17 +452,17 @@ class MirrorHandler:
         default runs real git. Returns the audit lines of this call.
 
         Visibility gate (public destinations only). A destination whose
-        configured ``visibility`` is ``"public"`` receives the ref only if the
-        ref does not touch a candidate path: the gate diffs the ref from its fork
-        point (``git merge-base <default branch> <sha>``; for a push to the
-        default branch itself, from the pre-push SHA) and refuses on any path
-        matching ``candidate_globs`` (configuration:
-        ``RepoConfig.visibility_candidate_globs``). A refusal is audited as a
+        configured ``visibility`` is ``"public"`` receives the ref only if NO
+        commit reachable from the ref touches a candidate path
+        (``candidate_globs``; configuration:
+        ``RepoConfig.visibility_candidate_globs``). The whole reachable history
+        is judged, because pushing a ref sends it; the payload's ``before`` SHA
+        is never trusted to shorten the judgement, so a ref cannot ship the
+        history of a refused ancestor. A refusal is audited as a
         ``mirror-refused`` line naming the paths, and nothing is pushed to that
-        destination. A fork point that cannot be resolved refuses (fail closed).
-        Destinations that are not ``"public"`` are mirrored without any gate.
-        The default branch comes from the payload's ``repository.default_branch``
-        and falls back to ``default_branch``.
+        destination. A history that cannot be read refuses (fail closed).
+        Destinations that are not ``"public"`` are mirrored without any gate. A
+        destination whose visibility is neither public nor private is refused.
         """
         lines: list[str] = []
         raw = event.get("raw", {}) or {}
@@ -464,25 +470,41 @@ class MirrorHandler:
         sha = raw.get("after") or (raw.get("head_commit") or {}).get("id") or ""
         if event.get("event_type") != "push" or not ref or not sha:
             return lines
+        if not isinstance(sha, str) or not isinstance(ref, str) or not _OBJECT_ID.fullmatch(sha):
+            line = (
+                f"mirror-refused ref={str(ref)[:80]} sha={str(sha)[:80]!r} reason=invalid-sha "
+                "nothing-pushed"
+            )
+            lines.append(line)
+            if audit is not None:
+                audit.append(line)
+            logger.warning(line)
+            return lines
         if set(sha) == {"0"}:  # ref deletion: there is nothing to push
             return lines
 
         run = runner or _run_git
-        refspec = f"+{ref}:{ref}"
+        refspec = f"+{sha}:{ref}"
         globs = (
             tuple(candidate_globs)
             if candidate_globs is not None
             else tuple(DEFAULT_VISIBILITY_CANDIDATE_GLOBS)
         )
-        default = (raw.get("repository") or {}).get("default_branch") or default_branch
         touched: Optional[list[str]] = None  # computed once, only if a public dest exists
         for dest in destinations:
             if dest.role != "mirror":
                 continue
-            if dest.visibility == "public":
+            if not MirrorHandler.visibility_declared(dest):
+                line = MirrorHandler.visibility_refusal_line(dest, ref=ref, sha=sha)
+                lines.append(line)
+                if audit is not None:
+                    audit.append(line)
+                logger.warning(line)
+                continue
+            if MirrorHandler.effective_visibility(dest) == "public":
                 if touched is None:
                     touched = await MirrorHandler._touched_candidates(
-                        run, repo_dir, ref, sha, raw.get("before") or "", default, globs
+                        run, repo_dir, sha, globs
                     )
                 if touched:
                     line = (
@@ -520,6 +542,7 @@ class MirrorHandler:
         runner: Optional[Callable[[list[str], str], Awaitable[tuple[int, str]]]] = None,
         audit: Optional[list[str]] = None,
         workdir: Optional[str] = None,
+        candidate_globs: Optional[Sequence[str]] = None,
     ) -> list[str]:
         """Push every canonical head and tag to every mirror destination (OE-023).
 
@@ -536,9 +559,24 @@ class MirrorHandler:
         One audit line per push attempt (appended to ``audit`` when given, and
         logged). A failed push is audited and does not stop the remaining
         destinations. Returns the audit lines of this call.
+
+        Visibility gate (OE-035, same rule as :meth:`push_event`). A destination
+        whose ``visibility`` is ``"public"`` does not receive a head or tag from
+        whose reachable history any commit touches a candidate path
+        (``candidate_globs``, default ``DEFAULT_VISIBILITY_CANDIDATE_GLOBS``),
+        judged in the fresh clone over the whole history. Each such ref is
+        audited as ``mirror-refused`` naming the paths, and the remaining refs
+        are pushed to that destination as explicit refspecs. An unreadable
+        history refuses (fail closed). Destinations that are not ``"public"``
+        still receive every ref.
         """
         lines: list[str] = []
         run = runner or _run_git
+        globs = (
+            tuple(candidate_globs)
+            if candidate_globs is not None
+            else tuple(DEFAULT_VISIBILITY_CANDIDATE_GLOBS)
+        )
 
         def record(line: str) -> None:
             lines.append(line)
@@ -555,8 +593,14 @@ class MirrorHandler:
                     f"exit={code} nothing-written"
                 )
                 return lines
+            # Refs and their refused paths, computed once and only when a public
+            # destination exists: ref -> (sha, touched candidate paths; empty = clean).
+            gated: Optional[dict[str, tuple[str, list[str]]]] = None
             for dest in destinations:
                 if dest.role != "mirror":
+                    continue
+                if not MirrorHandler.visibility_declared(dest):
+                    record(MirrorHandler.visibility_refusal_line(dest, ref="*"))
                     continue
                 host = _FORGE_HOSTS.get(dest.forge)
                 if host is None:
@@ -566,14 +610,28 @@ class MirrorHandler:
                     )
                     continue
                 remote = f"https://{host}/{dest.repo}.git"
-                pcode, _perr = await run(
-                    [
-                        "git", "push", remote,
-                        "+refs/heads/*:refs/heads/*",
-                        "+refs/tags/*:refs/tags/*",
-                    ],
-                    clone,
-                )
+                refspecs = [
+                    "+refs/heads/*:refs/heads/*",
+                    "+refs/tags/*:refs/tags/*",
+                ]
+                if MirrorHandler.effective_visibility(dest) == "public":
+                    if gated is None:
+                        gated = await MirrorHandler._gate_clone_refs(
+                            run, clone, globs
+                        )
+                    refused = {r: (sha, p) for r, (sha, p) in gated.items() if p}
+                    if refused:
+                        for ref, (sha, paths) in refused.items():
+                            record(
+                                f"mirror-refused ref={ref} "
+                                f"dest={dest.forge}:{dest.repo} "
+                                f"sha={sha} "
+                                f"paths={','.join(paths)}"
+                            )
+                        refspecs = [f"+{r}:{r}" for r in gated if r not in refused]
+                        if not refspecs:
+                            continue
+                pcode, _perr = await run(["git", "push", remote, *refspecs], clone)
                 record(f"mirror-state-push dest={dest.forge}:{dest.repo} exit={pcode}")
         return lines
 
@@ -643,6 +701,9 @@ class MirrorHandler:
             for dest in destinations:
                 if dest.role != "mirror":
                     continue
+                if not MirrorHandler.visibility_declared(dest):
+                    record(MirrorHandler.visibility_refusal_line(dest, ref="*"))
+                    continue
                 host = _FORGE_HOSTS.get(dest.forge)
                 if host is None:
                     logger.warning(
@@ -679,45 +740,94 @@ class MirrorHandler:
         return lines
 
     @staticmethod
+    def visibility_declared(dest: Destination) -> bool:
+        """True when ``dest.visibility`` is one of public and private (OE-035)."""
+        return dest.visibility in VALID_DESTINATION_VISIBILITIES
+
+    @staticmethod
+    def effective_visibility(dest: Destination) -> str:
+        """The visibility the gate judges by: an unset or unknown value counts as public."""
+        return dest.visibility if MirrorHandler.visibility_declared(dest) else "public"
+
+    @staticmethod
+    def visibility_refusal_line(dest: Destination, *, ref: str, sha: str = "") -> str:
+        """The audit line for a destination refused because its visibility is not declared."""
+        return (
+            f"mirror-refused ref={ref} dest={dest.forge}:{dest.repo} "
+            f"sha={sha or '-'} reason=visibility-undeclared "
+            f"visibility={dest.visibility!r}"
+        )
+
+    @staticmethod
+    async def _gate_clone_refs(
+        run: Callable[[list[str], str], Awaitable[tuple[int, str]]],
+        clone: str,
+        globs: Sequence[str],
+    ) -> dict[str, tuple[str, list[str]]]:
+        """Judge every head and tag of ``clone`` against the candidate paths.
+
+        Returns ``ref -> (commit sha, touched candidate paths)``; an empty path
+        list means the ref is clean. A ref list that cannot be read yields a
+        single ``refs`` entry that refuses (fail closed).
+        """
+        code, out = await run(
+            [
+                "git", "for-each-ref",
+                "--format=%(refname) %(objectname) %(*objectname)",
+                "refs/heads", "refs/tags",
+            ],
+            clone,
+        )
+        if code != 0:
+            return {"refs": ("", ["<refs unreadable>"])}
+        result: dict[str, tuple[str, list[str]]] = {}
+        for row in out.splitlines():
+            parts = row.split()
+            if len(parts) < 2:
+                continue
+            ref, sha = parts[0], parts[-1]  # peeled commit for annotated tags
+            result[ref] = (
+                sha,
+                await MirrorHandler._touched_candidates(
+                    run, clone, sha, globs
+                ),
+            )
+        return result
+
+    @staticmethod
     async def _touched_candidates(
         run: Callable[[list[str], str], Awaitable[tuple[int, str]]],
         repo_dir: str,
-        ref: str,
         sha: str,
-        before: str,
-        default: str,
         globs: Sequence[str],
     ) -> list[str]:
-        """Candidate paths the ref adds or changes since its fork point.
+        """Candidate paths touched by any commit reachable from ``sha``.
 
-        Returns the matching paths, or ``["<fork point unresolved>"]`` when the
-        base cannot be determined (the gate fails closed).
+        The judged set is the WHOLE reachable history (merges against each
+        parent, root commits included): pushing a ref sends that history, so a
+        ref inherits the refusal of any ancestor that touched a candidate path.
+        The payload's pre-push SHA is never trusted to shorten the judgement.
+        Paths are read NUL-separated and unquoted, so a non-ASCII name cannot
+        dodge a glob. Returns the matching paths, or ``["<history unresolved>"]``
+        when the history cannot be read (the gate fails closed).
         """
-        unresolved = ["<fork point unresolved>"]
-        if ref == f"refs/heads/{default}" and before and set(before) != {"0"}:
-            base = before
-        else:
-            code, out = await run(
-                ["git", "merge-base", f"refs/heads/{default}", sha], repo_dir
-            )
-            base = out.strip()
-            if code != 0 or not base:
-                return unresolved
-            if base == sha and (not before or set(before) == {"0"}):
-                # First push: the fork point is the ref itself, so the diff
-                # would be empty and hide everything. Fall back to the root
-                # (ADR-0001 D.8): judge the whole tree the ref carries.
-                code, out = await run(
-                    ["git", "ls-tree", "-r", "--name-only", sha], repo_dir
-                )
-                if code != 0:
-                    return unresolved
-                paths = [p for p in out.splitlines() if p.strip()]
-                return [p for p in paths if any(fnmatch.fnmatch(p, g) for g in globs)]
-        code, out = await run(["git", "diff", "--name-only", base, sha], repo_dir)
+        # A tree, blob or tag-of-tree makes `git log` exit 0 with no output, which
+        # would read as clean: only an object that peels to a commit is judged.
+        pcode, _pout = await run(
+            ["git", "rev-parse", "--verify", "-q", f"{sha}^{{commit}}"], repo_dir
+        )
+        if pcode != 0:
+            return ["<not a commit>"]
+        code, out = await run(
+            [
+                "git", "-c", "core.quotePath=false", "log", "-m", "--root",
+                "--name-only", "-z", "--format=", sha,
+            ],
+            repo_dir,
+        )
         if code != 0:
-            return unresolved
-        paths = [p for p in out.splitlines() if p.strip()]
+            return ["<history unresolved>"]
+        paths = sorted({p.strip("\n") for p in out.split("\0") if p.strip("\n")})
         return [p for p in paths if any(fnmatch.fnmatch(p, g) for g in globs)]
 
     @staticmethod

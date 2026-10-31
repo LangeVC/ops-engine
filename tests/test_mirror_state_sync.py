@@ -22,8 +22,8 @@ CANON = "https://forgejo.example/langevc/ops-engine.git"
 
 def _dests():
     return [
-        Destination(forge="github", repo="LangeVC/ops-engine", role="mirror"),
-        Destination(forge="gitlab", repo="langevc/ops-engine", role="mirror"),
+        Destination(forge="github", repo="LangeVC/ops-engine", role="mirror", visibility="private"),
+        Destination(forge="gitlab", repo="langevc/ops-engine", role="mirror", visibility="private"),
         Destination(forge="github", repo="LangeVC/ops-engine-rel", role="release"),
     ]
 

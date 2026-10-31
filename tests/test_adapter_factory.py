@@ -50,6 +50,7 @@ def _both_forge_config() -> OpsEngineConfig:
                                     "forge": "github",
                                     "repo": "exampleorg/engine",
                                     "role": "mirror",
+                                    "visibility": "private",
                                 },
                                 {
                                     "forge": "forgejo",

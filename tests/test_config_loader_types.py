@@ -26,7 +26,7 @@ def test_get_repo_config_returns_typed_sections():
             notifications=NotificationConfig(enabled=True),
             repositories={
                 "repo-a": RepoConfig(
-                    mirror=MirrorConfig(enabled=True, mirror_url="github.com/org/a"),
+                    mirror=MirrorConfig(enabled=True, mirror_url="github.com/org/a", visibility="private"),
                 )
             },
         )
@@ -56,7 +56,7 @@ def test_load_coerces_raw_dict_to_typed_section():
             "TestOrg": {
                 "release": {"enabled": True, "trigger": "tag_push"},
                 "repositories": {
-                    "repo-a": {"mirror": {"enabled": True, "mirror_url": "github.com/org/a"}}
+                    "repo-a": {"mirror": {"enabled": True, "mirror_url": "github.com/org/a", "visibility": "private"}}
                 },
             }
         }
@@ -134,7 +134,7 @@ def test_replay_dict_enabled_failure_is_never_attribute_error():
             "TestOrg": {
                 "repositories": {
                     "repo-a": {
-                        "mirror": {"enabled": True, "mirror_url": "github.com/org/a"},
+                        "mirror": {"enabled": True, "mirror_url": "github.com/org/a", "visibility": "private"},
                         "notifications": {
                             "enabled": True,
                             "channels": [

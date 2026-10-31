@@ -136,7 +136,7 @@ class PushingRunner:
         return 0, ""
 
 
-DESTS = [Destination(forge="github", repo="LangeVC/ops-engine", role="mirror")]
+DESTS = [Destination(forge="github", repo="LangeVC/ops-engine", role="mirror", visibility="private")]
 
 
 @pytest.mark.asyncio
@@ -146,7 +146,7 @@ async def test_stale_mirror_is_synced_within_one_cycle():
     runner = PushingRunner(primary, mirror)
     audit: list[str] = []
     rep = await ReconcileHandler.reconcile_mirror(
-        primary, "o/r", mirror, "m/r", CANON, DESTS, runner=runner, audit=audit
+        primary, "o/r", mirror, "LangeVC/ops-engine", CANON, DESTS, runner=runner, audit=audit
     )
     pushes = [c for c in runner.calls if c[1] == "push"]
     assert len(pushes) == 1  # exactly one sync in the cycle
@@ -162,7 +162,7 @@ async def test_in_sync_mirror_triggers_no_git_call():
     primary, mirror = FakeForge(*refs), FakeForge(*refs)
     runner = PushingRunner(primary, mirror)
     rep = await ReconcileHandler.reconcile_mirror(
-        primary, "o/r", mirror, "m/r", CANON, DESTS, runner=runner
+        primary, "o/r", mirror, "LangeVC/ops-engine", CANON, DESTS, runner=runner
     )
     assert runner.calls == [] and rep.behind is False
 
@@ -259,7 +259,7 @@ async def test_stopped_layover_stale_mirror_is_at_parity_one_cycle_after_restart
         assert before.behind and len(before.missing) == N_TAGS - 100
         assert before.differing == ["refs/heads/main"]
         rep = await ReconcileHandler.reconcile_mirror(
-            gh, "o/r", fj, "m/r", CANON, DESTS, runner=runner_on_stores
+            gh, "o/r", fj, "LangeVC/ops-engine", CANON, DESTS, runner=runner_on_stores
         )
     assert len([c for c in runner.calls if c[1] == "push"]) == 1  # one cycle, one sync
     assert not rep.behind and not rep.missing and not rep.differing

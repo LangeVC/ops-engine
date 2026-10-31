@@ -300,7 +300,7 @@ def _five_layover_configs():
                             "mirror": {
                                 "enabled": True,
                                 "primary_forge": "forgejo",
-                                "mirror_url": "github.com/elementeer/elementeer-mcp",
+                                "mirror_url": "github.com/elementeer/elementeer-mcp", "visibility": "private",
                                 "verify_on_push": True,
                             }
                         }
@@ -318,7 +318,7 @@ def _five_layover_configs():
                             "mirror": {
                                 "enabled": True,
                                 "primary_forge": "forgejo",
-                                "mirror_url": "github.com/typelicious/SkillWeave",
+                                "mirror_url": "github.com/typelicious/SkillWeave", "visibility": "private",
                                 "verify_on_push": True,
                             }
                         }
