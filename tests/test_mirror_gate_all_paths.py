@@ -104,7 +104,7 @@ def test_state_sync_does_not_leak_the_prd_blob_to_public(world):
     assert "prd.json" not in out
 
 
-def test_state_sync_unresolved_fork_point_refuses_on_public():
+def test_state_sync_unreadable_history_refuses_on_public():
     calls = []
 
     class Runner:
@@ -112,7 +112,7 @@ def test_state_sync_unresolved_fork_point_refuses_on_public():
             calls.append(list(argv))
             if argv[1] == "for-each-ref":
                 return 0, "refs/heads/x " + "a" * 40 + " \n"
-            if argv[1] == "merge-base":
+            if argv[1] == "log":
                 return 128, ""
             return 0, ""
 
@@ -375,3 +375,74 @@ def test_reconcile_mirror_honours_a_non_main_default_branch(tmp_path, monkeypatc
     # RED: with default "main" every ref is refused as 'fork point unresolved'.
     assert _has_ref(pub, "refs/heads/trunk") and _has_ref(pub, "refs/heads/feat")
     assert not any(l.startswith("mirror-refused") for l in audit)
+
+
+# --- a branch forked from a substrate-carrying default branch ---------------------
+
+def _substrate_main_world(tmp_path, monkeypatch, clean_main):
+    ident = ["-c", "user.name=t", "-c", "user.email=t@example.com"]
+    work = tmp_path / "work"
+    work.mkdir()
+    _git(work, "init", "-q", "-b", "main")
+    (work / "a.txt").write_text("a\n")
+    if not clean_main:
+        (work / ".skillweave").mkdir()
+        (work / ".skillweave" / "prd.json").write_text('{"secret": 1}\n')
+    _git(work, "add", ".")
+    _git(work, *ident, "commit", "-q", "-m", "main")
+    _git(work, "checkout", "-q", "-b", "feat")
+    (work / "b.txt").write_text("b\n")
+    _git(work, "add", ".")
+    _git(work, *ident, "commit", "-q", "-m", "feat")
+    sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=work, capture_output=True,
+                         text=True, check=True).stdout.strip()
+    canon, pub, priv = tmp_path / "canon.git", tmp_path / "pub.git", tmp_path / "priv.git"
+    for bare in (canon, pub, priv):
+        _git(tmp_path, "init", "-q", "--bare", str(bare))
+    _git(work, "push", "-q", str(canon), "main", "feat")
+    rewrites = {
+        "https://github.com/LangeVC/pub.git": f"file://{pub}",
+        "https://gitlab.com/langevc/priv.git": f"file://{priv}",
+    }
+    monkeypatch.setenv("GIT_CONFIG_COUNT", str(len(rewrites)))
+    for i, (url, local) in enumerate(rewrites.items()):
+        monkeypatch.setenv(f"GIT_CONFIG_KEY_{i}", f"url.{local}.insteadOf")
+        monkeypatch.setenv(f"GIT_CONFIG_VALUE_{i}", url)
+    return work, canon, pub, priv, sha
+
+
+def _objects(bare):
+    return subprocess.run(["git", "rev-list", "--all", "--objects"], cwd=bare,
+                          capture_output=True, text=True, check=True).stdout
+
+
+def test_state_sync_refuses_a_branch_forked_from_a_substrate_main(tmp_path, monkeypatch):
+    work, canon, pub, priv, sha = _substrate_main_world(tmp_path, monkeypatch, False)
+    audit = []
+    _sync(canon, audit)
+    assert not _has_ref(pub, "refs/heads/feat") and not _has_ref(pub, "refs/heads/main")
+    assert "prd.json" not in _objects(pub)
+    assert _has_ref(priv, "refs/heads/feat")
+    assert any("ref=refs/heads/feat" in l and l.startswith("mirror-refused") for l in audit)
+
+
+def test_push_event_refuses_a_branch_forked_from_a_substrate_main(tmp_path, monkeypatch):
+    work, canon, pub, priv, sha = _substrate_main_world(tmp_path, monkeypatch, False)
+    event = {"event_type": "push", "raw": {"ref": "refs/heads/feat", "after": sha,
+                                           "before": "0" * 40}}
+    audit = []
+    asyncio.run(MirrorHandler.push_event(event, _dests(), repo_dir=str(work), audit=audit))
+    assert "prd.json" not in _objects(pub)
+    assert not _has_ref(pub, "refs/heads/feat")
+    assert _has_ref(priv, "refs/heads/feat")
+    assert any(l.startswith("mirror-refused") for l in audit)
+
+
+def test_clean_branch_from_clean_main_still_reaches_public(tmp_path, monkeypatch):
+    work, canon, pub, priv, sha = _substrate_main_world(tmp_path, monkeypatch, True)
+    _sync(canon, [])
+    assert _has_ref(pub, "refs/heads/feat") and _has_ref(pub, "refs/heads/main")
+    event = {"event_type": "push", "raw": {"ref": "refs/heads/feat", "after": sha,
+                                           "before": "0" * 40}}
+    lines = asyncio.run(MirrorHandler.push_event(event, _dests(), repo_dir=str(work)))
+    assert not any(l.startswith("mirror-refused") for l in lines)

@@ -792,36 +792,24 @@ class MirrorHandler:
         default: str,
         globs: Sequence[str],
     ) -> list[str]:
-        """Candidate paths the ref adds or changes since its fork point.
+        """Candidate paths touched by any commit the destination may not hold.
 
-        Returns the matching paths, or ``["<fork point unresolved>"]`` when the
-        base cannot be determined (the gate fails closed).
+        The judged set is every commit reachable from ``sha`` (merges against each
+        parent): a feature branch forked from a default branch that carries
+        substrate therefore inherits the refusal, because pushing the branch
+        would send that history. The one exemption is a push whose pre-push SHA
+        (``before``) is known and non-zero: the destination already holds
+        ``before``, so only ``before..sha`` is judged. Returns the matching
+        paths, or ``["<history unresolved>"]`` when the history cannot be read
+        (the gate fails closed). ``default`` is accepted for call compatibility.
         """
-        unresolved = ["<fork point unresolved>"]
-        if ref == f"refs/heads/{default}" and before and set(before) != {"0"}:
-            base = before
-        else:
-            code, out = await run(
-                ["git", "merge-base", f"refs/heads/{default}", sha], repo_dir
-            )
-            base = out.strip()
-            if code != 0 or not base:
-                return unresolved
-            if base == sha and (not before or set(before) == {"0"}):
-                # First push: the fork point is the ref itself, so the diff
-                # would be empty and hide everything. Fall back to the root
-                # (ADR-0001 D.8): judge the whole tree the ref carries.
-                code, out = await run(
-                    ["git", "ls-tree", "-r", "--name-only", sha], repo_dir
-                )
-                if code != 0:
-                    return unresolved
-                paths = [p for p in out.splitlines() if p.strip()]
-                return [p for p in paths if any(fnmatch.fnmatch(p, g) for g in globs)]
-        code, out = await run(["git", "diff", "--name-only", base, sha], repo_dir)
+        argv = ["git", "log", "-m", "--name-only", "--format=", sha]
+        if before and set(before) != {"0"}:
+            argv = ["git", "log", "-m", "--name-only", "--format=", f"{before}..{sha}"]
+        code, out = await run(argv, repo_dir)
         if code != 0:
-            return unresolved
-        paths = [p for p in out.splitlines() if p.strip()]
+            return ["<history unresolved>"]
+        paths = sorted({p for p in out.splitlines() if p.strip()})
         return [p for p in paths if any(fnmatch.fnmatch(p, g) for g in globs)]
 
     @staticmethod
