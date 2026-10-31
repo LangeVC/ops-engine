@@ -165,3 +165,101 @@ async def test_in_sync_mirror_triggers_no_git_call():
         primary, "o/r", mirror, "m/r", CANON, DESTS, runner=runner
     )
     assert runner.calls == [] and rep.behind is False
+
+
+# --- criterion 3: RED proof -----------------------------------------------------
+#
+# Real adapters (GitHub 100 rows/page as primary, Forgejo 50 rows/page as mirror)
+# read from in-memory stores through a patched ``_request`` that honours the page
+# parameters, so the fixture spans several pages on both sides.
+
+N_TAGS = 230  # more than 50, three Forgejo pages, three GitHub pages
+
+
+class PagedStore:
+    """Branch and tag store served page by page in the shape of one forge."""
+
+    def __init__(self, kind, branches, tags):
+        self.kind, self.branches, self.tags = kind, dict(branches), dict(tags)
+
+    def _rows(self, path):
+        if path.endswith("/branches"):
+            if self.kind == "github":
+                return [{"name": n, "commit": {"sha": s}} for n, s in sorted(self.branches.items())]
+            return [{"name": n, "commit": {"id": s}} for n, s in sorted(self.branches.items())]
+        return [{"name": n, "id": "tagobj", "commit": {"sha": s}} for n, s in sorted(self.tags.items())]
+
+    async def request(self, method, path, **kw):
+        params = kw["params"]
+        size = int(params["per_page"] if self.kind == "github" else params["limit"])
+        page = int(params["page"])
+        return _resp(self._rows(path)[(page - 1) * size : page * size])
+
+
+def _tags(n=N_TAGS):
+    return {f"v{i:04d}": f"{i:040x}" for i in range(n)}
+
+
+def _stores(mirror_tags, mirror_main="a" * 40):
+    primary = PagedStore("github", {"main": "a" * 40}, _tags())
+    mirror = PagedStore("forgejo", {"main": mirror_main}, mirror_tags)
+    return primary, mirror
+
+
+def _adapters(primary, mirror):
+    gh = GithubAdapter(token="t", webhook_secret="s")
+    fj = ForgejoAdapter(base_url="https://git.example.com", token="t", webhook_secret="s")
+    return (
+        gh, patch.object(gh, "_request", new=AsyncMock(side_effect=primary.request)),
+        fj, patch.object(fj, "_request", new=AsyncMock(side_effect=mirror.request)),
+    )
+
+
+async def _single_page_drift(primary_adapter, mirror_adapter):
+    """Test-local single-page measurement: only page 1 of each list is read."""
+
+    async def first_page(adapter, path, params):
+        return {r["name"] for r in (await adapter._request("GET", path, params=params)).json()}
+
+    want = await first_page(primary_adapter, "/repos/o/r/tags", {"per_page": "100", "page": "1"})
+    have = await first_page(mirror_adapter, "/repos/m/r/tags", {"limit": "50", "page": "1"})
+    return sorted(want - have)
+
+
+@pytest.mark.asyncio
+async def test_single_page_measurement_reports_false_drift_real_measurement_none():
+    primary, mirror = _stores(_tags())  # mirror holds every tag: at parity
+    gh, p1, fj, p2 = _adapters(primary, mirror)
+    with p1, p2:
+        false_drift = await _single_page_drift(gh, fj)
+        assert len(false_drift) == 50  # page 1 is 100 rows on GitHub, 50 on Forgejo
+        rep = await ReconcileHandler.measure_drift(gh, "o/r", fj, "m/r")
+    assert not rep.behind and not rep.missing and not rep.differing and not rep.extra
+
+
+@pytest.mark.asyncio
+async def test_stopped_layover_stale_mirror_is_at_parity_one_cycle_after_restart():
+    # While the layover was stopped the primary gained 130 tags and main moved.
+    stale = {k: v for k, v in list(_tags().items())[:100]}
+    primary, mirror = _stores(stale, mirror_main="0" * 40)
+
+    pf, mf = FakeForge(primary.branches, primary.tags), FakeForge(mirror.branches, mirror.tags)
+    runner = PushingRunner(pf, mf)
+    gh, p1, fj, p2 = _adapters(primary, mirror)
+
+    async def runner_on_stores(argv, cwd):
+        out = await runner(argv, cwd)
+        if argv[1] == "push":
+            mirror.branches.update(primary.branches)
+            mirror.tags.update(primary.tags)
+        return out
+
+    with p1, p2:
+        before = await ReconcileHandler.measure_drift(gh, "o/r", fj, "m/r")
+        assert before.behind and len(before.missing) == N_TAGS - 100
+        assert before.differing == ["refs/heads/main"]
+        rep = await ReconcileHandler.reconcile_mirror(
+            gh, "o/r", fj, "m/r", CANON, DESTS, runner=runner_on_stores
+        )
+    assert len([c for c in runner.calls if c[1] == "push"]) == 1  # one cycle, one sync
+    assert not rep.behind and not rep.missing and not rep.differing
