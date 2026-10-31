@@ -470,9 +470,9 @@ class MirrorHandler:
         sha = raw.get("after") or (raw.get("head_commit") or {}).get("id") or ""
         if event.get("event_type") != "push" or not ref or not sha:
             return lines
-        if not _OBJECT_ID.fullmatch(sha):
+        if not isinstance(sha, str) or not isinstance(ref, str) or not _OBJECT_ID.fullmatch(sha):
             line = (
-                f"mirror-refused ref={ref} sha={sha[:80]!r} reason=invalid-sha "
+                f"mirror-refused ref={str(ref)[:80]} sha={str(sha)[:80]!r} reason=invalid-sha "
                 "nothing-pushed"
             )
             lines.append(line)
@@ -811,6 +811,13 @@ class MirrorHandler:
         dodge a glob. Returns the matching paths, or ``["<history unresolved>"]``
         when the history cannot be read (the gate fails closed).
         """
+        # A tree, blob or tag-of-tree makes `git log` exit 0 with no output, which
+        # would read as clean: only an object that peels to a commit is judged.
+        pcode, _pout = await run(
+            ["git", "rev-parse", "--verify", "-q", f"{sha}^{{commit}}"], repo_dir
+        )
+        if pcode != 0:
+            return ["<not a commit>"]
         code, out = await run(
             [
                 "git", "-c", "core.quotePath=false", "log", "-m", "--root",

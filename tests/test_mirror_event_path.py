@@ -535,3 +535,76 @@ def test_invalid_after_is_refused_audited_and_nothing_is_pushed(after):
     assert runner.calls == []
     assert len(lines) == 1 and lines == audit
     assert lines[0].startswith("mirror-refused") and "reason=invalid-sha" in lines[0]
+
+
+# -- only an object that peels to a commit is judged (tree, blob, tag-of-tree) ------
+
+def _holds_object(g, sha):
+    return g.sp.run(
+        ["git", "cat-file", "-e", sha], cwd=g.pub, capture_output=True
+    ).returncode == 0
+
+
+def _dirty_objects(g):
+    g.commit({"a.txt": "a\n"})
+    g.commit({".skillweave/prd.json": "{}\n"})
+    tree = g._git("rev-parse", "HEAD^{tree}")
+    blob = g._git("rev-parse", "HEAD:.skillweave/prd.json")
+    g._git("tag", "-a", "-m", "t", "tag-of-tree", tree)
+    return {"tree": tree, "blob": blob, "tag-of-tree": g._git("rev-parse", "tag-of-tree")}
+
+
+@pytest.mark.parametrize("kind", ["tree", "blob", "tag-of-tree"])
+def test_non_commit_after_is_refused_and_never_reaches_public(tmp_path, monkeypatch, kind):
+    g = _GatedRepo(tmp_path, monkeypatch)
+    sha = _dirty_objects(g)[kind]
+    g._git("tag", "t", sha)
+    audit = []
+    lines = g.push_event("refs/tags/t", sha, audit)
+    assert not _holds_object(g, sha)
+    assert not g.has(g.pub, "refs/tags/t")
+    assert any(l.startswith("mirror-refused") and "<not a commit>" in l for l in lines)
+    assert audit == lines
+
+
+def test_lightweight_tag_on_a_dirty_tree_is_refused_by_sync_state(tmp_path, monkeypatch):
+    g = _GatedRepo(tmp_path, monkeypatch)
+    objs = _dirty_objects(g)
+    g._git("tag", "lw", objs["tree"])
+    audit = []
+    _sync_all_with_tags(g, audit)
+    assert not g.has(g.pub, "refs/tags/lw") and not _holds_object(g, objs["tree"])
+    assert any("ref=refs/tags/lw" in l and "<not a commit>" in l for l in audit)
+
+
+def _sync_all_with_tags(g, audit):
+    canon = g.work.parent / "canon.git"
+    g.sp.run(["git", "init", "-q", "--bare", str(canon)], check=True, capture_output=True)
+    g._git("push", "-q", "-f", str(canon), "--all")
+    g._git("push", "-q", "-f", str(canon), "--tags")
+    return asyncio.run(
+        MirrorHandler.sync_state(
+            f"file://{canon}", _vis_dests(), audit=audit, candidate_globs=CANDIDATE_GLOBS
+        )
+    )
+
+
+def test_clean_annotated_tag_still_reaches_public(tmp_path, monkeypatch):
+    g = _GatedRepo(tmp_path, monkeypatch)
+    g.commit({"a.txt": "a\n"})
+    g._git("tag", "-a", "-m", "v1", "v1")
+    tag_obj = g._git("rev-parse", "v1")
+    lines = g.push_event("refs/tags/v1", tag_obj, [])
+    assert not any(l.startswith("mirror-refused") for l in lines)
+    assert g.rev(g.pub, "refs/tags/v1") == tag_obj and g.has(g.priv, "refs/tags/v1")
+
+
+@pytest.mark.parametrize("after", [12345, ["a" * 40], {"id": "a" * 40}, 1.5, True])
+def test_non_string_after_is_refused_audited_once_and_nothing_is_pushed(after):
+    runner, audit = Runner(), []
+    event = {"event_type": "push", "raw": {"ref": "refs/heads/x", "after": after}}
+    lines = asyncio.run(
+        MirrorHandler.push_event(event, _vis_dests(), repo_dir="/x", runner=runner, audit=audit)
+    )
+    assert runner.calls == []
+    assert len(lines) == 1 and lines == audit and "reason=invalid-sha" in lines[0]
