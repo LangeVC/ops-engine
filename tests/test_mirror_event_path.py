@@ -109,3 +109,115 @@ def test_branch_deletion_pushes_nothing():
     runner, audit = Runner(), []
     _run(_event(after=ZERO), _dests(), runner, audit)
     assert runner.calls == [] and audit == []
+
+
+# ── OE-022 criteria 2 and 3: visibility gate on public destinations ──────────
+
+FORK = "b" * 40
+CANDIDATE_GLOBS = [".skillweave/**", "**/prd*.json"]
+
+
+class GitRunner(Runner):
+    """Recording runner that answers merge-base and diff like git would."""
+
+    def __init__(self, changed, merge_base=FORK, base_code=0):
+        super().__init__()
+        self.changed = changed
+        self.merge_base = merge_base
+        self.base_code = base_code
+
+    async def __call__(self, argv, cwd):
+        if argv[1] == "merge-base":
+            self.calls.append((list(argv), cwd))
+            return self.base_code, self.merge_base + "\n" if self.base_code == 0 else ""
+        if argv[1] == "diff":
+            self.calls.append((list(argv), cwd))
+            return 0, "\n".join(self.changed) + "\n"
+        return await super().__call__(argv, cwd)
+
+
+def _vis_dests():
+    return [
+        Destination(forge="github", repo="LangeVC/pub", role="mirror", visibility="public"),
+        Destination(forge="gitlab", repo="langevc/priv", role="mirror", visibility="private"),
+    ]
+
+
+def _run_gated(event, runner, audit, globs=CANDIDATE_GLOBS):
+    return asyncio.run(
+        MirrorHandler.push_event(
+            event,
+            _vis_dests(),
+            repo_dir="/work/repo",
+            runner=runner,
+            audit=audit,
+            candidate_globs=globs,
+        )
+    )
+
+
+def _pushes(runner):
+    return [argv for argv, _ in runner.calls if argv[1] == "push"]
+
+
+def test_skillweave_path_is_refused_for_public_and_mirrored_to_private():
+    runner, audit = GitRunner([".skillweave/prds/x/prd.json", "src/app.py"]), []
+    lines = _run_gated(_event(), runner, audit)
+    pushes = _pushes(runner)
+    assert [p[2] for p in pushes] == ["https://gitlab.com/langevc/priv.git"]
+    refused = [l for l in lines if l.startswith("mirror-refused")]
+    assert len(refused) == 1
+    assert "dest=github:LangeVC/pub" in refused[0]
+    assert ".skillweave/prds/x/prd.json" in refused[0]
+    assert audit == lines
+    assert any("exit=0" in l and "dest=gitlab:langevc/priv" in l for l in lines)
+
+
+def test_gate_diffs_from_the_fork_point_with_the_default_branch():
+    runner = GitRunner(["src/app.py"])
+    _run_gated(_event(), runner, [])
+    assert runner.calls[0][0] == ["git", "merge-base", "refs/heads/main", SHA]
+    assert runner.calls[1][0] == ["git", "diff", "--name-only", FORK, SHA]
+
+
+def test_candidate_globs_come_from_the_passed_configuration():
+    runner = GitRunner(["docs/notes.txt"])
+    _run_gated(_event(), runner, [], globs=["docs/**"])
+    assert [p[2] for p in _pushes(runner)] == ["https://gitlab.com/langevc/priv.git"]
+    runner = GitRunner([".skillweave/a.md"])
+    _run_gated(_event(), runner, [], globs=["docs/**"])
+    assert len(_pushes(runner)) == 2  # not a candidate under this configuration
+
+
+def test_clean_ref_is_mirrored_to_public_and_private():
+    runner = GitRunner(["src/app.py"])
+    _run_gated(_event(), runner, [])
+    assert len(_pushes(runner)) == 2
+
+
+def test_default_branch_uses_payload_default_and_unresolved_fork_point_refuses():
+    ev = _event()
+    ev["raw"]["repository"] = {"default_branch": "trunk"}
+    runner = GitRunner(["src/app.py"])
+    _run_gated(ev, runner, [])
+    assert runner.calls[0][0][2] == "refs/heads/trunk"
+    runner = GitRunner(["src/app.py"], base_code=128)
+    lines = _run_gated(_event(), runner, [])
+    assert [p[2] for p in _pushes(runner)] == ["https://gitlab.com/langevc/priv.git"]
+    assert any(l.startswith("mirror-refused") for l in lines)
+
+
+def test_default_branch_push_is_diffed_from_the_before_sha():
+    ev = _event(ref="refs/heads/main")
+    ev["raw"]["before"] = "c" * 40
+    runner = GitRunner([".skillweave/x"])
+    _run_gated(ev, runner, [])
+    assert runner.calls[0][0] == ["git", "diff", "--name-only", "c" * 40, SHA]
+    assert [p[2] for p in _pushes(runner)] == ["https://gitlab.com/langevc/priv.git"]
+
+
+def test_config_layer_declares_candidate_globs():
+    from ops_engine.config_loader import RepoConfig
+
+    assert ".skillweave/**" in RepoConfig().visibility_candidate_globs
+    assert RepoConfig(visibility_candidate_globs=["x/**"]).visibility_candidate_globs == ["x/**"]

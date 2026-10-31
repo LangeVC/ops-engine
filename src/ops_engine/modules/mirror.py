@@ -93,6 +93,7 @@ from typing import Any, Awaitable, Callable, Optional, Sequence
 
 from ops_engine.adapters.base import ForgeAdapter
 from ops_engine.config_loader import (
+    DEFAULT_VISIBILITY_CANDIDATE_GLOBS,
     Destination,
     MirrorConfig,
     OpsEngineConfig,
@@ -137,23 +138,7 @@ def __getattr__(name: str) -> str:
 # (see :meth:`MirrorHandler.classify_visibility`). The arms mirror the deployed
 # gate's BLOCKED_PATHS so a layover can feed the same candidate set, but here
 # they only narrow *where* content is measured — never the verdict.
-_VISIBILITY_CANDIDATE_GLOBS: tuple[str, ...] = (
-    ".skillweave/**",
-    "strategy.md",
-    "**/strategy.md",
-    "prd*.md",
-    "**/prd*.md",
-    "prd*.json",
-    "**/prd*.json",
-    "*.contract*",
-    "**/*.contract*",
-    "*contract*.md",
-    "**/*contract*.md",
-    "*proposal*.md",
-    "**/*proposal*.md",
-    "*.proposal*",
-    "**/*.proposal*",
-)
+_VISIBILITY_CANDIDATE_GLOBS: tuple[str, ...] = tuple(DEFAULT_VISIBILITY_CANDIDATE_GLOBS)
 
 
 @dataclass(frozen=True)
@@ -439,6 +424,8 @@ class MirrorHandler:
         repo_dir: str,
         runner: Optional[Callable[[list[str], str], Awaitable[tuple[int, str]]]] = None,
         audit: Optional[list[str]] = None,
+        candidate_globs: Optional[Sequence[str]] = None,
+        default_branch: str = "main",
     ) -> list[str]:
         """Push exactly the triggering ref to every mirror destination (OE-022).
 
@@ -455,6 +442,19 @@ class MirrorHandler:
 
         ``runner(argv, cwd)`` runs git and returns ``(exit_code, stderr)``; the
         default runs real git. Returns the audit lines of this call.
+
+        Visibility gate (public destinations only). A destination whose
+        configured ``visibility`` is ``"public"`` receives the ref only if the
+        ref does not touch a candidate path: the gate diffs the ref from its fork
+        point (``git merge-base <default branch> <sha>``; for a push to the
+        default branch itself, from the pre-push SHA) and refuses on any path
+        matching ``candidate_globs`` (configuration:
+        ``RepoConfig.visibility_candidate_globs``). A refusal is audited as a
+        ``mirror-refused`` line naming the paths, and nothing is pushed to that
+        destination. A fork point that cannot be resolved refuses (fail closed).
+        Destinations that are not ``"public"`` are mirrored without any gate.
+        The default branch comes from the payload's ``repository.default_branch``
+        and falls back to ``default_branch``.
         """
         lines: list[str] = []
         raw = event.get("raw", {}) or {}
@@ -467,9 +467,31 @@ class MirrorHandler:
 
         run = runner or _run_git
         refspec = f"+{ref}:{ref}"
+        globs = (
+            tuple(candidate_globs)
+            if candidate_globs is not None
+            else tuple(DEFAULT_VISIBILITY_CANDIDATE_GLOBS)
+        )
+        default = (raw.get("repository") or {}).get("default_branch") or default_branch
+        touched: Optional[list[str]] = None  # computed once, only if a public dest exists
         for dest in destinations:
             if dest.role != "mirror":
                 continue
+            if dest.visibility == "public":
+                if touched is None:
+                    touched = await MirrorHandler._touched_candidates(
+                        run, repo_dir, ref, sha, raw.get("before") or "", default, globs
+                    )
+                if touched:
+                    line = (
+                        f"mirror-refused ref={ref} dest={dest.forge}:{dest.repo} "
+                        f"sha={sha} paths={','.join(touched)}"
+                    )
+                    lines.append(line)
+                    if audit is not None:
+                        audit.append(line)
+                    logger.warning(line)
+                    continue
             host = _FORGE_HOSTS.get(dest.forge)
             if host is None:
                 logger.warning(
@@ -487,6 +509,37 @@ class MirrorHandler:
                 audit.append(line)
             logger.info(line)
         return lines
+
+    @staticmethod
+    async def _touched_candidates(
+        run: Callable[[list[str], str], Awaitable[tuple[int, str]]],
+        repo_dir: str,
+        ref: str,
+        sha: str,
+        before: str,
+        default: str,
+        globs: Sequence[str],
+    ) -> list[str]:
+        """Candidate paths the ref adds or changes since its fork point.
+
+        Returns the matching paths, or ``["<fork point unresolved>"]`` when the
+        base cannot be determined (the gate fails closed).
+        """
+        unresolved = ["<fork point unresolved>"]
+        if ref == f"refs/heads/{default}" and before and set(before) != {"0"}:
+            base = before
+        else:
+            code, out = await run(
+                ["git", "merge-base", f"refs/heads/{default}", sha], repo_dir
+            )
+            base = out.strip()
+            if code != 0 or not base:
+                return unresolved
+        code, out = await run(["git", "diff", "--name-only", base, sha], repo_dir)
+        if code != 0:
+            return unresolved
+        paths = [p for p in out.splitlines() if p.strip()]
+        return [p for p in paths if any(fnmatch.fnmatch(p, g) for g in globs)]
 
     @staticmethod
     def resolve_destination(
@@ -933,12 +986,12 @@ _FORGE_HOSTS: dict[str, str] = {"github": "github.com", "gitlab": "gitlab.com"}
 
 
 async def _run_git(argv: list[str], cwd: str) -> tuple[int, str]:
-    """Run git for real; return ``(exit_code, stderr)``."""
+    """Run git for real; return ``(exit_code, output)`` (stdout and stderr merged)."""
     proc = await asyncio.create_subprocess_exec(
         *argv,
         cwd=cwd,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
     )
     _, err = await proc.communicate()
     return proc.returncode or 0, err.decode(errors="replace")
