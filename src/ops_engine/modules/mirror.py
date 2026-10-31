@@ -535,6 +535,17 @@ class MirrorHandler:
             base = out.strip()
             if code != 0 or not base:
                 return unresolved
+            if base == sha and (not before or set(before) == {"0"}):
+                # First push: the fork point is the ref itself, so the diff
+                # would be empty and hide everything. Fall back to the root
+                # (ADR-0001 D.8): judge the whole tree the ref carries.
+                code, out = await run(
+                    ["git", "ls-tree", "-r", "--name-only", sha], repo_dir
+                )
+                if code != 0:
+                    return unresolved
+                paths = [p for p in out.splitlines() if p.strip()]
+                return [p for p in paths if any(fnmatch.fnmatch(p, g) for g in globs)]
         code, out = await run(["git", "diff", "--name-only", base, sha], repo_dir)
         if code != 0:
             return unresolved
@@ -993,8 +1004,8 @@ async def _run_git(argv: list[str], cwd: str) -> tuple[int, str]:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
     )
-    _, err = await proc.communicate()
-    return proc.returncode or 0, err.decode(errors="replace")
+    out, _ = await proc.communicate()  # stderr is merged into stdout
+    return proc.returncode or 0, (out or b"").decode(errors="replace")
 
 
 async def _report_drift(

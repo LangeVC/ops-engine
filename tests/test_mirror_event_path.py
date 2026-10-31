@@ -221,3 +221,107 @@ def test_config_layer_declares_candidate_globs():
 
     assert ".skillweave/**" in RepoConfig().visibility_candidate_globs
     assert RepoConfig(visibility_candidate_globs=["x/**"]).visibility_candidate_globs == ["x/**"]
+
+
+# ── Real git, real runner (runner=None), local bare repos, no network ────────
+
+import os
+import subprocess
+
+import pytest
+
+
+def _git(cwd, *args, env=None):
+    subprocess.run(
+        ["git", *args], cwd=cwd, check=True, capture_output=True,
+        env={**os.environ, **(env or {})},
+    )
+
+
+def _rev(cwd, name):
+    return subprocess.run(
+        ["git", "rev-parse", name], cwd=cwd, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+@pytest.fixture
+def real(tmp_path, monkeypatch):
+    work = tmp_path / "work"
+    work.mkdir()
+    ident = ["-c", "user.name=t", "-c", "user.email=t@example.com"]
+    _git(work, "init", "-q", "-b", "main")
+    (work / "a.txt").write_text("a\n")
+    _git(work, "add", ".")
+    _git(work, *ident, "commit", "-q", "-m", "base")
+    pub, priv = tmp_path / "pub.git", tmp_path / "priv.git"
+    for bare in (pub, priv):
+        _git(tmp_path, "init", "-q", "--bare", str(bare))
+    # Route the fixed forge URLs to the local bare repos (no network).
+    rewrites = {
+        "https://github.com/LangeVC/pub.git": f"file://{pub}",
+        "https://gitlab.com/langevc/priv.git": f"file://{priv}",
+    }
+    monkeypatch.setenv("GIT_CONFIG_COUNT", str(len(rewrites)))
+    for i, (url, local) in enumerate(rewrites.items()):
+        monkeypatch.setenv(f"GIT_CONFIG_KEY_{i}", f"url.{local}.insteadOf")
+        monkeypatch.setenv(f"GIT_CONFIG_VALUE_{i}", url)
+    return work, pub, priv, ident
+
+
+def _real_push(work, ref, before, audit):
+    event = {
+        "event_type": "push",
+        "repo": "x/y",
+        "raw": {"ref": ref, "after": _rev(work, ref), "before": before,
+                "repository": {"default_branch": "main"}},
+    }
+    return asyncio.run(
+        MirrorHandler.push_event(
+            event, _vis_dests(), repo_dir=str(work), audit=audit,
+            candidate_globs=CANDIDATE_GLOBS,
+        )
+    )
+
+
+def _has_ref(bare, ref):
+    return subprocess.run(
+        ["git", "rev-parse", "--verify", "-q", ref], cwd=bare, capture_output=True
+    ).returncode == 0
+
+
+def test_real_git_public_refuses_skillweave_branch_private_receives_it(real):
+    work, pub, priv, ident = real
+    _git(work, "checkout", "-q", "-b", "feature")
+    (work / ".skillweave").mkdir()
+    (work / ".skillweave" / "x.md").write_text("plan\n")
+    _git(work, "add", ".")
+    _git(work, *ident, "commit", "-q", "-m", "plan")
+    audit = []
+    lines = _real_push(work, "refs/heads/feature", "0" * 40, audit)
+    assert not _has_ref(pub, "refs/heads/feature")
+    assert _has_ref(priv, "refs/heads/feature")
+    assert any(l.startswith("mirror-refused") and ".skillweave/x.md" in l for l in lines)
+    assert any("dest=gitlab:langevc/priv" in l and "exit=0" in l for l in lines)
+    assert audit == lines
+
+
+def test_real_git_clean_branch_reaches_public_and_private(real):
+    work, pub, priv, ident = real
+    _git(work, "checkout", "-q", "-b", "feature")
+    (work / "b.txt").write_text("b\n")
+    _git(work, "add", ".")
+    _git(work, *ident, "commit", "-q", "-m", "b")
+    _real_push(work, "refs/heads/feature", "0" * 40, [])
+    assert _has_ref(pub, "refs/heads/feature") and _has_ref(priv, "refs/heads/feature")
+
+
+def test_real_git_first_push_of_default_branch_judges_the_whole_tree(real):
+    work, pub, priv, ident = real
+    (work / ".skillweave").mkdir()
+    (work / ".skillweave" / "x.md").write_text("plan\n")
+    _git(work, "add", ".")
+    _git(work, *ident, "commit", "-q", "-m", "plan on main")
+    lines = _real_push(work, "refs/heads/main", "0" * 40, [])
+    assert not _has_ref(pub, "refs/heads/main")
+    assert _has_ref(priv, "refs/heads/main")
+    assert any(l.startswith("mirror-refused") and ".skillweave/x.md" in l for l in lines)
