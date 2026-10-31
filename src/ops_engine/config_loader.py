@@ -255,6 +255,17 @@ class ReleaseConfig(BaseModel):
     artifact_dir: Optional[str] = Field(default=None)
 
 
+class ReconcileConfig(BaseModel):
+    """Configuration of the release reconcile cycle (OE-010, D17).
+
+    ``since`` is a tag name or an ISO date (``YYYY-MM-DD``). The reconcile entry
+    point considers only tags at or after it and refuses to run without it, so
+    a first run can never publish the whole tag history of a repository.
+    """
+
+    since: Optional[str] = Field(default=None)
+
+
 class MergeConfig(BaseModel):
     """Configuration for automatic PR merging."""
     enabled: bool = Field(default=False)
@@ -385,6 +396,7 @@ class RepoConfig(BaseModel):
     github_name: str = Field(default="")
     # v2
     release: Optional[ReleaseConfig] = None
+    reconcile: Optional[ReconcileConfig] = None
     auto_merge: Optional[MergeConfig] = None
     mirror: Optional[MirrorConfig] = None
     notifications: Optional[NotificationConfig] = None
@@ -529,6 +541,7 @@ class OrgConfig(BaseModel):
     auto_triage: AutoTriageConfig = Field(default_factory=AutoTriageConfig)
     # v2: org-level defaults for new configs
     release: Optional[ReleaseConfig] = None
+    reconcile: Optional[ReconcileConfig] = None
     auto_merge: Optional[MergeConfig] = None
     notifications: Optional[NotificationConfig] = None
     repositories: dict[str, RepoConfig] = Field(default_factory=dict)
@@ -546,6 +559,7 @@ _DECLARED_SECTIONS: dict[str, type[BaseModel]] = {
     "workflow_dispatches": WorkflowDispatchConfig,
     "dependency_triggers": DependencyTriggerConfig,
     "release": ReleaseConfig,
+    "reconcile": ReconcileConfig,
     "auto_merge": MergeConfig,
     "mirror": MirrorConfig,
     "notifications": NotificationConfig,
@@ -664,6 +678,7 @@ class OpsEngineConfig(BaseModel):
             github_name=repo_specific.github_name,  # no org default (repo-specific only)
             # v2: merge with org defaults
             release=repo_specific.release or org_config.release,
+            reconcile=repo_specific.reconcile or org_config.reconcile,
             auto_merge=repo_specific.auto_merge or org_config.auto_merge,
             mirror=repo_specific.mirror,  # no org default (repo-specific only)
             notifications=repo_specific.notifications or org_config.notifications,

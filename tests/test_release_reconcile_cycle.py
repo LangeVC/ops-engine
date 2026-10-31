@@ -10,10 +10,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from ops_engine.config_loader import OpsEngineConfig, ReleaseConfig
+from ops_engine.config_loader import OpsEngineConfig, ReconcileConfig, ReleaseConfig
 from ops_engine.modules import mirror as mirror_module
 from ops_engine.modules import release as release_module
-from ops_engine.modules.reconcile import ReconcileHandler
+from ops_engine.modules.reconcile import ReconcileHandler, ReconcileSinceError
 from ops_engine.modules.release import ReleaseContext, TagIdentitySpec
 
 REPO = "exampleorg/engine"
@@ -31,6 +31,7 @@ destinations:
   - {forge: github, repo: exampleorg/engine-pub, role: release, visibility: public}
 """
 CONFIG = ReleaseConfig(enabled=True, trigger="tag_push", tag_pattern="v*")
+SINCE = ReconcileConfig(since="v1.0.0")
 
 
 def _ops_config() -> OpsEngineConfig:
@@ -86,7 +87,9 @@ async def test_publishes_only_the_matching_tag_that_has_no_release(tmp_path, mon
     target = _target(existing={"v1.2.2"})
     context, identity = _context(tmp_path, [target], monkeypatch)
 
-    report = await ReconcileHandler.reconcile_release_tags(source, REPO, CONFIG, context)
+    report = await ReconcileHandler.reconcile_release_tags(
+        source, REPO, CONFIG, context, SINCE
+    )
 
     assert report.published == ["v1.2.3"]
     assert report.failed == {}
@@ -106,7 +109,9 @@ async def test_a_tag_missing_on_one_of_two_destinations_is_published_only_there(
     # Destination order follows .ops.yaml: forgejo first, github second.
     context, _ = _context(tmp_path, [has_it, lacks_it], monkeypatch)
 
-    report = await ReconcileHandler.reconcile_release_tags(source, REPO, CONFIG, context)
+    report = await ReconcileHandler.reconcile_release_tags(
+        source, REPO, CONFIG, context, SINCE
+    )
 
     assert report.published == ["v1.2.3"]
     has_it.create_release.assert_not_called()
@@ -119,7 +124,9 @@ async def test_nothing_missing_publishes_nothing_and_pushes_no_tag(tmp_path, mon
     target = _target(existing={"v1.2.2", "v1.2.3"})
     context, identity = _context(tmp_path, [target], monkeypatch)
 
-    report = await ReconcileHandler.reconcile_release_tags(source, REPO, CONFIG, context)
+    report = await ReconcileHandler.reconcile_release_tags(
+        source, REPO, CONFIG, context, SINCE
+    )
 
     assert report.published == []
     target.create_release.assert_not_called()
@@ -133,7 +140,7 @@ async def test_repository_without_release_enabled_is_not_read(tmp_path, monkeypa
     context, _ = _context(tmp_path, [target], monkeypatch)
 
     report = await ReconcileHandler.reconcile_release_tags(
-        source, REPO, ReleaseConfig(enabled=False), context
+        source, REPO, ReleaseConfig(enabled=False), context, SINCE
     )
 
     assert report.published == []
@@ -148,7 +155,9 @@ async def test_a_refused_tag_is_recorded_and_the_others_still_publish(tmp_path, 
     target = _target()
     context, _ = _context(tmp_path, [target], monkeypatch)
 
-    report = await ReconcileHandler.reconcile_release_tags(source, REPO, CONFIG, context)
+    report = await ReconcileHandler.reconcile_release_tags(
+        source, REPO, CONFIG, context, SINCE
+    )
 
     assert report.published == ["v1.2.3"]
     assert list(report.failed) == ["v1.2.1"]
@@ -163,7 +172,96 @@ async def test_the_release_cycle_never_calls_the_mirror_state_sync(tmp_path, mon
     source = _source(["v1.2.3"])
     context, _ = _context(tmp_path, [_target()], monkeypatch)
 
-    report = await ReconcileHandler.reconcile_release_tags(source, REPO, CONFIG, context)
+    report = await ReconcileHandler.reconcile_release_tags(
+        source, REPO, CONFIG, context, SINCE
+    )
 
     assert report.published == ["v1.2.3"]
     boom.assert_not_called()
+
+
+def _tagged_source(tags):
+    source = _source(list(tags))
+    source.list_tags = AsyncMock(return_value=dict(tags))
+    return source
+
+
+@pytest.mark.asyncio
+async def test_refuses_without_since_and_names_the_setting(tmp_path, monkeypatch):
+    source = _source(["v1.2.3"])
+    context, _ = _context(tmp_path, [_target()], monkeypatch)
+
+    for missing in (None, ReconcileConfig(), ReconcileConfig(since="")):
+        with pytest.raises(ReconcileSinceError, match=r"reconcile\.since"):
+            await ReconcileHandler.reconcile_release_tags(
+                source, REPO, CONFIG, context, missing
+            )
+    source.list_tags.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_since_tag_excludes_earlier_tags(tmp_path, monkeypatch):
+    source = _source(["v1.2.2", "v1.2.3", "v1.10.0"])
+    target = _target()
+    context, _ = _context(tmp_path, [target], monkeypatch)
+
+    report = await ReconcileHandler.reconcile_release_tags(
+        source, REPO, CONFIG, context, ReconcileConfig(since="v1.2.3")
+    )
+
+    # v1.10.0 sorts after v1.2.3 by version; its section is absent, so it is refused.
+    assert report.published == ["v1.2.3"]
+    assert list(report.failed) == ["v1.10.0"]
+    assert "v1.2.2" not in report.up_to_date + report.published + list(report.failed)
+    assert [c.args[1] for c in target.release_exists.call_args_list].count("v1.2.2") == 0
+
+
+@pytest.mark.asyncio
+async def test_since_without_a_version_number_is_refused(tmp_path, monkeypatch):
+    source = _source(["v1.2.3"])
+    context, _ = _context(tmp_path, [_target()], monkeypatch)
+
+    with pytest.raises(ReconcileSinceError, match="latest"):
+        await ReconcileHandler.reconcile_release_tags(
+            source, REPO, CONFIG, context, ReconcileConfig(since="latest")
+        )
+
+
+@pytest.mark.asyncio
+async def test_since_date_keeps_only_tags_committed_on_or_after_it(tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+
+    source = _tagged_source({"v1.2.2": "b" * 40, "v1.2.3": "c" * 40})
+    dates = {
+        "b" * 40: datetime(2026, 1, 1, tzinfo=timezone.utc),
+        "c" * 40: datetime(2026, 6, 1, tzinfo=timezone.utc),
+    }
+
+    async def commit_date(repo, sha):
+        return dates[sha]
+
+    context, _ = _context(tmp_path, [_target()], monkeypatch)
+    report = await ReconcileHandler.reconcile_release_tags(
+        source, REPO, CONFIG, context, ReconcileConfig(since="2026-03-01"), commit_date
+    )
+
+    assert report.published == ["v1.2.3"]
+    assert report.failed == {}
+
+
+@pytest.mark.asyncio
+async def test_since_date_without_a_commit_date_source_is_refused(tmp_path, monkeypatch):
+    source = _source(["v1.2.3"])
+    context, _ = _context(tmp_path, [_target()], monkeypatch)
+
+    with pytest.raises(ReconcileSinceError, match="2026-03-01"):
+        await ReconcileHandler.reconcile_release_tags(
+            source, REPO, CONFIG, context, ReconcileConfig(since="2026-03-01")
+        )
+
+
+def test_reconcile_since_resolves_from_the_layover_config():
+    config = OpsEngineConfig.load(
+        {"orgs": {"exampleorg": {"reconcile": {"since": "v1.0.0"}, "repositories": {"engine": {}}}}}
+    )
+    assert config.get_repo_config("exampleorg", "engine").reconcile.since == "v1.0.0"

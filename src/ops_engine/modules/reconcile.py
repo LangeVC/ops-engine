@@ -12,14 +12,16 @@ Release and mirror state are queryable as records, not only visible in a log:
 
 import fnmatch
 import logging
+import re
 import tempfile
+from datetime import date, datetime, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Awaitable, Callable, Iterable, Optional, Sequence
 
 from ops_engine.adapters.base import ForgeAdapter
 from ops_engine.adapters.factory import adapters_for
-from ops_engine.config_loader import Destination, ReleaseConfig
+from ops_engine.config_loader import Destination, ReconcileConfig, ReleaseConfig
 from ops_engine.modules.mirror import MirrorHandler, resolve_destinations
 from ops_engine.modules.release import (
     DEFAULT_NAME_TEMPLATE,
@@ -110,6 +112,49 @@ class ReconcileRecord:
         }
 
 
+class ReconcileSinceError(ValueError):
+    """``reconcile.since`` is missing or cannot be applied (OE-010, D17)."""
+
+
+_ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+CommitDate = Callable[[str, str], Awaitable[datetime]]
+
+
+def _version_key(tag_name: str) -> tuple[int, ...]:
+    """Order key of a tag: its numeric components (``v1.10.0`` -> ``(1, 10, 0)``)."""
+    return tuple(int(n) for n in re.findall(r"\d+", tag_name))
+
+
+async def _tags_since(
+    since: str,
+    tags: dict[str, str],
+    repo: str,
+    commit_date: Optional[CommitDate],
+) -> list[str]:
+    """The tags at or after ``since``: a tag name or an ISO date."""
+    if _ISO_DATE.match(since):
+        if commit_date is None:
+            raise ReconcileSinceError(
+                f"reconcile.since is the date {since!r} but no commit-date source "
+                "was given; name a tag instead"
+            )
+        floor = datetime.combine(date.fromisoformat(since), datetime.min.time(), timezone.utc)
+        kept = []
+        for tag_name, sha in tags.items():
+            when = await commit_date(repo, sha)
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=timezone.utc)
+            if when >= floor:
+                kept.append(tag_name)
+        return kept
+    floor_key = _version_key(since)
+    if not floor_key:
+        raise ReconcileSinceError(
+            f"reconcile.since {since!r} has no version number to order tags by"
+        )
+    return [t for t in tags if (key := _version_key(t)) and key >= floor_key]
+
+
 @dataclass
 class ReleaseReconcileReport:
     """Queryable result of one release reconcile over one repository (OE-010).
@@ -168,6 +213,8 @@ class ReconcileHandler:
         repo: str,
         release_config: ReleaseConfig,
         context: ReleaseContext,
+        reconcile_config: Optional[ReconcileConfig] = None,
+        commit_date: Optional[CommitDate] = None,
     ) -> ReleaseReconcileReport:
         """Publish every release that is missing on a release destination.
 
@@ -182,13 +229,24 @@ class ReconcileHandler:
         A tag that is refused or fails is recorded in the report and the other
         tags still run. A repository without ``release.enabled`` is not read.
         This never calls the mirror state sync.
+
+        ``reconcile_config.since`` (a tag or an ISO date, D17) is required: only
+        tags at or after it are considered, and without it this raises
+        :class:`ReconcileSinceError` naming ``reconcile.since`` before any forge
+        call. A date is compared with ``commit_date(repo, sha)``.
         """
         report = ReleaseReconcileReport(repo=repo)
         if not release_config.enabled:
             return report
+        since = reconcile_config.since if reconcile_config else None
+        if not since:
+            raise ReconcileSinceError(
+                f"reconcile.since is not set for {repo}: set it to a tag or a date "
+                "to run the release reconcile"
+            )
 
         tags = await adapter.list_tags(repo)
-        for tag_name in sorted(tags):
+        for tag_name in sorted(await _tags_since(since, tags, repo, commit_date)):
             if not fnmatch.fnmatch(tag_name, release_config.tag_pattern):
                 continue
             try:
