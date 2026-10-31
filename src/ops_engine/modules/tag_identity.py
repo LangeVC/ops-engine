@@ -20,10 +20,26 @@ output)``. The module imports only the standard library, so a release runner
 without ``yaml`` and ``pydantic`` can load it by its path. Its name differs from
 every name it exports.
 
+The runner may accept an optional ``env`` keyword: ``await runner(argv, cwd,
+env=extra)``, where ``extra`` is a dict of environment variables to ADD to the
+process environment. It is passed only for a call that carries a credential
+(the canonical ``ls-remote``); every other call is ``runner(argv, cwd)``, so a
+runner without the keyword keeps working for those. The canonical credential
+travels as ``http.extraHeader`` through ``GIT_CONFIG_COUNT`` /
+``GIT_CONFIG_KEY_0`` / ``GIT_CONFIG_VALUE_0``: it is in no argv, in no URL and
+in no file, and nothing is persisted (no ``remote add``).
+
+The mirror credential is NOT handled here. ``mirror_remote`` is the caller's
+remote URL, used exactly as given, as in ``mirror.py``; this function does not
+hide, strip or rewrite it. The event path passes a credential-free mirror URL
+and relies on git's ambient credentials.
+
 No credential appears in any message: errors name the credential-free URL.
 """
 
 import asyncio
+import base64
+import os
 import re
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional
@@ -90,11 +106,13 @@ class MirrorTagIdentity:
     annotated: bool
 
 
-async def _run_git(argv: list, cwd: str) -> tuple:
-    """Run git for real; return ``(exit_code, output)`` (stdout and stderr merged)."""
+async def _run_git(argv: list, cwd: str, env: Optional[dict] = None) -> tuple:
+    """Run git for real; return ``(exit_code, output)`` (stdout and stderr merged).
+    ``env`` is added to the process environment."""
     proc = await asyncio.create_subprocess_exec(
         *argv,
         cwd=cwd,
+        env={**os.environ, **env} if env else None,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
     )
@@ -111,13 +129,19 @@ def _redact(url: str) -> str:
     return "%s://%s%s%s" % (scheme, authority.rpartition("@")[2], slash, tail)
 
 
-def _authenticated(url: str, token: str) -> str:
-    """Embed the credential for one git invocation. Only an http(s) URL is
-    authenticated; a local path or other scheme is returned unchanged."""
-    scheme, sep, rest = url.partition("://")
-    if not sep or scheme not in ("http", "https"):
-        return url
-    return "%s://x-access-token:%s@%s" % (scheme, token, rest.rpartition("@")[2])
+def _credential_env(url: str, token: str) -> dict:
+    """The environment that hands the credential to one git invocation as an
+    ``Authorization`` header. Only an http(s) URL is authenticated; for a local
+    path or other scheme the result is empty."""
+    if url.partition("://")[0] not in ("http", "https"):
+        return {}
+    basic = base64.b64encode(("x-access-token:%s" % token).encode()).decode()
+    return {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "http.extraHeader",
+        "GIT_CONFIG_VALUE_0": "Authorization: Basic %s" % basic,
+        "GIT_TERMINAL_PROMPT": "0",
+    }
 
 
 def _parse_refs(output: str) -> dict:
@@ -129,19 +153,19 @@ def _parse_refs(output: str) -> dict:
     return refs
 
 
-async def _ls_remote(run: Runner, remote: str, tag_name: str, cwd: str) -> tuple:
+async def _ls_remote(
+    run: Runner, remote: str, tag_name: str, cwd: str, env: Optional[dict] = None
+) -> tuple:
     """``(exit_code, object, peeled)`` for the tag at ``remote``; ``peeled`` is
     empty for a lightweight tag (git prints no peel line for it)."""
-    code, out = await run(
-        [
-            "git",
-            "ls-remote",
-            remote,
-            "refs/tags/%s" % tag_name,
-            "refs/tags/%s^{}" % tag_name,
-        ],
-        cwd,
-    )
+    argv = [
+        "git",
+        "ls-remote",
+        remote,
+        "refs/tags/%s" % tag_name,
+        "refs/tags/%s^{}" % tag_name,
+    ]
+    code, out = await (run(argv, cwd, env=env) if env else run(argv, cwd))
     refs = _parse_refs(out) if code == 0 else {}
     return code, refs.get("refs/tags/%s" % tag_name, ""), refs.get(
         "refs/tags/%s^{}" % tag_name, ""
@@ -160,8 +184,8 @@ async def push_canonical_tag(
 
     ``repo_dir`` is the local clone (it must hold the canonical tag object; a
     checkout that degraded the ref still does). ``canonical_url`` is read with
-    ``canonical_token``; ``mirror_remote`` is used as given, so a caller that
-    needs a mirror credential supplies it inside that remote. ``runner`` defaults
+    ``canonical_token`` through the environment, never argv; ``mirror_remote`` is
+    used exactly as given (the mirror credential is the caller's remote URL). ``runner`` defaults
     to real git. Returns the verified :class:`MirrorTagIdentity`; every refusal
     is a subclass of :class:`MirrorTagIdentityError` and nothing is pushed
     before the canonical identity is established.
@@ -179,7 +203,11 @@ async def push_canonical_tag(
 
     # 1. The canonical identity, read from the forge and never from the clone.
     code, obj, peel = await _ls_remote(
-        run, _authenticated(canonical_url, canonical_token.strip()), tag_name, repo_dir
+        run,
+        canonical_url,
+        tag_name,
+        repo_dir,
+        _credential_env(canonical_url, canonical_token.strip()),
     )
     if code != 0:
         raise CanonicalTagUnreadableError(

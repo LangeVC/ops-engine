@@ -7,6 +7,7 @@ annotated tag.
 """
 
 import asyncio
+import base64
 import subprocess
 
 import pytest
@@ -192,8 +193,11 @@ def test_credential_goes_to_git_only_for_the_canonical_read_and_never_into_a_mes
     calls = []
     canon = "https://forge.example.invalid/org/repo.git"
 
-    async def runner(argv, cwd):
+    envs = []
+
+    async def runner(argv, cwd, env=None):
         calls.append(argv)
+        envs.append(env)
         if argv[1] == "ls-remote":
             return 128, f"fatal: Authentication failed for '{argv[2]}'"
         return 0, ""
@@ -210,7 +214,12 @@ def test_credential_goes_to_git_only_for_the_canonical_read_and_never_into_a_mes
             )
         )
     assert calls[0][:2] == ["git", "ls-remote"]
-    assert TOKEN in calls[0][2]  # handed to git for the one canonical read
+    assert calls[0][2] == canon  # the URL carries no userinfo
+    assert not any(TOKEN in arg for argv in calls for arg in argv)  # in no argv
+    header = envs[0]["GIT_CONFIG_VALUE_0"]  # env of the canonical read only
+    assert envs[0]["GIT_CONFIG_KEY_0"] == "http.extraHeader"
+    assert TOKEN in base64.b64decode(header.rsplit(" ", 1)[1]).decode()
+    assert all(e is None for e in envs[1:])
     assert TOKEN not in str(err.value)
     assert canon in str(err.value)  # the credential-free URL is what is named
     assert len(calls) == 1  # nothing was pushed
