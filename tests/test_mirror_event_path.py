@@ -35,8 +35,8 @@ def _event(ref="refs/heads/feature-x", after=SHA):
 
 def _dests():
     return [
-        Destination(forge="github", repo="LangeVC/ops-engine", role="mirror"),
-        Destination(forge="gitlab", repo="langevc/ops-engine", role="mirror"),
+        Destination(forge="github", repo="LangeVC/ops-engine", role="mirror", visibility="private"),
+        Destination(forge="gitlab", repo="langevc/ops-engine", role="mirror", visibility="private"),
         Destination(forge="github", repo="LangeVC/ops-engine-rel", role="release"),
     ]
 

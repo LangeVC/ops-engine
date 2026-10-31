@@ -136,7 +136,7 @@ class PushingRunner:
         return 0, ""
 
 
-DESTS = [Destination(forge="github", repo="LangeVC/ops-engine", role="mirror")]
+DESTS = [Destination(forge="github", repo="LangeVC/ops-engine", role="mirror", visibility="private")]
 
 
 @pytest.mark.asyncio

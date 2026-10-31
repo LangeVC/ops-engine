@@ -22,6 +22,10 @@ from ops_engine.modules.release import DEFAULT_NAME_TEMPLATE, render_release_nam
 logger = logging.getLogger(__name__)
 
 
+class MirrorListMismatchError(ValueError):
+    """``reconcile_mirror`` was given different lists to measure and to sync (OE-035)."""
+
+
 @dataclass
 class MirrorState:
     """Queryable snapshot of one repo's cross-forge mirror sync.
@@ -270,13 +274,28 @@ class ReconcileHandler:
         runner: Optional[Callable[[list[str], str], Awaitable[tuple[int, str]]]] = None,
         audit: Optional[list[str]] = None,
         workdir: Optional[str] = None,
+        measure_destinations: Optional[Sequence[Destination]] = None,
     ) -> DriftReport:
         """One reconcile cycle: measure drift, state-sync when behind, re-measure.
+
+        ``destinations`` is the ONE list that is both measured and synced, passed
+        once (OE-035). ``measure_destinations`` exists only so a caller that holds
+        a second list can say so: a list that differs from ``destinations`` is
+        refused with :class:`MirrorListMismatchError` before anything is read or
+        written, so the mirror that is measured cannot differ from the
+        destinations that are synced.
 
         When the mirror is behind, :meth:`MirrorHandler.sync_state` runs once in
         this same cycle. Returns the drift measured AFTER the sync (or the
         initial, clean report when nothing was behind).
         """
+        if measure_destinations is not None and list(measure_destinations) != list(
+            destinations
+        ):
+            raise MirrorListMismatchError(
+                "reconcile_mirror refused: the destinations named for measuring "
+                "differ from the destinations named for syncing; pass one list"
+            )
         report = await ReconcileHandler.measure_drift(
             primary, primary_repo, mirror, mirror_repo
         )

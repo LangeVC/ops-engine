@@ -11,10 +11,15 @@ from pathlib import Path
 from typing import Any, Optional
 
 import yaml
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 
 _DESTINATION_REMOVAL_VERSION = "4.0.0"
+
+# OE-035: the only visibilities a destination may declare. Anything else
+# (including unset) is refused at configuration load and by the mirror gate,
+# and counts as public wherever it is reached anyway.
+VALID_DESTINATION_VISIBILITIES: tuple[str, ...] = ("public", "private")
 
 # Default path classes that may carry planning substrate (OE-022). This is the
 # configuration layer's default for ``RepoConfig.visibility_candidate_globs``;
@@ -383,6 +388,22 @@ class RepoConfig(BaseModel):
     visibility_candidate_globs: list[str] = Field(
         default_factory=lambda: list(DEFAULT_VISIBILITY_CANDIDATE_GLOBS)
     )
+
+    @field_validator("destinations")
+    @classmethod
+    def _destinations_declare_visibility(cls, value: list[Destination]) -> list[Destination]:
+        """Refuse a mirror destination whose visibility is unset or not public/private (OE-035).
+
+        Only ``role: mirror`` destinations are checked: they are the ones the
+        mirror gate pushes to or deletes from.
+        """
+        for dest in value:
+            if dest.role == "mirror" and dest.visibility not in VALID_DESTINATION_VISIBILITIES:
+                raise ValueError(
+                    f"destination {dest.forge}:{dest.repo} has visibility "
+                    f"{dest.visibility!r}; it must be 'public' or 'private'"
+                )
+        return value
 
     def resolve_destinations(self) -> list[Destination]:
         """Resolve this repo's destinations into a :class:`Destination` list.

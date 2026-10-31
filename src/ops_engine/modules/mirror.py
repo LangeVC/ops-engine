@@ -99,6 +99,7 @@ from ops_engine.config_loader import (
     Destination,
     MirrorConfig,
     OpsEngineConfig,
+    VALID_DESTINATION_VISIBILITIES,
 )
 
 logger = logging.getLogger(__name__)
@@ -479,7 +480,14 @@ class MirrorHandler:
         for dest in destinations:
             if dest.role != "mirror":
                 continue
-            if dest.visibility == "public":
+            if not MirrorHandler.visibility_declared(dest):
+                line = MirrorHandler.visibility_refusal_line(dest, ref=ref, sha=sha)
+                lines.append(line)
+                if audit is not None:
+                    audit.append(line)
+                logger.warning(line)
+                continue
+            if MirrorHandler.effective_visibility(dest) == "public":
                 if touched is None:
                     touched = await MirrorHandler._touched_candidates(
                         run, repo_dir, ref, sha, raw.get("before") or "", default, globs
@@ -578,6 +586,9 @@ class MirrorHandler:
             for dest in destinations:
                 if dest.role != "mirror":
                     continue
+                if not MirrorHandler.visibility_declared(dest):
+                    record(MirrorHandler.visibility_refusal_line(dest, ref="*"))
+                    continue
                 host = _FORGE_HOSTS.get(dest.forge)
                 if host is None:
                     logger.warning(
@@ -590,7 +601,7 @@ class MirrorHandler:
                     "+refs/heads/*:refs/heads/*",
                     "+refs/tags/*:refs/tags/*",
                 ]
-                if dest.visibility == "public":
+                if MirrorHandler.effective_visibility(dest) == "public":
                     if gated is None:
                         gated = await MirrorHandler._gate_clone_refs(
                             run, clone, default_branch, globs
@@ -677,6 +688,9 @@ class MirrorHandler:
             for dest in destinations:
                 if dest.role != "mirror":
                     continue
+                if not MirrorHandler.visibility_declared(dest):
+                    record(MirrorHandler.visibility_refusal_line(dest, ref="*"))
+                    continue
                 host = _FORGE_HOSTS.get(dest.forge)
                 if host is None:
                     logger.warning(
@@ -711,6 +725,25 @@ class MirrorHandler:
                         f"exit={dcode}"
                     )
         return lines
+
+    @staticmethod
+    def visibility_declared(dest: Destination) -> bool:
+        """True when ``dest.visibility`` is one of public and private (OE-035)."""
+        return dest.visibility in VALID_DESTINATION_VISIBILITIES
+
+    @staticmethod
+    def effective_visibility(dest: Destination) -> str:
+        """The visibility the gate judges by: an unset or unknown value counts as public."""
+        return dest.visibility if MirrorHandler.visibility_declared(dest) else "public"
+
+    @staticmethod
+    def visibility_refusal_line(dest: Destination, *, ref: str, sha: str = "") -> str:
+        """The audit line for a destination refused because its visibility is not declared."""
+        return (
+            f"mirror-refused ref={ref} dest={dest.forge}:{dest.repo} "
+            f"sha={sha or '-'} reason=visibility-undeclared "
+            f"visibility={dest.visibility!r}"
+        )
 
     @staticmethod
     async def _gate_clone_refs(

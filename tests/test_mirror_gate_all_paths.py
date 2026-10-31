@@ -124,3 +124,150 @@ def test_state_sync_unresolved_fork_point_refuses_on_public():
     pushes = [a for a in calls if a[1] == "push"]
     assert [p[2] for p in pushes] == ["https://gitlab.com/langevc/priv.git"]
     assert any(l.startswith("mirror-refused") for l in lines)
+
+
+# --- OE-035 criteria 2 and 3 -----------------------------------------------------
+#
+# Criterion 2: reconcile_mirror measures and syncs ONE destination list. Criterion
+# 3: a destination whose visibility is unset or not public/private is refused at
+# configuration load and by the gate.
+
+from ops_engine.config_loader import (  # noqa: E402
+    ConfigSectionError,
+    OpsEngineConfig,
+    RepoConfig,
+)
+from ops_engine.modules.reconcile import ReconcileHandler  # noqa: E402
+
+CANON_URL = "https://forgejo.example/o/r.git"
+
+
+class _Forge:
+    def __init__(self, branches, tags=None):
+        self.branches = dict(branches)
+        self.tags = dict(tags or {})
+
+    async def list_branches(self, repo):
+        return dict(self.branches)
+
+    async def list_tags(self, repo):
+        return dict(self.tags)
+
+
+class _Runner:
+    def __init__(self):
+        self.calls = []
+
+    async def __call__(self, argv, cwd):
+        self.calls.append(list(argv))
+        return 0, ""
+
+
+def _pub():
+    return Destination(forge="github", repo="LangeVC/pub", role="mirror", visibility="public")
+
+
+def _other():
+    return Destination(forge="gitlab", repo="langevc/other", role="mirror", visibility="private")
+
+
+def test_reconcile_mirror_refuses_different_lists_for_measuring_and_syncing():
+    from ops_engine.modules.reconcile import MirrorListMismatchError
+
+    primary = _Forge({"main": "a" * 40})
+    mirror = _Forge({"main": "0" * 40})
+    runner = _Runner()
+    with pytest.raises(MirrorListMismatchError):
+        asyncio.run(
+            ReconcileHandler.reconcile_mirror(
+                primary, "o/r", mirror, "m/r", CANON_URL, [_pub()],
+                runner=runner, measure_destinations=[_other()],
+            )
+        )
+    assert runner.calls == []  # refused before any git call
+
+
+def test_reconcile_mirror_accepts_the_same_list_for_both():
+    primary = _Forge({"main": "a" * 40})
+    mirror = _Forge({"main": "a" * 40})
+    dests = [_pub()]
+    report = asyncio.run(
+        ReconcileHandler.reconcile_mirror(
+            primary, "o/r", mirror, "m/r", CANON_URL, dests,
+            runner=_Runner(), measure_destinations=list(dests),
+        )
+    )
+    assert not report.behind
+
+
+@pytest.mark.parametrize("visibility", ["", "internal", "PUBLIC"])
+def test_push_event_refuses_and_audits_a_destination_with_undeclared_visibility(visibility):
+    dest = Destination(forge="github", repo="LangeVC/x", role="mirror", visibility=visibility)
+    runner = _Runner()
+    audit = []
+    event = {
+        "event_type": "push",
+        "raw": {"ref": "refs/heads/main", "after": "a" * 40, "before": "b" * 40},
+    }
+    lines = asyncio.run(
+        MirrorHandler.push_event(event, [dest], repo_dir="/x", runner=runner, audit=audit)
+    )
+    assert [a for a in runner.calls if a[1] == "push"] == []
+    assert len(lines) == 1 and lines == audit
+    assert lines[0].startswith("mirror-refused") and "reason=visibility-undeclared" in lines[0]
+
+
+def test_sync_state_refuses_and_audits_a_destination_with_empty_visibility():
+    dest = Destination(forge="github", repo="LangeVC/x", role="mirror", visibility="")
+    runner = _Runner()
+    audit = []
+    asyncio.run(
+        MirrorHandler.sync_state(CANON_URL, [dest], runner=runner, audit=audit)
+    )
+    assert [a for a in runner.calls if a[1] == "push"] == []
+    assert any("reason=visibility-undeclared" in l for l in audit)
+
+
+def test_sweep_refuses_a_destination_with_empty_visibility():
+    class SweepRunner(_Runner):
+        async def __call__(self, argv, cwd):
+            self.calls.append(list(argv))
+            if argv[1] == "for-each-ref":
+                return 0, "refs/heads/main\n"
+            return 0, ""
+
+    dest = Destination(forge="github", repo="LangeVC/x", role="mirror", visibility="")
+    runner = SweepRunner()
+    audit = []
+    asyncio.run(MirrorHandler.sweep_deleted_refs(CANON_URL, [dest], runner=runner, audit=audit))
+    assert not any(a[1] in ("ls-remote", "push") for a in runner.calls)
+    assert any("reason=visibility-undeclared" in l for l in audit)
+
+
+def test_unset_or_unknown_visibility_counts_as_public():
+    for value in ("", "internal"):
+        dest = Destination(forge="github", repo="x/y", visibility=value)
+        assert MirrorHandler.effective_visibility(dest) == "public"
+    assert MirrorHandler.effective_visibility(_other()) == "private"
+
+
+@pytest.mark.parametrize("visibility", ["", "internal"])
+def test_config_load_refuses_a_destination_with_undeclared_visibility(visibility):
+    raw = {
+        "orgs": {
+            "o": {
+                "repositories": {
+                    "r": {
+                        "destinations": [
+                            {"forge": "github", "repo": "o/r", "role": "mirror",
+                             "visibility": visibility}
+                        ]
+                    }
+                }
+            }
+        }
+    }
+    with pytest.raises(ConfigSectionError):
+        OpsEngineConfig.load(raw)
+    with pytest.raises(ValueError):
+        RepoConfig(destinations=[Destination(repo="o/r", visibility=visibility)])
