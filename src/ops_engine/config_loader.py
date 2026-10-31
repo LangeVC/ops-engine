@@ -289,6 +289,9 @@ class Destination(BaseModel):
     repo: str
     role: str = Field(default="mirror")  # "mirror" | "release" | "replica"
     visibility: str = Field(default="")  # "public" | "private" | ""
+    # OE-036 (D15): a mirror head that is AHEAD of the canonical side keeps its
+    # commits unless the destination opts in to overwriting it. Default off.
+    overwrite_ahead: bool = Field(default=False)
 
 
 class MirrorConfig(BaseModel):

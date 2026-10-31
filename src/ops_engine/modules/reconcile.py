@@ -63,10 +63,19 @@ class DriftReport:
     missing: list[str] = field(default_factory=list)
     differing: list[str] = field(default_factory=list)
     extra: list[str] = field(default_factory=list)
+    # OE-036: mirror heads ahead of canonical (kept, not overwritten) and
+    # sync failures (clone or push), both distinct from "behind".
+    ahead: list[str] = field(default_factory=list)
+    failed: list[str] = field(default_factory=list)
 
     @property
     def behind(self) -> bool:
         return bool(self.missing or self.differing)
+
+    @property
+    def green(self) -> bool:
+        """True only when nothing is behind, ahead, or failed."""
+        return not (self.behind or self.ahead or self.failed)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -75,6 +84,9 @@ class DriftReport:
             "differing": list(self.differing),
             "extra_on_mirror": list(self.extra),
             "behind": self.behind,
+            "ahead": list(self.ahead),
+            "failed": list(self.failed),
+            "green": self.green,
         }
 
 
@@ -312,14 +324,30 @@ class ReconcileHandler:
             return report
         logger.info(f"Mirror of {primary_repo} is behind ({len(report.missing)} missing, "
                     f"{len(report.differing)} differing); state-syncing")
-        await MirrorHandler.sync_state(
+        sync_lines = await MirrorHandler.sync_state(
             canonical_url,
             destinations,
             runner=runner,
             audit=audit,
             workdir=workdir,
             candidate_globs=candidate_globs,
+            protect_ahead=True,
         )
-        return await ReconcileHandler.measure_drift(
+        final = await ReconcileHandler.measure_drift(
             primary, primary_repo, mirror, mirror_repo
         )
+        ahead_refs: set[str] = set()
+        for line in sync_lines:
+            fields = dict(p.split("=", 1) for p in line.split() if "=" in p)
+            if line.startswith("mirror-ahead-kept"):
+                ahead_refs.add(fields.get("ref", ""))
+                final.ahead.append(f"{fields.get('dest', '')} {fields.get('ref', '')}")
+            elif line.startswith("mirror-state-aborted") or line.startswith(
+                "mirror-state-failed"
+            ):
+                final.failed.append(line)
+            elif line.startswith("mirror-state-push") and fields.get("exit") != "0":
+                final.failed.append(line)
+        # An ahead head differs by SHA but is not behind: report it as ahead only.
+        final.differing = [r for r in final.differing if r not in ahead_refs]
+        return final

@@ -543,6 +543,7 @@ class MirrorHandler:
         audit: Optional[list[str]] = None,
         workdir: Optional[str] = None,
         candidate_globs: Optional[Sequence[str]] = None,
+        protect_ahead: bool = False,
     ) -> list[str]:
         """Push every canonical head and tag to every mirror destination (OE-023).
 
@@ -569,6 +570,14 @@ class MirrorHandler:
         are pushed to that destination as explicit refspecs. An unreadable
         history refuses (fail closed). Destinations that are not ``"public"``
         still receive every ref.
+
+        Ahead protection (OE-036, D15; ``protect_ahead=True``, which
+        :meth:`ReconcileHandler.reconcile_mirror` always sets). A mirror head
+        that strictly contains the canonical tip is kept, audited as
+        ``mirror-ahead-kept``, and not overwritten unless the destination sets
+        ``overwrite_ahead``. An unreadable mirror fails closed with
+        ``mirror-state-failed``. It is off for a direct call so that the exact
+        OE-023 git sequence of the plain state sync is unchanged.
         """
         lines: list[str] = []
         run = runner or _run_git
@@ -631,9 +640,96 @@ class MirrorHandler:
                         refspecs = [f"+{r}:{r}" for r in gated if r not in refused]
                         if not refspecs:
                             continue
+                if protect_ahead and not dest.overwrite_ahead:
+                    ahead = await MirrorHandler._ahead_heads(run, clone, remote)
+                    if ahead is None:
+                        record(
+                            f"mirror-state-failed reason=ahead-probe-failed "
+                            f"dest={dest.forge}:{dest.repo} nothing-written"
+                        )
+                        continue
+                    if ahead:
+                        for ref, (msha, csha) in sorted(ahead.items()):
+                            record(
+                                f"mirror-ahead-kept ref={ref} "
+                                f"dest={dest.forge}:{dest.repo} "
+                                f"mirror={msha} canonical={csha}"
+                            )
+                        if refspecs[0] == "+refs/heads/*:refs/heads/*":
+                            _c, heads_out = await run(
+                                ["git", "for-each-ref", "--format=%(refname)", "refs/heads"],
+                                clone,
+                            )
+                            heads = [h.strip() for h in heads_out.splitlines() if h.strip()]
+                            refspecs = [f"+{h}:{h}" for h in heads if h not in ahead] + [
+                                "+refs/tags/*:refs/tags/*"
+                            ]
+                        else:
+                            refspecs = [
+                                r for r in refspecs
+                                if r[1:].split(":", 1)[0] not in ahead
+                            ]
+                        if not refspecs:
+                            continue
                 pcode, _perr = await run(["git", "push", remote, *refspecs], clone)
                 record(f"mirror-state-push dest={dest.forge}:{dest.repo} exit={pcode}")
         return lines
+
+    @staticmethod
+    async def _ahead_heads(
+        run: Callable[[list[str], str], Awaitable[tuple[int, str]]],
+        clone: str,
+        remote: str,
+    ) -> Optional[dict[str, tuple[str, str]]]:
+        """Heads on the mirror that strictly contain the canonical tip (OE-036, D15).
+
+        Returns ``{ref: (mirror_sha, canonical_sha)}`` for each head present on
+        both sides whose mirror commit differs from canonical and has the
+        canonical commit as an ancestor. Returns ``None`` when the mirror cannot
+        be read (the caller fails closed).
+        """
+        lcode, lout = await run(["git", "ls-remote", "--heads", remote], clone)
+        if lcode != 0:
+            return None
+        mirror_heads: dict[str, str] = {}
+        for row in lout.splitlines():
+            parts = row.split()
+            if len(parts) == 2 and _OBJECT_ID.fullmatch(parts[0]):
+                mirror_heads[parts[1]] = parts[0]
+        ccode, cout = await run(
+            ["git", "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads"],
+            clone,
+        )
+        if ccode != 0:
+            return None
+        canonical: dict[str, str] = {}
+        for row in cout.splitlines():
+            parts = row.split()
+            if len(parts) == 2:
+                canonical[parts[0]] = parts[1]
+        differing = {
+            r: (m, canonical[r])
+            for r, m in mirror_heads.items()
+            if r in canonical and canonical[r] != m
+        }
+        if not differing:
+            return {}
+        fcode, _fout = await run(
+            ["git", "fetch", "--no-tags", remote, "+refs/heads/*:refs/mirror-probe/*"],
+            clone,
+        )
+        if fcode != 0:
+            return None
+        ahead: dict[str, tuple[str, str]] = {}
+        for ref, (msha, csha) in differing.items():
+            acode, _aout = await run(
+                ["git", "merge-base", "--is-ancestor", csha, msha], clone
+            )
+            if acode == 0:
+                ahead[ref] = (msha, csha)
+            elif acode != 1:
+                return None
+        return ahead
 
     @staticmethod
     async def sweep_deleted_refs(

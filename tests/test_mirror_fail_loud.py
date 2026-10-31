@@ -1,5 +1,6 @@
-"""OE-036 criteria 1 and 2: the sweep protects the real default branch, and
-stderr is never parsed as ls-remote output."""
+"""OE-036: the sweep protects the real default branch, stderr is never parsed as
+ls-remote output (criteria 1, 2), and a failed sync is red while an ahead
+mirror keeps its commits unless the destination opts in (criterion 3)."""
 
 import asyncio
 import os
@@ -80,3 +81,119 @@ def test_two_word_stderr_line_is_not_read_as_a_ref(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", f"{fake.parent}{os.pathsep}{os.environ['PATH']}")
     asyncio.run(MirrorHandler.sweep_deleted_refs(CANON, [_dest()], workdir=str(tmp_path)))
     assert not log.exists(), log.read_text()
+
+
+# --- criterion 3: failed is red, ahead is kept ---------------------------------
+
+import pytest
+
+from ops_engine.modules.reconcile import ReconcileHandler
+
+CSHA = "c" * 40  # canonical tip
+MSHA = "d" * 40  # mirror tip (descends from CSHA when ahead)
+
+
+class _Forge:
+    def __init__(self, branches):
+        self.branches = dict(branches)
+
+    async def list_branches(self, repo):
+        return dict(self.branches)
+
+    async def list_tags(self, repo):
+        return {}
+
+
+class _SyncRunner:
+    """Fake git: canonical main=CSHA, mirror main=MSHA, mirror ahead or diverged."""
+
+    def __init__(self, mirror, ahead, clone_code=0, push_code=0):
+        self.mirror, self.ahead = mirror, ahead
+        self.clone_code, self.push_code = clone_code, push_code
+        self.calls = []
+
+    async def __call__(self, argv, cwd):
+        self.calls.append(list(argv))
+        verb = argv[1]
+        if verb == "clone":
+            return self.clone_code, ""
+        if verb == "ls-remote":
+            return 0, f"{MSHA}\trefs/heads/main\n"
+        if verb == "for-each-ref":
+            if "%(refname) %(objectname)" in argv[2]:
+                return 0, f"refs/heads/main {CSHA}\n"
+            return 0, "refs/heads/main\n"
+        if verb == "merge-base":
+            return (0 if self.ahead else 1), ""
+        if verb == "push":
+            touches_main = any(
+                a in ("+refs/heads/*:refs/heads/*", "+refs/heads/main:refs/heads/main")
+                for a in argv[3:]
+            )
+            if self.push_code == 0 and touches_main:
+                self.mirror.branches["main"] = CSHA
+            return self.push_code, "rejected"
+        return 0, ""
+
+    def pushes(self):
+        return [a for a in self.calls if a[1] == "push"]
+
+
+def _cycle(runner, mirror, dest):
+    primary = _Forge({"main": CSHA})
+    audit = []
+    rep = asyncio.run(
+        ReconcileHandler.reconcile_mirror(
+            primary, "o/r", mirror, "LangeVC/ops-engine", CANON, [dest],
+            runner=runner, audit=audit,
+        )
+    )
+    return rep, audit
+
+
+def test_ahead_mirror_keeps_its_commits_by_default():
+    mirror = _Forge({"main": MSHA})
+    runner = _SyncRunner(mirror, ahead=True)
+    rep, audit = _cycle(runner, mirror, _dest())
+    assert mirror.branches["main"] == MSHA
+    assert all("+refs/heads/main:refs/heads/main" not in a and "+refs/heads/*:refs/heads/*" not in a
+               for a in runner.pushes())
+    assert any(l.startswith("mirror-ahead-kept ref=refs/heads/main") for l in audit)
+    assert rep.ahead and not rep.behind and not rep.green
+
+
+def test_ahead_mirror_is_overwritten_only_with_the_explicit_option():
+    assert Destination(forge="github", repo="o/r").overwrite_ahead is False
+    mirror = _Forge({"main": MSHA})
+    runner = _SyncRunner(mirror, ahead=True)
+    dest = _dest().model_copy(update={"overwrite_ahead": True})
+    rep, _audit = _cycle(runner, mirror, dest)
+    assert mirror.branches["main"] == CSHA
+    assert len(runner.pushes()) == 1
+    assert rep.green
+
+
+def test_diverged_mirror_is_still_overwritten_by_default():
+    mirror = _Forge({"main": MSHA})
+    runner = _SyncRunner(mirror, ahead=False)
+    rep, _audit = _cycle(runner, mirror, _dest())
+    assert mirror.branches["main"] == CSHA
+    assert rep.green
+
+
+def test_failed_push_makes_the_result_red_and_distinct_from_behind():
+    mirror = _Forge({"main": MSHA})
+    runner = _SyncRunner(mirror, ahead=False, push_code=1)
+    rep, _audit = _cycle(runner, mirror, _dest())
+    assert rep.failed and rep.behind
+    assert not rep.green
+    assert rep.to_dict()["failed"] and rep.to_dict()["green"] is False
+
+
+def test_failed_canonical_clone_makes_the_result_red():
+    mirror = _Forge({"main": "0" * 40})
+    runner = _SyncRunner(mirror, ahead=False, clone_code=128)
+    rep, audit = _cycle(runner, mirror, _dest())
+    assert runner.pushes() == []
+    assert any("canonical-clone-failed" in l for l in audit)
+    assert rep.failed and not rep.green
