@@ -282,8 +282,9 @@ class ReconcileHandler:
         once (OE-035). ``measure_destinations`` exists only so a caller that holds
         a second list can say so: a list that differs from ``destinations`` is
         refused with :class:`MirrorListMismatchError` before anything is read or
-        written, so the mirror that is measured cannot differ from the
-        destinations that are synced.
+        written. So is a ``mirror_repo`` that is not the ``repo`` of a
+        ``role == "mirror"`` entry of ``destinations``: the mirror that is
+        measured is always one of the destinations that are synced.
 
         When the mirror is behind, :meth:`MirrorHandler.sync_state` runs once in
         this same cycle. Returns the drift measured AFTER the sync (or the
@@ -295,6 +296,13 @@ class ReconcileHandler:
             raise MirrorListMismatchError(
                 "reconcile_mirror refused: the destinations named for measuring "
                 "differ from the destinations named for syncing; pass one list"
+            )
+        if not any(
+            d.role == "mirror" and d.repo == mirror_repo for d in destinations
+        ):
+            raise MirrorListMismatchError(
+                f"reconcile_mirror refused: the measured mirror '{mirror_repo}' is not "
+                "a role=mirror destination of the list that would be synced"
             )
         report = await ReconcileHandler.measure_drift(
             primary, primary_repo, mirror, mirror_repo

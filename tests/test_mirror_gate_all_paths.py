@@ -180,7 +180,7 @@ def test_reconcile_mirror_refuses_different_lists_for_measuring_and_syncing():
     with pytest.raises(MirrorListMismatchError):
         asyncio.run(
             ReconcileHandler.reconcile_mirror(
-                primary, "o/r", mirror, "m/r", CANON_URL, [_pub()],
+                primary, "o/r", mirror, "LangeVC/pub", CANON_URL, [_pub()],
                 runner=runner, measure_destinations=[_other()],
             )
         )
@@ -193,7 +193,7 @@ def test_reconcile_mirror_accepts_the_same_list_for_both():
     dests = [_pub()]
     report = asyncio.run(
         ReconcileHandler.reconcile_mirror(
-            primary, "o/r", mirror, "m/r", CANON_URL, dests,
+            primary, "o/r", mirror, "LangeVC/pub", CANON_URL, dests,
             runner=_Runner(), measure_destinations=list(dests),
         )
     )
@@ -271,3 +271,49 @@ def test_config_load_refuses_a_destination_with_undeclared_visibility(visibility
         OpsEngineConfig.load(raw)
     with pytest.raises(ValueError):
         RepoConfig(destinations=[Destination(repo="o/r", visibility=visibility)])
+
+
+def test_reconcile_mirror_refuses_a_measured_mirror_that_is_not_a_synced_destination():
+    from ops_engine.modules.reconcile import MirrorListMismatchError
+
+    primary = _Forge({"main": "a" * 40})
+    mirror = _Forge({"main": "0" * 40})
+    runner = _Runner()
+    synced = Destination(
+        forge="github", repo="synced/TARGET", role="mirror", visibility="private"
+    )
+    with pytest.raises(MirrorListMismatchError):
+        asyncio.run(
+            ReconcileHandler.reconcile_mirror(
+                primary, "o/r", mirror, "measured/ELSEWHERE", CANON_URL, [synced],
+                runner=runner,
+            )
+        )
+    assert runner.calls == []
+
+
+def test_reconcile_mirror_refuses_a_measured_repo_that_is_only_a_non_mirror_destination():
+    from ops_engine.modules.reconcile import MirrorListMismatchError
+
+    release = Destination(
+        forge="github", repo="o/rel", role="release", visibility="private"
+    )
+    with pytest.raises(MirrorListMismatchError):
+        asyncio.run(
+            ReconcileHandler.reconcile_mirror(
+                _Forge({"main": "a" * 40}), "o/r", _Forge({"main": "0" * 40}), "o/rel",
+                CANON_URL, [release], runner=_Runner(),
+            )
+        )
+
+
+@pytest.mark.parametrize("alias", [{"github": "o/legacy"}, {"mirror_url": "o/legacy"}])
+def test_config_load_refuses_the_deprecated_mirror_alias_without_visibility(alias):
+    from ops_engine.config_loader import MirrorConfig
+
+    with pytest.raises(ValueError):
+        RepoConfig(mirror=MirrorConfig(**alias))
+    with pytest.raises(ConfigSectionError):
+        OpsEngineConfig.load({"orgs": {"o": {"repositories": {"r": {"mirror": alias}}}}})
+    ok = RepoConfig(mirror=MirrorConfig(visibility="private", **alias))
+    assert ok.mirror.visibility == "private"

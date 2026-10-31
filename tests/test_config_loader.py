@@ -83,7 +83,7 @@ def test_mirror_destination_fields_are_received():
                         "ops-engine": {
                             "mirror": {
                                 "enabled": True,
-                                "github": "LangeVC/ops-engine",
+                                "github": "LangeVC/ops-engine", "visibility": "private",
                                 "visibility": "public",
                                 "verify_on_push": True,
                             }
@@ -92,7 +92,7 @@ def test_mirror_destination_fields_are_received():
                             "github_name": "txtHumanizer",
                             "mirror": {
                                 "enabled": True,
-                                "github": "LangeVC/txtHumanizer",
+                                "github": "LangeVC/txtHumanizer", "visibility": "private",
                                 "visibility": "public",
                             },
                         },
@@ -156,7 +156,7 @@ def test_mirror_is_repo_specific_only():
             "TestOrg": OrgConfig(
                 repositories={
                     "repo-a": RepoConfig(
-                        mirror=MirrorConfig(enabled=True, mirror_url="github.com/org/a"),
+                        mirror=MirrorConfig(enabled=True, mirror_url="github.com/org/a", visibility="private"),
                     ),
                     "repo-b": RepoConfig(),
                 },
@@ -263,7 +263,7 @@ def test_mirror_url_primary_forge_shape_migrates_and_warns():
     one Destination with the forge from primary_forge and emits a warning."""
     config = _repo_with_destinations(
         [],
-        mirror=MirrorConfig(enabled=True, primary_forge="forgejo", mirror_url="github.com/elementeer/elementeer-mcp"),
+        mirror=MirrorConfig(enabled=True, primary_forge="forgejo", mirror_url="github.com/elementeer/elementeer-mcp", visibility="private"),
     )
     resolved = config.get_repo_config("langevc", "ops-engine")
     with warnings.catch_warnings(record=True) as caught:
@@ -273,7 +273,7 @@ def test_mirror_url_primary_forge_shape_migrates_and_warns():
     assert out[0].forge == "forgejo"
     assert out[0].repo == "github.com/elementeer/elementeer-mcp"
     assert out[0].role == "mirror"
-    assert out[0].visibility == ""
+    assert out[0].visibility == "private"
     assert caught, "mirror_url did not emit a DeprecationWarning"
     assert any(
         issubclass(w.category, DeprecationWarning) and "4.0.0" in str(w.message)

@@ -389,6 +389,23 @@ class RepoConfig(BaseModel):
         default_factory=lambda: list(DEFAULT_VISIBILITY_CANDIDATE_GLOBS)
     )
 
+    @field_validator("mirror")
+    @classmethod
+    def _legacy_mirror_declares_visibility(
+        cls, value: Optional[MirrorConfig]
+    ) -> Optional[MirrorConfig]:
+        """The deprecated alias resolves to a mirror destination: same check (OE-035)."""
+        if (
+            value is not None
+            and (value.github or value.mirror_url)
+            and value.visibility not in VALID_DESTINATION_VISIBILITIES
+        ):
+            raise ValueError(
+                f"mirror destination {value.github or value.mirror_url} has "
+                f"visibility {value.visibility!r}; it must be 'public' or 'private'"
+            )
+        return value
+
     @field_validator("destinations")
     @classmethod
     def _destinations_declare_visibility(cls, value: list[Destination]) -> list[Destination]:
