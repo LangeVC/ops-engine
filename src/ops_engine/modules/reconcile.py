@@ -10,14 +10,23 @@ Release and mirror state are queryable as records, not only visible in a log:
 ``to_dict`` so a cockpit can read them without parsing log lines.
 """
 
+import fnmatch
 import logging
+import tempfile
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Awaitable, Callable, Iterable, Optional, Sequence
 
 from ops_engine.adapters.base import ForgeAdapter
+from ops_engine.adapters.factory import adapters_for
 from ops_engine.config_loader import Destination, ReleaseConfig
-from ops_engine.modules.mirror import MirrorHandler
-from ops_engine.modules.release import DEFAULT_NAME_TEMPLATE, render_release_name
+from ops_engine.modules.mirror import MirrorHandler, resolve_destinations
+from ops_engine.modules.release import (
+    DEFAULT_NAME_TEMPLATE,
+    ReleaseContext,
+    _release_tag,
+    render_release_name,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +110,30 @@ class ReconcileRecord:
         }
 
 
+@dataclass
+class ReleaseReconcileReport:
+    """Queryable result of one release reconcile over one repository (OE-010).
+
+    ``published`` are the tags a release was published for through the OE-009
+    path; ``failed`` maps a tag to the reason it was refused or could not be
+    published (the other tags still run); ``up_to_date`` are the matching tags
+    that already have a release on every release destination.
+    """
+
+    repo: str = ""
+    published: list[str] = field(default_factory=list)
+    failed: dict[str, str] = field(default_factory=dict)
+    up_to_date: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "repo": self.repo,
+            "published_releases": list(self.published),
+            "failed_releases": dict(self.failed),
+            "up_to_date_releases": list(self.up_to_date),
+        }
+
+
 class ReconcileHandler:
     """Detects and reconciles tags that exist but lack a release, and exposes
     the release and mirror state as queryable records."""
@@ -128,6 +161,81 @@ class ReconcileHandler:
             if not await adapter.release_exists(repo, tag_name):
                 missing.append(tag_name)
         return missing
+
+    @staticmethod
+    async def reconcile_release_tags(
+        adapter: ForgeAdapter,
+        repo: str,
+        release_config: ReleaseConfig,
+        context: ReleaseContext,
+    ) -> ReleaseReconcileReport:
+        """Publish every release that is missing on a release destination.
+
+        For a release-enabled repository, compares each tag of ``repo`` that
+        matches ``release_config.tag_pattern`` with the release objects on EVERY
+        release-role destination (resolved from ``.ops.yaml`` at that tag over
+        the Layer-2 config, like the webhook path). A tag missing on at least
+        one destination goes through the OE-009 path (gates, tag identity,
+        ``publish_release`` with ``skip_existing``), so a destination that
+        already holds the release is left alone.
+
+        A tag that is refused or fails is recorded in the report and the other
+        tags still run. A repository without ``release.enabled`` is not read.
+        This never calls the mirror state sync.
+        """
+        report = ReleaseReconcileReport(repo=repo)
+        if not release_config.enabled:
+            return report
+
+        tags = await adapter.list_tags(repo)
+        for tag_name in sorted(tags):
+            if not fnmatch.fnmatch(tag_name, release_config.tag_pattern):
+                continue
+            try:
+                if not await ReconcileHandler._missing_on_a_destination(
+                    adapter, repo, tag_name, context
+                ):
+                    report.up_to_date.append(tag_name)
+                    continue
+                await _release_tag(adapter, repo, tag_name, release_config, context)
+            except Exception as exc:  # noqa: BLE001 (record — the report, not abort)
+                logger.error(f"release reconcile: {tag_name} on {repo} failed: {exc}")
+                report.failed[tag_name] = f"{type(exc).__name__}: {exc}"
+            else:
+                report.published.append(tag_name)
+        return report
+
+    @staticmethod
+    async def _missing_on_a_destination(
+        adapter: ForgeAdapter, repo: str, tag_name: str, context: ReleaseContext
+    ) -> bool:
+        """True when ``tag_name`` has no release on some release destination."""
+        ops_yaml = await adapter.get_file_content(repo, ".ops.yaml", ref=tag_name)
+        with tempfile.TemporaryDirectory() as layer3_dir:
+            (Path(layer3_dir) / ".ops.yaml").write_text(ops_yaml, encoding="utf-8")
+            destinations = [
+                d
+                for d in resolve_destinations(
+                    context.ops_config, repo, repo_dir=layer3_dir
+                )
+                if d.role == "release"
+            ]
+        adapters = context.adapters
+        if adapters is None:
+            adapters = adapters_for(
+                destinations,
+                token=context.token,
+                webhook_secret=context.webhook_secret,
+                base_url=context.base_url,
+            )
+        if len(adapters) != len(destinations):
+            raise ValueError(
+                f"{len(destinations)} release destinations but {len(adapters)} adapters"
+            )
+        for destination, dest_adapter in zip(destinations, adapters):
+            if not await dest_adapter.release_exists(destination.repo, tag_name):
+                return True
+        return False
 
     @staticmethod
     async def reconcile_releases(
