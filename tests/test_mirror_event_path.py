@@ -8,6 +8,8 @@ refspec and flags are asserted on the exact argv.
 
 import asyncio
 
+import pytest
+
 from ops_engine.config_loader import Destination
 from ops_engine.modules.mirror import MirrorHandler
 
@@ -288,7 +290,7 @@ def test_payload_default_branch_is_accepted_and_unreadable_history_refuses():
 
     class Unreadable(GitRunner):
         async def __call__(self, argv, cwd):
-            if argv[1] == "log":
+            if "log" in argv:
                 self.calls.append((list(argv), cwd))
                 return 128, ""
             return await super().__call__(argv, cwd)
@@ -298,20 +300,98 @@ def test_payload_default_branch_is_accepted_and_unreadable_history_refuses():
     assert [p[2] for p in _pushes(runner)] == ["https://gitlab.com/langevc/priv.git"]
     assert any(l.startswith("mirror-refused") for l in lines)
 
-def test_known_before_sha_limits_the_judgement_to_before_dot_dot_sha(tmp_path, monkeypatch):
+def test_known_before_sha_never_shortens_the_judgement(tmp_path, monkeypatch):
     g = _GatedRepo(tmp_path, monkeypatch)
     c1 = g.commit({".skillweave/old.md": "x\n"})  # candidate path BEFORE `before`
     c2 = g.commit({"b.txt": "b\n"})
     c3 = g.commit({"c.txt": "c\n"})
+    # The public mirror is EMPTY: it never held c2, whatever the payload claims.
     lines = g.push_event("refs/heads/main", c3, [], before=c2)
-    assert not any(l.startswith("mirror-refused") for l in lines)
-    assert g.rev(g.pub, "refs/heads/main") == c3
-    c4 = g.commit({".skillweave/new.md": "x\n"})  # candidate inside before..sha
-    audit = []
-    lines = g.push_event("refs/heads/main", c4, audit, before=c3)
+    assert any(l.startswith("mirror-refused") and ".skillweave/old.md" in l for l in lines)
+    assert not g.has(g.pub, "refs/heads/main")
+    assert g.rev(g.priv, "refs/heads/main") == c3
+    # A candidate path inside before..sha is refused as well, and public does not advance.
+    c4 = g.commit({".skillweave/new.md": "x\n"})
+    lines = g.push_event("refs/heads/main", c4, [], before=c3)
     assert any(l.startswith("mirror-refused") and ".skillweave/new.md" in l for l in lines)
-    assert g.rev(g.pub, "refs/heads/main") == c3  # public did not advance
+    assert not g.has(g.pub, "refs/heads/main")
     assert g.rev(g.priv, "refs/heads/main") == c4
+
+
+# -- history gate: the payload's `before` is never trusted (P4a, P4b, P4c, P5) -----
+
+def _sync_all(g, audit):
+    canon = g.work.parent / "canon.git"
+    if not canon.exists():
+        g.sp.run(["git", "init", "-q", "--bare", str(canon)], check=True, capture_output=True)
+    g._git("push", "-q", "-f", str(canon), "--all")
+    return asyncio.run(
+        MirrorHandler.sync_state(
+            f"file://{canon}", _vis_dests(), audit=audit, candidate_globs=CANDIDATE_GLOBS
+        )
+    )
+
+
+def _deliver(g, how, ref, sha, before, audit):
+    if how == "event":
+        return g.push_event(ref, sha, audit, before=before)
+    return _sync_all(g, audit)
+
+
+def _public_holds(g, sha):
+    out = g.sp.run(["git", "rev-list", "--all"], cwd=g.pub, capture_output=True, text=True)
+    return sha in out.stdout.split()
+
+
+@pytest.mark.parametrize("how", ["event", "sync"])
+def test_p4a_child_of_a_refused_ref_is_refused_whatever_before_says(tmp_path, monkeypatch, how):
+    g = _GatedRepo(tmp_path, monkeypatch)
+    g.commit({"a.txt": "a\n"})
+    g.branch("a")
+    a_sha = g.commit({".skillweave/prd.json": "{}\n"})
+    _deliver(g, how, "refs/heads/a", a_sha, ZERO, [])
+    g.branch("b")
+    b_sha = g.commit({"b.txt": "b\n"})
+    audit = []
+    _deliver(g, how, "refs/heads/b", b_sha, a_sha, audit)
+    assert not _public_holds(g, a_sha) and not _public_holds(g, b_sha)
+    assert not g.has(g.pub, "refs/heads/b") and g.has(g.priv, "refs/heads/b")
+    assert any(l.startswith("mirror-refused") and "ref=refs/heads/b" in l for l in audit)
+
+
+@pytest.mark.parametrize("how", ["event", "sync"])
+def test_p4b_default_branch_after_a_refused_push_stays_refused(tmp_path, monkeypatch, how):
+    g = _GatedRepo(tmp_path, monkeypatch)
+    c1 = g.commit({"a.txt": "a\n"})
+    c2 = g.commit({".skillweave/prd.json": "{}\n"})
+    _deliver(g, how, "refs/heads/main", c2, c1, [])
+    c3 = g.commit({"c.txt": "c\n"})
+    audit = []
+    _deliver(g, how, "refs/heads/main", c3, c2, audit)
+    assert not _public_holds(g, c2) and not _public_holds(g, c3)
+    assert any(l.startswith("mirror-refused") for l in audit)
+
+
+@pytest.mark.parametrize("how", ["event", "sync"])
+def test_p4c_before_the_destination_never_held_does_not_hide_history(tmp_path, monkeypatch, how):
+    g = _GatedRepo(tmp_path, monkeypatch)
+    c1 = g.commit({".skillweave/prd.json": "{}\n"})
+    c2 = g.commit({"b.txt": "b\n"})
+    audit = []
+    _deliver(g, how, "refs/heads/main", c2, c1, audit)
+    assert not _public_holds(g, c1) and not _public_holds(g, c2)
+    assert any(l.startswith("mirror-refused") for l in audit)
+
+
+@pytest.mark.parametrize("how", ["event", "sync"])
+def test_p5_non_ascii_candidate_name_does_not_dodge_the_glob(tmp_path, monkeypatch, how):
+    g = _GatedRepo(tmp_path, monkeypatch)
+    g.commit({"a.txt": "a\n"})
+    sha = g.commit({".skillweave/pr\u00e4d.json": "{}\n"})
+    audit = []
+    _deliver(g, how, "refs/heads/main", sha, ZERO, audit)
+    assert not _public_holds(g, sha)
+    assert any(l.startswith("mirror-refused") and "pr\u00e4d.json" in l for l in audit)
 
 def test_config_layer_declares_candidate_globs():
     from ops_engine.config_loader import RepoConfig

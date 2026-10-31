@@ -428,7 +428,6 @@ class MirrorHandler:
         runner: Optional[Callable[[list[str], str], Awaitable[tuple[int, str]]]] = None,
         audit: Optional[list[str]] = None,
         candidate_globs: Optional[Sequence[str]] = None,
-        default_branch: str = "main",
     ) -> list[str]:
         """Push exactly the triggering ref to every mirror destination (OE-022).
 
@@ -447,17 +446,17 @@ class MirrorHandler:
         default runs real git. Returns the audit lines of this call.
 
         Visibility gate (public destinations only). A destination whose
-        configured ``visibility`` is ``"public"`` receives the ref only if the
-        ref does not touch a candidate path: the gate diffs the ref from its fork
-        point (``git merge-base <default branch> <sha>``; for a push to the
-        default branch itself, from the pre-push SHA) and refuses on any path
-        matching ``candidate_globs`` (configuration:
-        ``RepoConfig.visibility_candidate_globs``). A refusal is audited as a
+        configured ``visibility`` is ``"public"`` receives the ref only if NO
+        commit reachable from the ref touches a candidate path
+        (``candidate_globs``; configuration:
+        ``RepoConfig.visibility_candidate_globs``). The whole reachable history
+        is judged, because pushing a ref sends it; the payload's ``before`` SHA
+        is never trusted to shorten the judgement, so a ref cannot ship the
+        history of a refused ancestor. A refusal is audited as a
         ``mirror-refused`` line naming the paths, and nothing is pushed to that
-        destination. A fork point that cannot be resolved refuses (fail closed).
-        Destinations that are not ``"public"`` are mirrored without any gate.
-        The default branch comes from the payload's ``repository.default_branch``
-        and falls back to ``default_branch``.
+        destination. A history that cannot be read refuses (fail closed).
+        Destinations that are not ``"public"`` are mirrored without any gate. A
+        destination whose visibility is neither public nor private is refused.
         """
         lines: list[str] = []
         raw = event.get("raw", {}) or {}
@@ -475,7 +474,6 @@ class MirrorHandler:
             if candidate_globs is not None
             else tuple(DEFAULT_VISIBILITY_CANDIDATE_GLOBS)
         )
-        default = (raw.get("repository") or {}).get("default_branch") or default_branch
         touched: Optional[list[str]] = None  # computed once, only if a public dest exists
         for dest in destinations:
             if dest.role != "mirror":
@@ -490,7 +488,7 @@ class MirrorHandler:
             if MirrorHandler.effective_visibility(dest) == "public":
                 if touched is None:
                     touched = await MirrorHandler._touched_candidates(
-                        run, repo_dir, ref, sha, raw.get("before") or "", default, globs
+                        run, repo_dir, sha, globs
                     )
                 if touched:
                     line = (
@@ -529,7 +527,6 @@ class MirrorHandler:
         audit: Optional[list[str]] = None,
         workdir: Optional[str] = None,
         candidate_globs: Optional[Sequence[str]] = None,
-        default_branch: str = "main",
     ) -> list[str]:
         """Push every canonical head and tag to every mirror destination (OE-023).
 
@@ -548,14 +545,14 @@ class MirrorHandler:
         destinations. Returns the audit lines of this call.
 
         Visibility gate (OE-035, same rule as :meth:`push_event`). A destination
-        whose ``visibility`` is ``"public"`` does not receive a head or tag whose
-        commits touch a candidate path (``candidate_globs``, default
-        ``DEFAULT_VISIBILITY_CANDIDATE_GLOBS``), judged in the fresh clone from
-        the fork point with ``default_branch``; the whole tree for a ref that is
-        itself at the fork point. Each such ref is audited as ``mirror-refused``
-        naming the paths, and the remaining refs are pushed to that destination
-        as explicit refspecs. An unresolvable fork point refuses (fail closed).
-        Destinations that are not ``"public"`` still receive every ref.
+        whose ``visibility`` is ``"public"`` does not receive a head or tag from
+        whose reachable history any commit touches a candidate path
+        (``candidate_globs``, default ``DEFAULT_VISIBILITY_CANDIDATE_GLOBS``),
+        judged in the fresh clone over the whole history. Each such ref is
+        audited as ``mirror-refused`` naming the paths, and the remaining refs
+        are pushed to that destination as explicit refspecs. An unreadable
+        history refuses (fail closed). Destinations that are not ``"public"``
+        still receive every ref.
         """
         lines: list[str] = []
         run = runner or _run_git
@@ -604,7 +601,7 @@ class MirrorHandler:
                 if MirrorHandler.effective_visibility(dest) == "public":
                     if gated is None:
                         gated = await MirrorHandler._gate_clone_refs(
-                            run, clone, default_branch, globs
+                            run, clone, globs
                         )
                     refused = {r: (sha, p) for r, (sha, p) in gated.items() if p}
                     if refused:
@@ -749,7 +746,6 @@ class MirrorHandler:
     async def _gate_clone_refs(
         run: Callable[[list[str], str], Awaitable[tuple[int, str]]],
         clone: str,
-        default: str,
         globs: Sequence[str],
     ) -> dict[str, tuple[str, list[str]]]:
         """Judge every head and tag of ``clone`` against the candidate paths.
@@ -777,7 +773,7 @@ class MirrorHandler:
             result[ref] = (
                 sha,
                 await MirrorHandler._touched_candidates(
-                    run, clone, ref, sha, "", default, globs
+                    run, clone, sha, globs
                 ),
             )
         return result
@@ -786,30 +782,29 @@ class MirrorHandler:
     async def _touched_candidates(
         run: Callable[[list[str], str], Awaitable[tuple[int, str]]],
         repo_dir: str,
-        ref: str,
         sha: str,
-        before: str,
-        default: str,
         globs: Sequence[str],
     ) -> list[str]:
-        """Candidate paths touched by any commit the destination may not hold.
+        """Candidate paths touched by any commit reachable from ``sha``.
 
-        The judged set is every commit reachable from ``sha`` (merges against each
-        parent): a feature branch forked from a default branch that carries
-        substrate therefore inherits the refusal, because pushing the branch
-        would send that history. The one exemption is a push whose pre-push SHA
-        (``before``) is known and non-zero: the destination already holds
-        ``before``, so only ``before..sha`` is judged. Returns the matching
-        paths, or ``["<history unresolved>"]`` when the history cannot be read
-        (the gate fails closed). ``default`` is accepted for call compatibility.
+        The judged set is the WHOLE reachable history (merges against each
+        parent, root commits included): pushing a ref sends that history, so a
+        ref inherits the refusal of any ancestor that touched a candidate path.
+        The payload's pre-push SHA is never trusted to shorten the judgement.
+        Paths are read NUL-separated and unquoted, so a non-ASCII name cannot
+        dodge a glob. Returns the matching paths, or ``["<history unresolved>"]``
+        when the history cannot be read (the gate fails closed).
         """
-        argv = ["git", "log", "-m", "--name-only", "--format=", sha]
-        if before and set(before) != {"0"}:
-            argv = ["git", "log", "-m", "--name-only", "--format=", f"{before}..{sha}"]
-        code, out = await run(argv, repo_dir)
+        code, out = await run(
+            [
+                "git", "-c", "core.quotePath=false", "log", "-m", "--root",
+                "--name-only", "-z", "--format=", sha,
+            ],
+            repo_dir,
+        )
         if code != 0:
             return ["<history unresolved>"]
-        paths = sorted({p for p in out.splitlines() if p.strip()})
+        paths = sorted({p.strip("\n") for p in out.split("\0") if p.strip("\n")})
         return [p for p in paths if any(fnmatch.fnmatch(p, g) for g in globs)]
 
     @staticmethod

@@ -276,7 +276,6 @@ class ReconcileHandler:
         workdir: Optional[str] = None,
         measure_destinations: Optional[Sequence[Destination]] = None,
         candidate_globs: Optional[Sequence[str]] = None,
-        default_branch: str = "main",
     ) -> DriftReport:
         """One reconcile cycle: measure drift, state-sync when behind, re-measure.
 
@@ -320,7 +319,6 @@ class ReconcileHandler:
             audit=audit,
             workdir=workdir,
             candidate_globs=candidate_globs,
-            default_branch=default_branch,
         )
         return await ReconcileHandler.measure_drift(
             primary, primary_repo, mirror, mirror_repo

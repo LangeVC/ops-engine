@@ -112,7 +112,7 @@ def test_state_sync_unreadable_history_refuses_on_public():
             calls.append(list(argv))
             if argv[1] == "for-each-ref":
                 return 0, "refs/heads/x " + "a" * 40 + " \n"
-            if argv[1] == "log":
+            if "log" in argv:
                 return 128, ""
             return 0, ""
 
@@ -371,7 +371,7 @@ def test_reconcile_mirror_applies_the_configured_candidate_globs(tmp_path, monke
 def test_reconcile_mirror_honours_a_non_main_default_branch(tmp_path, monkeypatch):
     canon, pub, priv = _gated_world(tmp_path, monkeypatch, "trunk")
     audit = []
-    _reconcile(canon, audit=audit, default_branch="trunk", candidate_globs=["nothing/*"])
+    _reconcile(canon, audit=audit, candidate_globs=["nothing/*"])
     # RED: with default "main" every ref is refused as 'fork point unresolved'.
     assert _has_ref(pub, "refs/heads/trunk") and _has_ref(pub, "refs/heads/feat")
     assert not any(l.startswith("mirror-refused") for l in audit)
