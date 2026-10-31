@@ -156,15 +156,80 @@ def _run_gated(event, runner, audit, globs=CANDIDATE_GLOBS):
     )
 
 
+class _GatedRepo:
+    """A work repo plus local bare public/private mirrors (real git, no network)."""
+
+    def __init__(self, tmp_path, monkeypatch):
+        import subprocess as sp
+
+        self.sp = sp
+        self.work = tmp_path / "work"
+        self.work.mkdir()
+        self._git("init", "-q", "-b", "main")
+        self.pub, self.priv = tmp_path / "pub.git", tmp_path / "priv.git"
+        for bare in (self.pub, self.priv):
+            sp.run(["git", "init", "-q", "--bare", str(bare)], check=True, capture_output=True)
+        rewrites = {
+            "https://github.com/LangeVC/pub.git": f"file://{self.pub}",
+            "https://gitlab.com/langevc/priv.git": f"file://{self.priv}",
+        }
+        monkeypatch.setenv("GIT_CONFIG_COUNT", str(len(rewrites)))
+        for i, (url, local) in enumerate(rewrites.items()):
+            monkeypatch.setenv(f"GIT_CONFIG_KEY_{i}", f"url.{local}.insteadOf")
+            monkeypatch.setenv(f"GIT_CONFIG_VALUE_{i}", url)
+
+    def _git(self, *args, cwd=None):
+        return self.sp.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", *args],
+            cwd=cwd or self.work, check=True, capture_output=True, text=True,
+        ).stdout.strip()
+
+    def commit(self, files):
+        for name, text in files.items():
+            path = self.work / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+        self._git("add", ".")
+        self._git("commit", "-q", "-m", "c")
+        return self._git("rev-parse", "HEAD")
+
+    def branch(self, name, start="HEAD"):
+        self._git("checkout", "-q", "-b", name, start)
+
+    def checkout(self, name):
+        self._git("checkout", "-q", name)
+
+    def has(self, bare, ref):
+        return self.sp.run(
+            ["git", "rev-parse", "--verify", "-q", ref], cwd=bare, capture_output=True
+        ).returncode == 0
+
+    def rev(self, bare, ref):
+        return self._git("rev-parse", ref, cwd=bare)
+
+    def push_event(self, ref, sha, audit, *, before=ZERO, globs=None):
+        event = {"event_type": "push", "raw": {"ref": ref, "after": sha, "before": before}}
+        return asyncio.run(
+            MirrorHandler.push_event(
+                event, _vis_dests(), repo_dir=str(self.work), audit=audit,
+                candidate_globs=globs if globs is not None else CANDIDATE_GLOBS,
+            )
+        )
+
+
 def _pushes(runner):
     return [argv for argv, _ in runner.calls if argv[1] == "push"]
 
 
-def test_skillweave_path_is_refused_for_public_and_mirrored_to_private():
-    runner, audit = GitRunner([".skillweave/prds/x/prd.json", "src/app.py"]), []
-    lines = _run_gated(_event(), runner, audit)
-    pushes = _pushes(runner)
-    assert [p[2] for p in pushes] == ["https://gitlab.com/langevc/priv.git"]
+def test_skillweave_path_is_refused_for_public_and_mirrored_to_private(tmp_path, monkeypatch):
+    g = _GatedRepo(tmp_path, monkeypatch)
+    g.commit({"a.txt": "a\n"})
+    g.branch("feature-x")
+    sha = g.commit({".skillweave/prds/x/prd.json": "{}\n", "src/app.py": "x\n"})
+    audit = []
+    lines = g.push_event("refs/heads/feature-x", sha, audit)
+    assert not g.has(g.pub, "refs/heads/feature-x")
+    assert g.has(g.priv, "refs/heads/feature-x")
     refused = [l for l in lines if l.startswith("mirror-refused")]
     assert len(refused) == 1
     assert "dest=github:LangeVC/pub" in refused[0]
@@ -172,22 +237,38 @@ def test_skillweave_path_is_refused_for_public_and_mirrored_to_private():
     assert audit == lines
     assert any("exit=0" in l and "dest=gitlab:langevc/priv" in l for l in lines)
 
+def test_gate_judges_the_reachable_history_not_commits_outside_the_ref(tmp_path, monkeypatch):
+    # Replaces the fork-point argv assertion (OE-035 history gate): a candidate
+    # path on a commit the ref cannot reach does not refuse it; one in its own
+    # reachable history does.
+    g = _GatedRepo(tmp_path, monkeypatch)
+    g.commit({"a.txt": "a\n"})
+    g.branch("elsewhere")
+    g.commit({".skillweave/other.md": "x\n"})  # on elsewhere only
+    g.checkout("main")
+    g.branch("clean")
+    clean_sha = g.commit({"src/app.py": "x\n"})
+    lines = g.push_event("refs/heads/clean", clean_sha, [])
+    assert g.has(g.pub, "refs/heads/clean") and g.has(g.priv, "refs/heads/clean")
+    assert not any(l.startswith("mirror-refused") for l in lines)
+    g.branch("dirty", "elsewhere")
+    dirty_sha = g.commit({"src/b.py": "x\n"})
+    lines = g.push_event("refs/heads/dirty", dirty_sha, [])
+    assert not g.has(g.pub, "refs/heads/dirty") and g.has(g.priv, "refs/heads/dirty")
 
-def test_gate_diffs_from_the_fork_point_with_the_default_branch():
-    runner = GitRunner(["src/app.py"])
-    _run_gated(_event(), runner, [])
-    assert runner.calls[0][0] == ["git", "merge-base", "refs/heads/main", SHA]
-    assert runner.calls[1][0] == ["git", "diff", "--name-only", FORK, SHA]
-
-
-def test_candidate_globs_come_from_the_passed_configuration():
-    runner = GitRunner(["docs/notes.txt"])
-    _run_gated(_event(), runner, [], globs=["docs/**"])
-    assert [p[2] for p in _pushes(runner)] == ["https://gitlab.com/langevc/priv.git"]
-    runner = GitRunner([".skillweave/a.md"])
-    _run_gated(_event(), runner, [], globs=["docs/**"])
-    assert len(_pushes(runner)) == 2  # not a candidate under this configuration
-
+def test_candidate_globs_come_from_the_passed_configuration(tmp_path, monkeypatch):
+    g = _GatedRepo(tmp_path, monkeypatch)
+    g.commit({"a.txt": "a\n"})
+    g.branch("docs")
+    docs_sha = g.commit({"docs/notes.txt": "x\n"})
+    g.checkout("main")
+    g.branch("skill")
+    skill_sha = g.commit({".skillweave/a.md": "x\n"})
+    g.push_event("refs/heads/docs", docs_sha, [], globs=["docs/**"])
+    assert not g.has(g.pub, "refs/heads/docs") and g.has(g.priv, "refs/heads/docs")
+    g.push_event("refs/heads/skill", skill_sha, [], globs=["docs/**"])
+    # not a candidate under this configuration
+    assert g.has(g.pub, "refs/heads/skill") and g.has(g.priv, "refs/heads/skill")
 
 def test_clean_ref_is_mirrored_to_public_and_private():
     runner = GitRunner(["src/app.py"])
@@ -195,26 +276,42 @@ def test_clean_ref_is_mirrored_to_public_and_private():
     assert len(_pushes(runner)) == 2
 
 
-def test_default_branch_uses_payload_default_and_unresolved_fork_point_refuses():
+def test_payload_default_branch_is_accepted_and_unreadable_history_refuses():
+    # The fork-point lookup (and with it the default branch) no longer decides
+    # a ref; the payload value is still accepted. What stays: a history that
+    # cannot be read refuses on public (fail closed) and still reaches private.
     ev = _event()
     ev["raw"]["repository"] = {"default_branch": "trunk"}
     runner = GitRunner(["src/app.py"])
-    _run_gated(ev, runner, [])
-    assert runner.calls[0][0][2] == "refs/heads/trunk"
-    runner = GitRunner(["src/app.py"], base_code=128)
+    lines = _run_gated(ev, runner, [])
+    assert len(_pushes(runner)) == 2 and not any(l.startswith("mirror-refused") for l in lines)
+
+    class Unreadable(GitRunner):
+        async def __call__(self, argv, cwd):
+            if argv[1] == "log":
+                self.calls.append((list(argv), cwd))
+                return 128, ""
+            return await super().__call__(argv, cwd)
+
+    runner = Unreadable([])
     lines = _run_gated(_event(), runner, [])
     assert [p[2] for p in _pushes(runner)] == ["https://gitlab.com/langevc/priv.git"]
     assert any(l.startswith("mirror-refused") for l in lines)
 
-
-def test_default_branch_push_is_diffed_from_the_before_sha():
-    ev = _event(ref="refs/heads/main")
-    ev["raw"]["before"] = "c" * 40
-    runner = GitRunner([".skillweave/x"])
-    _run_gated(ev, runner, [])
-    assert runner.calls[0][0] == ["git", "diff", "--name-only", "c" * 40, SHA]
-    assert [p[2] for p in _pushes(runner)] == ["https://gitlab.com/langevc/priv.git"]
-
+def test_known_before_sha_limits_the_judgement_to_before_dot_dot_sha(tmp_path, monkeypatch):
+    g = _GatedRepo(tmp_path, monkeypatch)
+    c1 = g.commit({".skillweave/old.md": "x\n"})  # candidate path BEFORE `before`
+    c2 = g.commit({"b.txt": "b\n"})
+    c3 = g.commit({"c.txt": "c\n"})
+    lines = g.push_event("refs/heads/main", c3, [], before=c2)
+    assert not any(l.startswith("mirror-refused") for l in lines)
+    assert g.rev(g.pub, "refs/heads/main") == c3
+    c4 = g.commit({".skillweave/new.md": "x\n"})  # candidate inside before..sha
+    audit = []
+    lines = g.push_event("refs/heads/main", c4, audit, before=c3)
+    assert any(l.startswith("mirror-refused") and ".skillweave/new.md" in l for l in lines)
+    assert g.rev(g.pub, "refs/heads/main") == c3  # public did not advance
+    assert g.rev(g.priv, "refs/heads/main") == c4
 
 def test_config_layer_declares_candidate_globs():
     from ops_engine.config_loader import RepoConfig
