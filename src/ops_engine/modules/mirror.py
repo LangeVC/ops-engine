@@ -87,6 +87,8 @@ by ``refuse`` (an operator-marked default-branch refusal still raises).
 import asyncio
 import fnmatch
 import logging
+import os
+import tempfile
 import warnings
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional, Sequence
@@ -508,6 +510,172 @@ class MirrorHandler:
             if audit is not None:
                 audit.append(line)
             logger.info(line)
+        return lines
+
+    @staticmethod
+    async def sync_state(
+        canonical_url: str,
+        destinations: Sequence[Destination],
+        *,
+        runner: Optional[Callable[[list[str], str], Awaitable[tuple[int, str]]]] = None,
+        audit: Optional[list[str]] = None,
+        workdir: Optional[str] = None,
+    ) -> list[str]:
+        """Push every canonical head and tag to every mirror destination (OE-023).
+
+        The state-sync entry point. It first takes a FRESH clone of the canonical
+        repository (``git clone --bare`` into a new, empty directory that is
+        removed afterwards). Only if that clone succeeded does it write anything:
+        each destination with ``role == "mirror"`` on a forge with a known remote
+        host receives ``git push <remote> +refs/heads/*:refs/heads/*
+        +refs/tags/*:refs/tags/*`` from the fresh clone (force, never
+        ``--prune``/``--mirror``). A failed clone is audited as
+        ``mirror-state-aborted`` and nothing is pushed anywhere. This path never
+        deletes a ref; see :meth:`sweep_deleted_refs` for the opt-in sweep.
+
+        One audit line per push attempt (appended to ``audit`` when given, and
+        logged). A failed push is audited and does not stop the remaining
+        destinations. Returns the audit lines of this call.
+        """
+        lines: list[str] = []
+        run = runner or _run_git
+
+        def record(line: str) -> None:
+            lines.append(line)
+            if audit is not None:
+                audit.append(line)
+            logger.info(line)
+
+        with tempfile.TemporaryDirectory(dir=workdir) as tmp:
+            clone = os.path.join(tmp, "canonical.git")
+            code, _out = await run(["git", "clone", "--bare", canonical_url, clone], tmp)
+            if code != 0:
+                record(
+                    f"mirror-state-aborted reason=canonical-clone-failed "
+                    f"exit={code} nothing-written"
+                )
+                return lines
+            for dest in destinations:
+                if dest.role != "mirror":
+                    continue
+                host = _FORGE_HOSTS.get(dest.forge)
+                if host is None:
+                    logger.warning(
+                        f"mirror state sync skipped: no remote host for forge "
+                        f"'{dest.forge}'"
+                    )
+                    continue
+                remote = f"https://{host}/{dest.repo}.git"
+                pcode, _perr = await run(
+                    [
+                        "git", "push", remote,
+                        "+refs/heads/*:refs/heads/*",
+                        "+refs/tags/*:refs/tags/*",
+                    ],
+                    clone,
+                )
+                record(f"mirror-state-push dest={dest.forge}:{dest.repo} exit={pcode}")
+        return lines
+
+    @staticmethod
+    async def sweep_deleted_refs(
+        canonical_url: str,
+        destinations: Sequence[Destination],
+        *,
+        runner: Optional[Callable[[list[str], str], Awaitable[tuple[int, str]]]] = None,
+        audit: Optional[list[str]] = None,
+        workdir: Optional[str] = None,
+        default_branch: str = "main",
+    ) -> list[str]:
+        """Delete mirror heads and tags that no longer exist on canonical (OE-023).
+
+        Runs ONLY when called: :meth:`sync_state` never deletes. The canonical
+        ref set comes from a FRESH clone; if that clone fails, or yields no refs
+        at all, nothing is deleted (a missing canonical state must never read as
+        "everything was deleted"). For each mirror destination the refs are
+        listed with ``git ls-remote --heads --tags`` and every ref absent from
+        the canonical clone is removed with ``git push <remote> :<ref>``.
+
+        Never deleted: the default branch (``default_branch``), ``refs/heads/dev``
+        and GitHub-managed refs (``refs/pull/*``, ``refs/heads/dependabot/*``,
+        ``refs/heads/copilot/*``, ``refs/heads/gh-pages``, ``refs/keep-around/*``);
+        these are audited as ``mirror-ref-kept``. Every deletion is audited as
+        ``mirror-ref-deleted ref=<ref> dest=<forge>:<repo> exit=<code>``.
+        Returns the audit lines of this call.
+        """
+        lines: list[str] = []
+        run = runner or _run_git
+
+        def record(line: str) -> None:
+            lines.append(line)
+            if audit is not None:
+                audit.append(line)
+            logger.info(line)
+
+        protected_exact = {f"refs/heads/{default_branch}", "refs/heads/dev", "refs/heads/gh-pages"}
+        protected_prefixes = (
+            "refs/pull/",
+            "refs/heads/dependabot/",
+            "refs/heads/copilot/",
+            "refs/keep-around/",
+        )
+
+        with tempfile.TemporaryDirectory(dir=workdir) as tmp:
+            clone = os.path.join(tmp, "canonical.git")
+            code, _out = await run(["git", "clone", "--bare", canonical_url, clone], tmp)
+            if code != 0:
+                record(
+                    f"mirror-sweep-aborted reason=canonical-clone-failed "
+                    f"exit={code} nothing-deleted"
+                )
+                return lines
+            code, out = await run(
+                ["git", "for-each-ref", "--format=%(refname)", "refs/heads", "refs/tags"],
+                clone,
+            )
+            canonical = {r.strip() for r in out.splitlines() if r.strip()}
+            if code != 0 or not canonical:
+                record(
+                    f"mirror-sweep-aborted reason=canonical-refs-unreadable "
+                    f"exit={code} nothing-deleted"
+                )
+                return lines
+            for dest in destinations:
+                if dest.role != "mirror":
+                    continue
+                host = _FORGE_HOSTS.get(dest.forge)
+                if host is None:
+                    logger.warning(
+                        f"mirror sweep skipped: no remote host for forge '{dest.forge}'"
+                    )
+                    continue
+                remote = f"https://{host}/{dest.repo}.git"
+                lcode, lout = await run(
+                    ["git", "ls-remote", "--heads", "--tags", remote], clone
+                )
+                if lcode != 0:
+                    record(
+                        f"mirror-sweep-aborted reason=mirror-refs-unreadable "
+                        f"dest={dest.forge}:{dest.repo} exit={lcode} nothing-deleted"
+                    )
+                    continue
+                mirror_refs: list[str] = []
+                for row in lout.splitlines():
+                    parts = row.split()
+                    if len(parts) != 2 or parts[1].endswith("^{}"):
+                        continue
+                    mirror_refs.append(parts[1])
+                for ref in mirror_refs:
+                    if ref in canonical:
+                        continue
+                    if ref in protected_exact or ref.startswith(protected_prefixes):
+                        record(f"mirror-ref-kept ref={ref} dest={dest.forge}:{dest.repo}")
+                        continue
+                    dcode, _derr = await run(["git", "push", remote, f":{ref}"], clone)
+                    record(
+                        f"mirror-ref-deleted ref={ref} dest={dest.forge}:{dest.repo} "
+                        f"exit={dcode}"
+                    )
         return lines
 
     @staticmethod
