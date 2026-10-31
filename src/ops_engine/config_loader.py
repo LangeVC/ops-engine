@@ -15,6 +15,27 @@ from pydantic import BaseModel, Field, ValidationError
 
 
 _DESTINATION_REMOVAL_VERSION = "4.0.0"
+
+# Default path classes that may carry planning substrate (OE-022). This is the
+# configuration layer's default for ``RepoConfig.visibility_candidate_globs``;
+# a repository overrides it in its config. The mirror module holds no globs.
+DEFAULT_VISIBILITY_CANDIDATE_GLOBS: tuple[str, ...] = (
+    ".skillweave/**",
+    "strategy.md",
+    "**/strategy.md",
+    "prd*.md",
+    "**/prd*.md",
+    "prd*.json",
+    "**/prd*.json",
+    "*.contract*",
+    "**/*.contract*",
+    "*contract*.md",
+    "**/*contract*.md",
+    "*proposal*.md",
+    "**/*proposal*.md",
+    "*.proposal*",
+    "**/*.proposal*",
+)
 _OPS_YAML_FILENAME = ".ops.yaml"
 
 # SHA-256 (hex) of the exact Layer-2 ``config.yml`` bytes the process loaded
@@ -357,6 +378,11 @@ class RepoConfig(BaseModel):
     # v3.2 (DST-001): the canonical destination list. The forge is a value here,
     # not a key name. Deprecated mirror aliases resolve into this list.
     destinations: list[Destination] = Field(default_factory=list)
+    # OE-022: path globs the visibility gate treats as planning substrate on a
+    # public destination. Configuration, not code.
+    visibility_candidate_globs: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_VISIBILITY_CANDIDATE_GLOBS)
+    )
 
     def resolve_destinations(self) -> list[Destination]:
         """Resolve this repo's destinations into a :class:`Destination` list.

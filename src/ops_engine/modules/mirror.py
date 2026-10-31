@@ -87,12 +87,15 @@ by ``refuse`` (an operator-marked default-branch refusal still raises).
 import asyncio
 import fnmatch
 import logging
+import os
+import tempfile
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Awaitable, Callable, Optional, Sequence
 
 from ops_engine.adapters.base import ForgeAdapter
 from ops_engine.config_loader import (
+    DEFAULT_VISIBILITY_CANDIDATE_GLOBS,
     Destination,
     MirrorConfig,
     OpsEngineConfig,
@@ -137,23 +140,7 @@ def __getattr__(name: str) -> str:
 # (see :meth:`MirrorHandler.classify_visibility`). The arms mirror the deployed
 # gate's BLOCKED_PATHS so a layover can feed the same candidate set, but here
 # they only narrow *where* content is measured — never the verdict.
-_VISIBILITY_CANDIDATE_GLOBS: tuple[str, ...] = (
-    ".skillweave/**",
-    "strategy.md",
-    "**/strategy.md",
-    "prd*.md",
-    "**/prd*.md",
-    "prd*.json",
-    "**/prd*.json",
-    "*.contract*",
-    "**/*.contract*",
-    "*contract*.md",
-    "**/*contract*.md",
-    "*proposal*.md",
-    "**/*proposal*.md",
-    "*.proposal*",
-    "**/*.proposal*",
-)
+_VISIBILITY_CANDIDATE_GLOBS: tuple[str, ...] = tuple(DEFAULT_VISIBILITY_CANDIDATE_GLOBS)
 
 
 @dataclass(frozen=True)
@@ -430,6 +417,308 @@ class MirrorHandler:
             )
             await _report_drift(adapter, repo, primary_sha, mirror_sha, config)
 
+
+    @staticmethod
+    async def push_event(
+        event: dict[str, Any],
+        destinations: Sequence[Destination],
+        *,
+        repo_dir: str,
+        runner: Optional[Callable[[list[str], str], Awaitable[tuple[int, str]]]] = None,
+        audit: Optional[list[str]] = None,
+        candidate_globs: Optional[Sequence[str]] = None,
+        default_branch: str = "main",
+    ) -> list[str]:
+        """Push exactly the triggering ref to every mirror destination (OE-022).
+
+        On a push event the single ref named by the webhook is pushed with the
+        refspec ``+<ref>:<ref>`` (force, one ref). Never ``--prune``, never
+        ``--mirror``, never ``--all``/``--tags``: nothing but the triggering ref
+        moves, and nothing on the destination is deleted. Only destinations with
+        ``role == "mirror"`` on a forge with a known remote host are pushed.
+
+        One audit line is recorded per push attempt (appended to ``audit`` when
+        given, and logged), carrying ref, destination, SHA and git's exit code. A
+        failed push is audited and does not stop the remaining destinations. A
+        non-push event, a missing ref, or a ref deletion pushes nothing.
+
+        ``runner(argv, cwd)`` runs git and returns ``(exit_code, stderr)``; the
+        default runs real git. Returns the audit lines of this call.
+
+        Visibility gate (public destinations only). A destination whose
+        configured ``visibility`` is ``"public"`` receives the ref only if the
+        ref does not touch a candidate path: the gate diffs the ref from its fork
+        point (``git merge-base <default branch> <sha>``; for a push to the
+        default branch itself, from the pre-push SHA) and refuses on any path
+        matching ``candidate_globs`` (configuration:
+        ``RepoConfig.visibility_candidate_globs``). A refusal is audited as a
+        ``mirror-refused`` line naming the paths, and nothing is pushed to that
+        destination. A fork point that cannot be resolved refuses (fail closed).
+        Destinations that are not ``"public"`` are mirrored without any gate.
+        The default branch comes from the payload's ``repository.default_branch``
+        and falls back to ``default_branch``.
+        """
+        lines: list[str] = []
+        raw = event.get("raw", {}) or {}
+        ref = raw.get("ref", "")
+        sha = raw.get("after") or (raw.get("head_commit") or {}).get("id") or ""
+        if event.get("event_type") != "push" or not ref or not sha:
+            return lines
+        if set(sha) == {"0"}:  # ref deletion: there is nothing to push
+            return lines
+
+        run = runner or _run_git
+        refspec = f"+{ref}:{ref}"
+        globs = (
+            tuple(candidate_globs)
+            if candidate_globs is not None
+            else tuple(DEFAULT_VISIBILITY_CANDIDATE_GLOBS)
+        )
+        default = (raw.get("repository") or {}).get("default_branch") or default_branch
+        touched: Optional[list[str]] = None  # computed once, only if a public dest exists
+        for dest in destinations:
+            if dest.role != "mirror":
+                continue
+            if dest.visibility == "public":
+                if touched is None:
+                    touched = await MirrorHandler._touched_candidates(
+                        run, repo_dir, ref, sha, raw.get("before") or "", default, globs
+                    )
+                if touched:
+                    line = (
+                        f"mirror-refused ref={ref} dest={dest.forge}:{dest.repo} "
+                        f"sha={sha} paths={','.join(touched)}"
+                    )
+                    lines.append(line)
+                    if audit is not None:
+                        audit.append(line)
+                    logger.warning(line)
+                    continue
+            host = _FORGE_HOSTS.get(dest.forge)
+            if host is None:
+                logger.warning(
+                    f"mirror push skipped: no remote host for forge '{dest.forge}'"
+                )
+                continue
+            remote = f"https://{host}/{dest.repo}.git"
+            code, _stderr = await run(["git", "push", remote, refspec], repo_dir)
+            line = (
+                f"mirror-push ref={ref} dest={dest.forge}:{dest.repo} "
+                f"sha={sha} exit={code}"
+            )
+            lines.append(line)
+            if audit is not None:
+                audit.append(line)
+            logger.info(line)
+        return lines
+
+    @staticmethod
+    async def sync_state(
+        canonical_url: str,
+        destinations: Sequence[Destination],
+        *,
+        runner: Optional[Callable[[list[str], str], Awaitable[tuple[int, str]]]] = None,
+        audit: Optional[list[str]] = None,
+        workdir: Optional[str] = None,
+    ) -> list[str]:
+        """Push every canonical head and tag to every mirror destination (OE-023).
+
+        The state-sync entry point. It first takes a FRESH clone of the canonical
+        repository (``git clone --bare`` into a new, empty directory that is
+        removed afterwards). Only if that clone succeeded does it write anything:
+        each destination with ``role == "mirror"`` on a forge with a known remote
+        host receives ``git push <remote> +refs/heads/*:refs/heads/*
+        +refs/tags/*:refs/tags/*`` from the fresh clone (force, never
+        ``--prune``/``--mirror``). A failed clone is audited as
+        ``mirror-state-aborted`` and nothing is pushed anywhere. This path never
+        deletes a ref; see :meth:`sweep_deleted_refs` for the opt-in sweep.
+
+        One audit line per push attempt (appended to ``audit`` when given, and
+        logged). A failed push is audited and does not stop the remaining
+        destinations. Returns the audit lines of this call.
+        """
+        lines: list[str] = []
+        run = runner or _run_git
+
+        def record(line: str) -> None:
+            lines.append(line)
+            if audit is not None:
+                audit.append(line)
+            logger.info(line)
+
+        with tempfile.TemporaryDirectory(dir=workdir) as tmp:
+            clone = os.path.join(tmp, "canonical.git")
+            code, _out = await run(["git", "clone", "--bare", canonical_url, clone], tmp)
+            if code != 0:
+                record(
+                    f"mirror-state-aborted reason=canonical-clone-failed "
+                    f"exit={code} nothing-written"
+                )
+                return lines
+            for dest in destinations:
+                if dest.role != "mirror":
+                    continue
+                host = _FORGE_HOSTS.get(dest.forge)
+                if host is None:
+                    logger.warning(
+                        f"mirror state sync skipped: no remote host for forge "
+                        f"'{dest.forge}'"
+                    )
+                    continue
+                remote = f"https://{host}/{dest.repo}.git"
+                pcode, _perr = await run(
+                    [
+                        "git", "push", remote,
+                        "+refs/heads/*:refs/heads/*",
+                        "+refs/tags/*:refs/tags/*",
+                    ],
+                    clone,
+                )
+                record(f"mirror-state-push dest={dest.forge}:{dest.repo} exit={pcode}")
+        return lines
+
+    @staticmethod
+    async def sweep_deleted_refs(
+        canonical_url: str,
+        destinations: Sequence[Destination],
+        *,
+        runner: Optional[Callable[[list[str], str], Awaitable[tuple[int, str]]]] = None,
+        audit: Optional[list[str]] = None,
+        workdir: Optional[str] = None,
+        default_branch: str = "main",
+    ) -> list[str]:
+        """Delete mirror heads and tags that no longer exist on canonical (OE-023).
+
+        Runs ONLY when called: :meth:`sync_state` never deletes. The canonical
+        ref set comes from a FRESH clone; if that clone fails, or yields no refs
+        at all, nothing is deleted (a missing canonical state must never read as
+        "everything was deleted"). For each mirror destination the refs are
+        listed with ``git ls-remote --heads --tags`` and every ref absent from
+        the canonical clone is removed with ``git push <remote> :<ref>``.
+
+        Never deleted: the default branch (``default_branch``), ``refs/heads/dev``
+        and GitHub-managed refs (``refs/pull/*``, ``refs/heads/dependabot/*``,
+        ``refs/heads/copilot/*``, ``refs/heads/gh-pages``, ``refs/keep-around/*``);
+        these are audited as ``mirror-ref-kept``. Every deletion is audited as
+        ``mirror-ref-deleted ref=<ref> dest=<forge>:<repo> exit=<code>``.
+        Returns the audit lines of this call.
+        """
+        lines: list[str] = []
+        run = runner or _run_git
+
+        def record(line: str) -> None:
+            lines.append(line)
+            if audit is not None:
+                audit.append(line)
+            logger.info(line)
+
+        protected_exact = {f"refs/heads/{default_branch}", "refs/heads/dev", "refs/heads/gh-pages"}
+        protected_prefixes = (
+            "refs/pull/",
+            "refs/heads/dependabot/",
+            "refs/heads/copilot/",
+            "refs/keep-around/",
+        )
+
+        with tempfile.TemporaryDirectory(dir=workdir) as tmp:
+            clone = os.path.join(tmp, "canonical.git")
+            code, _out = await run(["git", "clone", "--bare", canonical_url, clone], tmp)
+            if code != 0:
+                record(
+                    f"mirror-sweep-aborted reason=canonical-clone-failed "
+                    f"exit={code} nothing-deleted"
+                )
+                return lines
+            code, out = await run(
+                ["git", "for-each-ref", "--format=%(refname)", "refs/heads", "refs/tags"],
+                clone,
+            )
+            canonical = {r.strip() for r in out.splitlines() if r.strip()}
+            if code != 0 or not canonical:
+                record(
+                    f"mirror-sweep-aborted reason=canonical-refs-unreadable "
+                    f"exit={code} nothing-deleted"
+                )
+                return lines
+            for dest in destinations:
+                if dest.role != "mirror":
+                    continue
+                host = _FORGE_HOSTS.get(dest.forge)
+                if host is None:
+                    logger.warning(
+                        f"mirror sweep skipped: no remote host for forge '{dest.forge}'"
+                    )
+                    continue
+                remote = f"https://{host}/{dest.repo}.git"
+                lcode, lout = await run(
+                    ["git", "ls-remote", "--heads", "--tags", remote], clone
+                )
+                if lcode != 0:
+                    record(
+                        f"mirror-sweep-aborted reason=mirror-refs-unreadable "
+                        f"dest={dest.forge}:{dest.repo} exit={lcode} nothing-deleted"
+                    )
+                    continue
+                mirror_refs: list[str] = []
+                for row in lout.splitlines():
+                    parts = row.split()
+                    if len(parts) != 2 or parts[1].endswith("^{}"):
+                        continue
+                    mirror_refs.append(parts[1])
+                for ref in mirror_refs:
+                    if ref in canonical:
+                        continue
+                    if ref in protected_exact or ref.startswith(protected_prefixes):
+                        record(f"mirror-ref-kept ref={ref} dest={dest.forge}:{dest.repo}")
+                        continue
+                    dcode, _derr = await run(["git", "push", remote, f":{ref}"], clone)
+                    record(
+                        f"mirror-ref-deleted ref={ref} dest={dest.forge}:{dest.repo} "
+                        f"exit={dcode}"
+                    )
+        return lines
+
+    @staticmethod
+    async def _touched_candidates(
+        run: Callable[[list[str], str], Awaitable[tuple[int, str]]],
+        repo_dir: str,
+        ref: str,
+        sha: str,
+        before: str,
+        default: str,
+        globs: Sequence[str],
+    ) -> list[str]:
+        """Candidate paths the ref adds or changes since its fork point.
+
+        Returns the matching paths, or ``["<fork point unresolved>"]`` when the
+        base cannot be determined (the gate fails closed).
+        """
+        unresolved = ["<fork point unresolved>"]
+        if ref == f"refs/heads/{default}" and before and set(before) != {"0"}:
+            base = before
+        else:
+            code, out = await run(
+                ["git", "merge-base", f"refs/heads/{default}", sha], repo_dir
+            )
+            base = out.strip()
+            if code != 0 or not base:
+                return unresolved
+            if base == sha and (not before or set(before) == {"0"}):
+                # First push: the fork point is the ref itself, so the diff
+                # would be empty and hide everything. Fall back to the root
+                # (ADR-0001 D.8): judge the whole tree the ref carries.
+                code, out = await run(
+                    ["git", "ls-tree", "-r", "--name-only", sha], repo_dir
+                )
+                if code != 0:
+                    return unresolved
+                paths = [p for p in out.splitlines() if p.strip()]
+                return [p for p in paths if any(fnmatch.fnmatch(p, g) for g in globs)]
+        code, out = await run(["git", "diff", "--name-only", base, sha], repo_dir)
+        if code != 0:
+            return unresolved
+        paths = [p for p in out.splitlines() if p.strip()]
+        return [p for p in paths if any(fnmatch.fnmatch(p, g) for g in globs)]
 
     @staticmethod
     def resolve_destination(
@@ -870,6 +1159,21 @@ class MirrorHandler:
         except ValueError:
             return False
         return bool(permissions.get("push", False))
+
+
+_FORGE_HOSTS: dict[str, str] = {"github": "github.com", "gitlab": "gitlab.com"}
+
+
+async def _run_git(argv: list[str], cwd: str) -> tuple[int, str]:
+    """Run git for real; return ``(exit_code, output)`` (stdout and stderr merged)."""
+    proc = await asyncio.create_subprocess_exec(
+        *argv,
+        cwd=cwd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    out, _ = await proc.communicate()  # stderr is merged into stdout
+    return proc.returncode or 0, (out or b"").decode(errors="replace")
 
 
 async def _report_drift(

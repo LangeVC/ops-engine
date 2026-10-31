@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 API_BASE = "https://api.github.com"
 UPLOADS_HOST = "https://uploads.github.com"
 RETRY_DELAYS = [1.0, 2.0, 4.0]
+MAX_PAGES = 1000
 
 
 class GithubAdapter(ForgeAdapter):
@@ -282,3 +283,25 @@ class GithubAdapter(ForgeAdapter):
             params["base"] = base
         resp = await self._request("GET", f"/repos/{repo_full_name}/pulls", params=params)
         return resp.json()
+
+    async def _list_all_pages(self, path: str) -> list[dict[str, Any]]:
+        """Collect every page of a list endpoint; stops at the first empty page."""
+        items: list[dict[str, Any]] = []
+        for page in range(1, MAX_PAGES + 1):
+            resp = await self._request(
+                "GET", path, params={"per_page": "100", "page": str(page)}
+            )
+            chunk = resp.json()
+            if not chunk:
+                return items
+            items.extend(chunk)
+        raise RuntimeError(f"{path}: more than {MAX_PAGES} pages, refusing to truncate")
+
+    async def list_branches(self, repo_full_name: str) -> dict[str, str]:
+        rows = await self._list_all_pages(f"/repos/{repo_full_name}/branches")
+        return {r["name"]: r["commit"]["sha"] for r in rows}
+
+    async def list_tags(self, repo_full_name: str) -> dict[str, str]:
+        # /tags reports the dereferenced commit for annotated tags as well.
+        rows = await self._list_all_pages(f"/repos/{repo_full_name}/tags")
+        return {r["name"]: r["commit"]["sha"] for r in rows}

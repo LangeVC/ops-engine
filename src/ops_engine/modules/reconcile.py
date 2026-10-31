@@ -12,10 +12,11 @@ Release and mirror state are queryable as records, not only visible in a log:
 
 import logging
 from dataclasses import dataclass, field
-from typing import Iterable
+from typing import Awaitable, Callable, Iterable, Optional, Sequence
 
 from ops_engine.adapters.base import ForgeAdapter
-from ops_engine.config_loader import ReleaseConfig
+from ops_engine.config_loader import Destination, ReleaseConfig
+from ops_engine.modules.mirror import MirrorHandler
 from ops_engine.modules.release import DEFAULT_NAME_TEMPLATE, render_release_name
 
 logger = logging.getLogger(__name__)
@@ -41,6 +42,35 @@ class MirrorState:
             "primary_sha": self.primary_sha,
             "mirror_sha": self.mirror_sha,
             "in_sync": self.in_sync,
+        }
+
+
+@dataclass
+class DriftReport:
+    """Ref-level drift between a primary repo and its mirror (OE-024).
+
+    Heads and tags are compared by name and head SHA (tags dereferenced to the
+    commit). ``missing`` and ``differing`` mean the mirror is BEHIND; ``extra``
+    refs exist only on the mirror and are never a reason to sync (state sync
+    does not delete).
+    """
+
+    repo: str = ""
+    missing: list[str] = field(default_factory=list)
+    differing: list[str] = field(default_factory=list)
+    extra: list[str] = field(default_factory=list)
+
+    @property
+    def behind(self) -> bool:
+        return bool(self.missing or self.differing)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "repo": self.repo,
+            "missing_on_mirror": list(self.missing),
+            "differing": list(self.differing),
+            "extra_on_mirror": list(self.extra),
+            "behind": self.behind,
         }
 
 
@@ -196,3 +226,67 @@ class ReconcileHandler:
             adapter, repo, mirror_url, branch=branch, primary_sha=primary_sha
         )
         return ReconcileRecord(repo=repo, missing=missing, mirror=mirror)
+
+    @staticmethod
+    async def measure_drift(
+        primary: ForgeAdapter,
+        primary_repo: str,
+        mirror: ForgeAdapter,
+        mirror_repo: str,
+    ) -> DriftReport:
+        """Compare every head and tag of both forges by name and head SHA.
+
+        Read-only. Each adapter walks ALL pages of its branch and tag lists, so
+        a repository with more refs than one page holds is measured completely.
+        Refs are keyed ``refs/heads/<name>`` and ``refs/tags/<name>``; tag SHAs
+        are the dereferenced commits.
+        """
+        want: dict[str, str] = {}
+        have: dict[str, str] = {}
+        for adapter, repo, refs in (
+            (primary, primary_repo, want),
+            (mirror, mirror_repo, have),
+        ):
+            for name, sha in (await adapter.list_branches(repo)).items():
+                refs[f"refs/heads/{name}"] = sha
+            for name, sha in (await adapter.list_tags(repo)).items():
+                refs[f"refs/tags/{name}"] = sha
+        return DriftReport(
+            repo=primary_repo,
+            missing=sorted(r for r in want if r not in have),
+            differing=sorted(r for r in want if r in have and have[r] != want[r]),
+            extra=sorted(r for r in have if r not in want),
+        )
+
+    @staticmethod
+    async def reconcile_mirror(
+        primary: ForgeAdapter,
+        primary_repo: str,
+        mirror: ForgeAdapter,
+        mirror_repo: str,
+        canonical_url: str,
+        destinations: Sequence[Destination],
+        *,
+        runner: Optional[Callable[[list[str], str], Awaitable[tuple[int, str]]]] = None,
+        audit: Optional[list[str]] = None,
+        workdir: Optional[str] = None,
+    ) -> DriftReport:
+        """One reconcile cycle: measure drift, state-sync when behind, re-measure.
+
+        When the mirror is behind, :meth:`MirrorHandler.sync_state` runs once in
+        this same cycle. Returns the drift measured AFTER the sync (or the
+        initial, clean report when nothing was behind).
+        """
+        report = await ReconcileHandler.measure_drift(
+            primary, primary_repo, mirror, mirror_repo
+        )
+        if not report.behind:
+            return report
+        logger.info(f"Mirror of {primary_repo} is behind ({len(report.missing)} missing, "
+                    f"{len(report.differing)} differing); state-syncing")
+        await MirrorHandler.sync_state(
+            canonical_url, destinations, runner=runner, audit=audit, workdir=workdir
+        )
+        return await ReconcileHandler.measure_drift(
+            primary, primary_repo, mirror, mirror_repo
+        )
