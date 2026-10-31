@@ -52,6 +52,12 @@ from .modules.release_gates import (
     extract_changelog_section,
     check_release_notes_audience,
 )
+# The mirror tag identity (OE-008). The module is tag_identity; no exported name equals it.
+from .modules.tag_identity import (
+    MirrorTagIdentity,
+    MirrorTagIdentityError,
+    push_canonical_tag,
+)
 
 __all__ = [
     # Core
@@ -104,4 +110,8 @@ __all__ = [
     "ReleaseTitleError",
     "MissingChangelogEntryError",
     "ReleaseNotesAudienceError",
+    # Mirror tag identity (OE-008)
+    "push_canonical_tag",
+    "MirrorTagIdentity",
+    "MirrorTagIdentityError",
 ]
