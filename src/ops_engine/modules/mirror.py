@@ -643,7 +643,6 @@ class MirrorHandler:
         runner: Optional[Callable[[list[str], str], Awaitable[tuple[int, str]]]] = None,
         audit: Optional[list[str]] = None,
         workdir: Optional[str] = None,
-        default_branch: str = "main",
     ) -> list[str]:
         """Delete mirror heads and tags that no longer exist on canonical (OE-023).
 
@@ -654,7 +653,8 @@ class MirrorHandler:
         listed with ``git ls-remote --heads --tags`` and every ref absent from
         the canonical clone is removed with ``git push <remote> :<ref>``.
 
-        Never deleted: the default branch (``default_branch``), ``refs/heads/dev``
+        Never deleted: the default branch (read from the canonical clone's HEAD;
+        if it cannot be read nothing is deleted), ``refs/heads/dev``
         and GitHub-managed refs (``refs/pull/*``, ``refs/heads/dependabot/*``,
         ``refs/heads/copilot/*``, ``refs/heads/gh-pages``, ``refs/keep-around/*``);
         these are audited as ``mirror-ref-kept``. Every deletion is audited as
@@ -670,7 +670,6 @@ class MirrorHandler:
                 audit.append(line)
             logger.info(line)
 
-        protected_exact = {f"refs/heads/{default_branch}", "refs/heads/dev", "refs/heads/gh-pages"}
         protected_prefixes = (
             "refs/pull/",
             "refs/heads/dependabot/",
@@ -698,6 +697,15 @@ class MirrorHandler:
                     f"exit={code} nothing-deleted"
                 )
                 return lines
+            hcode, hout = await run(["git", "symbolic-ref", "HEAD"], clone)
+            head = hout.strip()
+            if hcode != 0 or not head.startswith("refs/heads/"):
+                record(
+                    f"mirror-sweep-aborted reason=canonical-head-unreadable "
+                    f"exit={hcode} nothing-deleted"
+                )
+                return lines
+            protected_exact = {head, "refs/heads/dev", "refs/heads/gh-pages"}
             for dest in destinations:
                 if dest.role != "mirror":
                     continue
@@ -1275,14 +1283,20 @@ _FORGE_HOSTS: dict[str, str] = {"github": "github.com", "gitlab": "gitlab.com"}
 
 
 async def _run_git(argv: list[str], cwd: str) -> tuple[int, str]:
-    """Run git for real; return ``(exit_code, output)`` (stdout and stderr merged)."""
+    """Run git for real; return ``(exit_code, stdout)``.
+
+    stderr is captured apart from stdout and only logged, so a diagnostic line
+    can never be parsed as command output (a ref row, a SHA).
+    """
     proc = await asyncio.create_subprocess_exec(
         *argv,
         cwd=cwd,
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
+        stderr=asyncio.subprocess.PIPE,
     )
-    out, _ = await proc.communicate()  # stderr is merged into stdout
+    out, err = await proc.communicate()
+    if err:
+        logger.debug(f"git {argv[1:2]} stderr: {err.decode(errors='replace').strip()}")
     return proc.returncode or 0, (out or b"").decode(errors="replace")
 
 

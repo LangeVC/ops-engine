@@ -234,6 +234,8 @@ def test_sweep_refuses_a_destination_with_empty_visibility():
             self.calls.append(list(argv))
             if argv[1] == "for-each-ref":
                 return 0, "refs/heads/main\n"
+            if argv[1] == "symbolic-ref":
+                return 0, "refs/heads/main\n"
             return 0, ""
 
     dest = Destination(forge="github", repo="LangeVC/x", role="mirror", visibility="")

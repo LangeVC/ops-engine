@@ -29,8 +29,9 @@ def _dests():
 
 
 class Runner:
-    def __init__(self, clone_code=0, canonical_refs=(), mirror_refs=None):
+    def __init__(self, clone_code=0, canonical_refs=(), mirror_refs=None, head="refs/heads/main"):
         self.calls = []
+        self.head = head
         self.clone_code = clone_code
         self.canonical_refs = list(canonical_refs)
         self.mirror_refs = mirror_refs or {}
@@ -41,6 +42,8 @@ class Runner:
             return self.clone_code, ""
         if argv[1] == "for-each-ref":
             return 0, "\n".join(self.canonical_refs) + "\n"
+        if argv[1] == "symbolic-ref":
+            return 0, self.head + "\n"
         if argv[1] == "ls-remote":
             rows = [f"{'a' * 40}\t{r}" for r in self.mirror_refs.get(argv[-1], [])]
             return 0, "\n".join(rows) + "\n"
@@ -154,8 +157,9 @@ def test_sweep_never_deletes_default_dev_or_github_managed_refs():
     runner = Runner(
         canonical_refs=["refs/heads/other"],
         mirror_refs={GH: protected + ["refs/heads/stale"], GL: []},
+        head="refs/heads/trunk",
     )
-    lines = _sweep(runner, default_branch="trunk")
+    lines = _sweep(runner)
     deletes = [argv[3] for argv, _ in runner.calls if argv[1] == "push"]
     assert deletes == [":refs/heads/stale"]
     kept = {l.split()[1] for l in lines if l.startswith("mirror-ref-kept")}
