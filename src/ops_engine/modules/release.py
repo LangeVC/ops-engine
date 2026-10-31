@@ -2,15 +2,22 @@
 
 import fnmatch
 import logging
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable, Optional
 
 from ops_engine.adapters.base import ForgeAdapter
 from ops_engine.adapters.factory import adapters_for
 from ops_engine.config_loader import Destination, OpsEngineConfig, ReleaseConfig
 from ops_engine.modules.mirror import resolve_destinations
-from ops_engine.utils.changelog_parser import ChangelogParser
+from ops_engine.modules.release_gates import (
+    MissingChangelogEntryError,
+    check_release_notes_audience,
+    check_release_title,
+    extract_changelog_section,
+)
+from ops_engine.modules.tag_identity import Runner, push_canonical_tag
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +106,63 @@ class PublicationReport:
         }
 
 
+class MissingReleaseContextError(RuntimeError):
+    """A tag push reached the release path with no way to publish it.
+
+    The webhook path no longer creates a bare release on the event's own forge.
+    Without a :class:`ReleaseContext` there are no gates' inputs, no identity
+    and no destinations, so the push is refused before any release object
+    exists.
+    """
+
+
+class MissingOpsYamlError(RuntimeError):
+    """The tag carries no readable ``.ops.yaml``: no destinations can be named."""
+
+
+class MissingReleaseDestinationsError(RuntimeError):
+    """``.ops.yaml`` at the tag declares no destination with the release role."""
+
+
+@dataclass
+class TagIdentitySpec:
+    """Inputs of the OE-008 tag identity step (:func:`push_canonical_tag`).
+
+    ``canonical_token`` reaches git through the environment, never argv or a
+    URL; ``mirror_remote`` is used exactly as given. ``runner`` is the git
+    runner injection point (real git when ``None``).
+    """
+
+    repo_dir: str
+    canonical_url: str
+    canonical_token: str
+    mirror_remote: str
+    runner: Optional[Runner] = None
+
+
+@dataclass
+class ReleaseContext:
+    """Everything a tag-push release needs besides the event itself.
+
+    ``ops_config`` is the Layer-2 config the destinations resolve from; the
+    Layer-3 ``.ops.yaml`` is read from the pushed tag and merged over it.
+    ``ticket_prefixes`` is the organisation's tracker vocabulary for the
+    audience gate (empty: the gate refuses nothing). ``adapters`` is the test
+    injection point of :meth:`ReleaseHandler.publish_release`.
+    """
+
+    ops_config: OpsEngineConfig
+    artifact_dir: str | Path
+    identity: TagIdentitySpec
+    token: str = ""
+    webhook_secret: str = ""
+    base_url: str = ""
+    name_template: Optional[str] = None
+    ticket_prefixes: Iterable[str] = ()
+    prerelease: bool = False
+    adapters: Optional[list[ForgeAdapter]] = None
+
+
 def _destination_label(destination: Destination) -> str:
     """Name a destination for a report: forge and target, joined.
 
@@ -128,7 +192,10 @@ class ReleaseHandler:
 
     @staticmethod
     async def process_event(
-        adapter: ForgeAdapter, event: dict[str, Any], config: ReleaseConfig
+        adapter: ForgeAdapter,
+        event: dict[str, Any],
+        config: ReleaseConfig,
+        context: Optional[ReleaseContext] = None,
     ) -> None:
         if not config.enabled:
             return
@@ -145,7 +212,13 @@ class ReleaseHandler:
         if event_type in ("push", "create") and config.trigger in ("tag_push", "both"):
             tag_name = _extract_tag_name(event_type, raw)
             if tag_name and fnmatch.fnmatch(tag_name, config.tag_pattern):
-                await _create_release_for_tag(adapter, repo, tag_name, config)
+                if context is None:
+                    raise MissingReleaseContextError(
+                        f"MissingReleaseContextError: tag {tag_name} pushed on "
+                        f"{repo} but no ReleaseContext was supplied; refusing "
+                        "before any release object exists."
+                    )
+                await _release_tag(adapter, repo, tag_name, config, context)
                 return
 
         # Trigger 2: PR merged with label
@@ -174,6 +247,8 @@ class ReleaseHandler:
         prerelease: bool = False,
         name_template: str | None = None,
         adapters: list[ForgeAdapter] | None = None,
+        repo_dir: str | Path | None = None,
+        roles: Iterable[str] | None = None,
     ) -> "PublicationReport":
         """Publish a built release to every destination resolved from config.
 
@@ -197,11 +272,16 @@ class ReleaseHandler:
         they are used in destination order. It never changes the destination
         resolution, which always runs.
 
+        ``repo_dir`` is a directory holding the Layer-3 ``.ops.yaml`` to merge
+        over the Layer-2 config (the webhook path writes the file it read at
+        the tag there). ``roles`` keeps only destinations whose role is listed;
+        ``None`` keeps all.
+
         Raises:
             ValueError: a supplied ``adapters`` list does not match the resolved
                 destination count.
         """
-        destinations = resolve_destinations(config, repo)
+        destinations = _resolve_publish_destinations(config, repo, repo_dir, roles)
 
         if adapters is None:
             adapters = adapters_for(
@@ -300,41 +380,105 @@ def _collect_artifacts(artifact_dir: str | Path) -> list[tuple[str, bytes]]:
     return artifacts
 
 
-async def _create_release_for_tag(
-    adapter: ForgeAdapter, repo: str, tag_name: str, config: ReleaseConfig
-) -> None:
-    """Create a release for a given tag, with CHANGELOG-based notes."""
-
-    # Idempotency: check if release already exists
-    if await adapter.release_exists(repo, tag_name):
-        logger.info(f"Release {tag_name} already exists on {repo}, skipping")
-        return
-
-    # Try to extract release notes from CHANGELOG
-    release_notes = ""
-    if config.changelog_path:
-        try:
-            content = await adapter.get_file_content(repo, config.changelog_path, ref=tag_name)
-            version = tag_name.lstrip("v")
-            release_notes = ChangelogParser.extract_from_file(content, version)
-        except Exception as e:
-            logger.warning(f"Could not read {config.changelog_path} from {repo}: {e}")
-
-    if not release_notes:
-        release_notes = f"Release {tag_name}"
-
-    name_template = getattr(config, "name_template", None) or DEFAULT_NAME_TEMPLATE
-    release_name = render_release_name(name_template, repo, tag_name)
-
-    logger.info(f"Creating release {tag_name} on {repo}")
-    await adapter.create_release(
-        repo_full_name=repo,
-        tag_name=tag_name,
-        name=release_name,
-        body=release_notes,
-        draft=config.draft,
+def _resolve_publish_destinations(
+    config: OpsEngineConfig,
+    repo: str,
+    repo_dir: str | Path | None,
+    roles: Iterable[str] | None,
+) -> list[Destination]:
+    destinations = resolve_destinations(
+        config, repo, repo_dir=str(repo_dir) if repo_dir is not None else None
     )
-    logger.info(f"Release {tag_name} created on {repo}")
+    if roles is None:
+        return destinations
+    wanted = set(roles)
+    return [d for d in destinations if d.role in wanted]
+
+
+async def _release_tag(
+    adapter: ForgeAdapter,
+    repo: str,
+    tag_name: str,
+    config: ReleaseConfig,
+    context: ReleaseContext,
+) -> None:
+    """Release a pushed tag: all gates, then the tag identity, then publication.
+
+    Everything read here is read AT the tag. The first three steps only read and
+    refuse; the identity step is the first to write (a tag on the mirror) and the
+    publication the second, so any refusal in the gates or in the destination
+    resolution happens before a tag is pushed or a release object exists.
+    """
+    # Gates (OE-007) on the CHANGELOG and the tag.
+    name_template = (
+        context.name_template
+        or getattr(config, "name_template", None)
+        or DEFAULT_NAME_TEMPLATE
+    )
+    title_form = render_release_name(name_template, repo, "{tag_name}")
+    check_release_title(tag_name, name_template=title_form)
+
+    try:
+        changelog = await adapter.get_file_content(
+            repo, config.changelog_path, ref=tag_name
+        )
+    except Exception as exc:  # noqa: BLE001 (a named refusal, not a fallback)
+        raise MissingChangelogEntryError(
+            f"MissingChangelogEntryError: could not read {config.changelog_path} "
+            f"of {repo} at {tag_name}: {exc}. No notes, so no release."
+        ) from exc
+    notes = extract_changelog_section(changelog, tag_name)
+    check_release_notes_audience(notes, context.ticket_prefixes)
+
+    # Destinations from .ops.yaml at the tag; read-only, still before any write.
+    try:
+        ops_yaml = await adapter.get_file_content(repo, ".ops.yaml", ref=tag_name)
+    except Exception as exc:  # noqa: BLE001
+        raise MissingOpsYamlError(
+            f"MissingOpsYamlError: no readable .ops.yaml of {repo} at {tag_name}: "
+            f"{exc}. Refusing rather than publishing to fewer destinations."
+        ) from exc
+
+    with tempfile.TemporaryDirectory() as layer3_dir:
+        (Path(layer3_dir) / ".ops.yaml").write_text(ops_yaml, encoding="utf-8")
+        if not _resolve_publish_destinations(
+            context.ops_config, repo, layer3_dir, ("release",)
+        ):
+            raise MissingReleaseDestinationsError(
+                f"MissingReleaseDestinationsError: .ops.yaml of {repo} at "
+                f"{tag_name} declares no destination with role 'release'."
+            )
+
+        # Identity (OE-008), after every gate.
+        identity = context.identity
+        await push_canonical_tag(
+            identity.repo_dir,
+            tag_name,
+            identity.canonical_url,
+            identity.canonical_token,
+            identity.mirror_remote,
+            identity.runner,
+        )
+
+        logger.info(f"Publishing release {tag_name} of {repo}")
+        report = await ReleaseHandler.publish_release(
+            context.ops_config,
+            repo,
+            tag_name,
+            notes,
+            context.artifact_dir,
+            token=context.token,
+            webhook_secret=context.webhook_secret,
+            base_url=context.base_url,
+            draft=config.draft,
+            prerelease=context.prerelease,
+            name_template=name_template,
+            adapters=context.adapters,
+            repo_dir=layer3_dir,
+            roles=("release",),
+        )
+    if report.partial:
+        logger.error(f"release {tag_name} partially published: {report.to_dict()}")
 
 
 def _extract_tag_name(event_type: str, raw: dict[str, Any]) -> str | None:
