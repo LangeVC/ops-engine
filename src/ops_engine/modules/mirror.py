@@ -89,7 +89,7 @@ import fnmatch
 import logging
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Awaitable, Callable, Optional, Sequence
 
 from ops_engine.adapters.base import ForgeAdapter
 from ops_engine.config_loader import (
@@ -430,6 +430,63 @@ class MirrorHandler:
             )
             await _report_drift(adapter, repo, primary_sha, mirror_sha, config)
 
+
+    @staticmethod
+    async def push_event(
+        event: dict[str, Any],
+        destinations: Sequence[Destination],
+        *,
+        repo_dir: str,
+        runner: Optional[Callable[[list[str], str], Awaitable[tuple[int, str]]]] = None,
+        audit: Optional[list[str]] = None,
+    ) -> list[str]:
+        """Push exactly the triggering ref to every mirror destination (OE-022).
+
+        On a push event the single ref named by the webhook is pushed with the
+        refspec ``+<ref>:<ref>`` (force, one ref). Never ``--prune``, never
+        ``--mirror``, never ``--all``/``--tags``: nothing but the triggering ref
+        moves, and nothing on the destination is deleted. Only destinations with
+        ``role == "mirror"`` on a forge with a known remote host are pushed.
+
+        One audit line is recorded per push attempt (appended to ``audit`` when
+        given, and logged), carrying ref, destination, SHA and git's exit code. A
+        failed push is audited and does not stop the remaining destinations. A
+        non-push event, a missing ref, or a ref deletion pushes nothing.
+
+        ``runner(argv, cwd)`` runs git and returns ``(exit_code, stderr)``; the
+        default runs real git. Returns the audit lines of this call.
+        """
+        lines: list[str] = []
+        raw = event.get("raw", {}) or {}
+        ref = raw.get("ref", "")
+        sha = raw.get("after") or (raw.get("head_commit") or {}).get("id") or ""
+        if event.get("event_type") != "push" or not ref or not sha:
+            return lines
+        if set(sha) == {"0"}:  # ref deletion: there is nothing to push
+            return lines
+
+        run = runner or _run_git
+        refspec = f"+{ref}:{ref}"
+        for dest in destinations:
+            if dest.role != "mirror":
+                continue
+            host = _FORGE_HOSTS.get(dest.forge)
+            if host is None:
+                logger.warning(
+                    f"mirror push skipped: no remote host for forge '{dest.forge}'"
+                )
+                continue
+            remote = f"https://{host}/{dest.repo}.git"
+            code, _stderr = await run(["git", "push", remote, refspec], repo_dir)
+            line = (
+                f"mirror-push ref={ref} dest={dest.forge}:{dest.repo} "
+                f"sha={sha} exit={code}"
+            )
+            lines.append(line)
+            if audit is not None:
+                audit.append(line)
+            logger.info(line)
+        return lines
 
     @staticmethod
     def resolve_destination(
@@ -870,6 +927,21 @@ class MirrorHandler:
         except ValueError:
             return False
         return bool(permissions.get("push", False))
+
+
+_FORGE_HOSTS: dict[str, str] = {"github": "github.com", "gitlab": "gitlab.com"}
+
+
+async def _run_git(argv: list[str], cwd: str) -> tuple[int, str]:
+    """Run git for real; return ``(exit_code, stderr)``."""
+    proc = await asyncio.create_subprocess_exec(
+        *argv,
+        cwd=cwd,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, err = await proc.communicate()
+    return proc.returncode or 0, err.decode(errors="replace")
 
 
 async def _report_drift(
