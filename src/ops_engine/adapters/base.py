@@ -121,3 +121,22 @@ class ForgeAdapter(ABC):
     ) -> list[dict[str, Any]]:
         """List pull requests, optionally filtered by head/base branch."""
         pass
+
+    @abstractmethod
+    async def list_branches(self, repo_full_name: str) -> dict[str, str]:
+        """Return every branch of the repository as ``{name: head SHA}``.
+
+        Walks EVERY page of the forge's branch list; a page limit must never
+        truncate the result.
+        """
+        pass
+
+    @abstractmethod
+    async def list_tags(self, repo_full_name: str) -> dict[str, str]:
+        """Return every tag of the repository as ``{name: commit SHA}``.
+
+        Walks EVERY page of the forge's tag list. The SHA is the DEREFERENCED
+        commit the tag points at (for an annotated tag the commit, not the tag
+        object), so tags are comparable across forges.
+        """
+        pass
