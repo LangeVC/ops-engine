@@ -214,3 +214,52 @@ def test_credential_goes_to_git_only_for_the_canonical_read_and_never_into_a_mes
     assert TOKEN not in str(err.value)
     assert canon in str(err.value)  # the credential-free URL is what is named
     assert len(calls) == 1  # nothing was pushed
+
+
+# --- OE-008 criterion 3: RED proof against a peel-only comparison -----------
+
+
+def _lightweight_mirror_push(world):
+    """A runner that lets the mirror end up with a lightweight tag: the object
+    push is swapped for a push of the bare commit, as a mirror job that pushes
+    the (degraded) ref name would do."""
+
+    async def runner(argv, cwd):
+        if argv[:2] == ["git", "push"]:
+            argv = [*argv[:-1], f"{world['commit']}:refs/tags/{TAG}"]
+        return await tag_identity._run_git(argv, cwd)
+
+    return runner
+
+
+def test_lightweight_mirror_tag_against_annotated_canonical_tag_is_refused_by_name(world):
+    _publish_canonical(world, annotated=True)
+    canonical_obj = git("rev-parse", f"refs/tags/{TAG}", cwd=world["canonical"])
+
+    with pytest.raises(tag_identity.MirrorTagObjectMismatchError) as err:
+        _push(world, runner=_lightweight_mirror_push(world))
+
+    message = str(err.value)
+    assert message.startswith("MirrorTagObjectMismatchError")
+    assert TAG in message
+    assert canonical_obj in message  # the canonical object is named
+    assert world["commit"] in message  # and so is the lightweight mirror object
+    assert TOKEN not in message
+
+
+def test_the_lightweight_mirror_tag_peels_to_the_same_commit_so_a_peel_only_check_passes(world):
+    """Why the object comparison is load-bearing: a peel-only comparison cannot
+    tell the lightweight mirror tag from the annotated canonical tag."""
+    _publish_canonical(world, annotated=True)
+    with pytest.raises(tag_identity.MirrorTagObjectMismatchError):
+        _push(world, runner=_lightweight_mirror_push(world))
+
+    canonical_obj = git("rev-parse", f"refs/tags/{TAG}", cwd=world["canonical"])
+    mirror_obj = git("rev-parse", f"refs/tags/{TAG}", cwd=world["mirror"])
+    canonical_peel = git("rev-parse", f"refs/tags/{TAG}^{{}}", cwd=world["canonical"])
+    mirror_peel = git("rev-parse", f"refs/tags/{TAG}^{{}}", cwd=world["mirror"])
+
+    assert git("cat-file", "-t", f"refs/tags/{TAG}", cwd=world["canonical"]) == "tag"
+    assert git("cat-file", "-t", f"refs/tags/{TAG}", cwd=world["mirror"]) == "commit"
+    assert mirror_peel == canonical_peel  # a peel-only comparison would accept this
+    assert mirror_obj != canonical_obj  # only the object comparison refuses it
