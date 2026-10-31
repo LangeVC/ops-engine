@@ -135,28 +135,36 @@ jobs:
         id: title
         env:
           TAG_NAME: "${{ github.event.inputs.tag_name || github.ref_name }}"
+          NAME_TEMPLATE: "Ops Engine {tag_name}"
         run: |
           set -euo pipefail
-          RELEASE_NAME="Ops Engine ${TAG_NAME}"
-          python3 - "${RELEASE_NAME}" <<'TITLE_GATE_PY'
-          import re
+          # OE-007 — the gate is ops-engine's check_release_title, loaded from
+          # this checkout by its path. Neither a copy of it nor a fetched copy
+          # lives in this file; the module imports only the standard library
+          # (REL-006: the bare runner has neither yaml nor pydantic, and the
+          # package's own import pulls both in, so the package is never loaded).
+          python3 - "${TAG_NAME}" "${NAME_TEMPLATE}" <<'TITLE_GATE_PY'
+          import importlib.util
+          import os
           import sys
 
-          NAME_RE = re.compile(
-              r"^Ops Engine v[0-9]+\.[0-9]+\.[0-9]+(?:-rc[0-9]+)?$"
+          spec = importlib.util.spec_from_file_location(
+              "release_gates", "src/ops_engine/modules/release_gates.py"
           )
-          name = sys.argv[1]
-          if not NAME_RE.match(name):
-              sys.stderr.write(
-                  "ReleaseTitleError: release name %r does not match the "
-                  "required convention ^Ops Engine v[0-9]+\\.[0-9]+\\.[0-9]+$ "
-                  "or its prerelease form ...-rc[0-9]+$. Refusing before any "
-                  "release object exists on either forge.\n" % name
-              )
+          gates = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(gates)
+
+          tag_name, name_template = sys.argv[1], sys.argv[2]
+          try:
+              name = gates.check_release_title(tag_name, name_template=name_template)
+          except gates.ReleaseTitleError as exc:
+              sys.stderr.write(str(exc) + "\n")
               sys.exit(2)
           sys.stdout.write("title gate: %r conforms\n" % name)
+          if os.environ.get("GITHUB_OUTPUT"):
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+                  out.write("release_name=%s\n" % name)
           TITLE_GATE_PY
-          echo "release_name=${RELEASE_NAME}" >> "$GITHUB_OUTPUT"
 
       # The release body is the CHANGELOG entry for this version, not commit
       # subjects. A tag whose version has no `## X.Y.Z` section fails here,
@@ -170,56 +178,26 @@ jobs:
         run: |
           set -euo pipefail
 
+          # OE-007 — the extraction is ops-engine's extract_changelog_section,
+          # loaded from this checkout by its path (see the title gate above for
+          # why the package is not imported). A tag with no section, or an
+          # empty one, is refused by name and the step exits non-zero.
           NOTES="$(python3 - "$TAG_NAME" <<'PY'
-          import re
+          import importlib.util
           import sys
 
-          # REL-006 — stdlib-only notes extractor. The previous extractor did
-          # `from ops_engine.utils.changelog_parser import ChangelogParser`,
-          # which runs ops_engine/__init__.py and transitively imports
-          # config_loader.py -> `import yaml` / `import pydantic`. Neither is
-          # present on the bare runner image, so the release job died with
-          # `ModuleNotFoundError: No module named 'yaml'` — it only ever passed
-          # on developer machines. The regex and extraction below are a
-          # byte-for-byte faithful copy of ChangelogParser, using only `re` and
-          # `sys`, so nothing outside the stdlib is needed and there is no
-          # install step to fail.
-          HEADER_PATTERN = re.compile(
-              r"^##\s+"
-              r"(?:\[)?(?:[\w-]+\s+)?v?"
-              r"(\d+\.\d+\.\d+(?:[-.\w]*)?)"
-              r"(?:\])?"
-              r".*$",
-              re.MULTILINE,
+          spec = importlib.util.spec_from_file_location(
+              "release_gates", "src/ops_engine/modules/release_gates.py"
           )
+          gates = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(gates)
 
-          tag = sys.argv[1]
-          version = tag.lstrip("v")
           with open("CHANGELOG.md", encoding="utf-8") as fh:
               content = fh.read()
-          matches = list(HEADER_PATTERN.finditer(content))
-          target_match = None
-          target_idx = -1
-          for idx, m in enumerate(matches):
-              if m.group(1) == version:
-                  target_match = m
-                  target_idx = idx
-                  break
-          if target_match is None:
-              notes = ""
-          else:
-              start = target_match.end()
-              if target_idx + 1 < len(matches):
-                  end = matches[target_idx + 1].start()
-              else:
-                  end = len(content)
-              notes = content[start:end].strip()
-          if not notes:
-              sys.stderr.write(
-                  "MissingChangelogEntryError: no '## %s' section in CHANGELOG.md; "
-                  "a release with no notes would post commit subjects, so the "
-                  "release is refused.\n" % version
-              )
+          try:
+              notes = gates.extract_changelog_section(content, sys.argv[1])
+          except gates.MissingChangelogEntryError as exc:
+              sys.stderr.write(str(exc) + "\n")
               sys.exit(2)
           sys.stdout.write(notes)
           PY

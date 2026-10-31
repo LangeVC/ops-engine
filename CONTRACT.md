@@ -163,6 +163,10 @@ names above) are the functions and errors of
 their module's name. Each gate refuses with its named error; each error is a
 `ValueError`.
 
+The module imports only the standard library, so a release runner without
+`yaml` and `pydantic` loads it by its path
+(`src/ops_engine/modules/release_gates.py`) instead of importing the package.
+
 ```python
 check_release_title(tag_name, name_template=None, prefix=None) -> str
 ```

@@ -16,14 +16,16 @@ imports the gate instead of carrying a copy of it:
   refused with :class:`ReleaseNotesAudienceError`. The engine ships no
   organisation vocabulary: with no prefixes supplied the gate refuses nothing.
 
-The module is stdlib-only apart from :class:`ChangelogParser`, which is itself
-stdlib-only. Its name differs from every name it exports.
+The module imports only the standard library (D19). The release runner has
+neither ``yaml`` nor ``pydantic`` and ``import ops_engine`` pulls both in, so
+the workflow loads this file by its path and never imports the package. The
+CHANGELOG heading pattern is therefore held here as well as in
+``ChangelogParser``; ``tests/test_release_gates.py`` pins the two to the same
+pattern. Its name differs from every name it exports.
 """
 
 import re
 from typing import Iterable, Optional
-
-from ..utils.changelog_parser import ChangelogParser
 
 __all__ = [
     "ReleaseTitleError",
@@ -36,6 +38,16 @@ __all__ = [
 
 TAG_NAME_PLACEHOLDER = "{tag_name}"
 _TAG_RE = r"v[0-9]+\.[0-9]+\.[0-9]+(?:-rc[0-9]+)?"
+# Same pattern as ChangelogParser.HEADER_PATTERN: ``## v1.0.0``, ``## [1.0.0]``,
+# ``## Package v1.0.0 - Title (date)``.
+_HEADER_RE = re.compile(
+    r"^##\s+"
+    r"(?:\[)?(?:[\w-]+\s+)?v?"
+    r"(\d+\.\d+\.\d+(?:[-.\w]*)?)"
+    r"(?:\])?"
+    r".*$",
+    re.MULTILINE,
+)
 _TICKET_SHAPE_RE = re.compile(r"[A-Z]{2,5}-[0-9]+")
 _TICKET_PREFIX_RE = re.compile(r"[A-Z]{2,5}")
 
@@ -106,6 +118,16 @@ def check_release_title(
     return rendered
 
 
+def _section_body(changelog: str, version: str) -> str:
+    """The text between the heading of ``version`` and the next version heading."""
+    headings = list(_HEADER_RE.finditer(changelog))
+    for idx, heading in enumerate(headings):
+        if heading.group(1) == version:
+            end = headings[idx + 1].start() if idx + 1 < len(headings) else len(changelog)
+            return changelog[heading.end():end].strip()
+    return ""
+
+
 def extract_changelog_section(changelog: str, tag_name: str) -> str:
     """Return the CHANGELOG notes of ``tag_name``; refuse a missing section.
 
@@ -118,7 +140,7 @@ def extract_changelog_section(changelog: str, tag_name: str) -> str:
             A release with no authored notes would post commit subjects.
     """
     version = tag_name.lstrip("v")
-    notes = ChangelogParser.extract_version_notes(changelog or "", version)
+    notes = _section_body(changelog or "", version)
     if not notes:
         raise MissingChangelogEntryError(
             "MissingChangelogEntryError: no non-empty '## %s' section in "

@@ -325,3 +325,95 @@ def test_red_audience_gate_without_its_refusal_lets_the_tracker_name_through():
 
 def test_module_name_differs_from_every_exported_name():
     assert "release_gates" not in ops_engine.__all__
+
+
+# --- D19: stdlib-only, loaded by path, no yaml and no pydantic ----------------
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+GATES_PATH = REPO_ROOT / "src" / "ops_engine" / "modules" / "release_gates.py"
+
+# A process in which `import yaml` and `import pydantic` fail, as on the bare
+# release runner. The module is loaded by its path (the way the workflow loads
+# it); the package is never imported and never installed.
+_BARE_RUNNER_PROBE = r"""
+import importlib.abc, importlib.util, sys
+
+class _Absent(importlib.abc.MetaPathFinder):
+    def find_spec(self, name, path=None, target=None):
+        if name.split(".")[0] in ("yaml", "pydantic", "ops_engine"):
+            raise ModuleNotFoundError("No module named %r" % name)
+
+sys.meta_path.insert(0, _Absent())
+for bare in ("yaml", "pydantic", "ops_engine"):
+    try:
+        __import__(bare)
+    except ModuleNotFoundError:
+        pass
+    else:
+        raise SystemExit("probe is broken: %s imported" % bare)
+
+spec = importlib.util.spec_from_file_location("release_gates", sys.argv[1])
+gates = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(gates)
+
+assert gates.check_release_title("v1.2.3-rc1", prefix="Acme") == "Acme v1.2.3-rc1"
+assert gates.extract_changelog_section("## [1.2.3] - d\n\nNotes.\n", "v1.2.3") == "Notes."
+for call, error in (
+    (lambda: gates.check_release_title("v1.2.3-RC1", prefix="Acme"), gates.ReleaseTitleError),
+    (lambda: gates.extract_changelog_section("## 1.0.0\n\nx\n", "v9.9.9"), gates.MissingChangelogEntryError),
+    (lambda: gates.check_release_notes_audience("see LVC-1", ["LVC"]), gates.ReleaseNotesAudienceError),
+):
+    try:
+        call()
+    except error:
+        pass
+    else:
+        raise SystemExit("%s was not raised" % error.__name__)
+loaded = sorted(m for m in sys.modules if m.split(".")[0] in ("yaml", "pydantic", "ops_engine"))
+assert not loaded, loaded
+print("bare-runner load: three gates refuse by name, nothing outside the stdlib imported")
+"""
+
+
+def test_gates_load_by_path_in_a_process_without_yaml_or_pydantic():
+    import subprocess
+    import sys
+
+    run = subprocess.run(
+        [sys.executable, "-I", "-c", _BARE_RUNNER_PROBE, str(GATES_PATH)],
+        capture_output=True,
+        text=True,
+        cwd=str(GATES_PATH.parent.parent.parent.parent),  # a directory with no package
+    )
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert "nothing outside the stdlib imported" in run.stdout
+
+
+def test_gates_module_imports_only_the_standard_library():
+    import sys
+
+    tree = ast.parse(GATES_PATH.read_text(encoding="utf-8"))
+    imported = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported += [alias.name.split(".")[0] for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            assert node.level == 0, "a relative import needs the package, and so yaml"
+            imported.append((node.module or "").split(".")[0])
+    outside = sorted(set(imported) - set(sys.stdlib_module_names))
+    assert not outside, outside
+
+
+def test_gates_changelog_pattern_is_the_changelog_parsers():
+    """The module holds its own copy of the heading pattern (it cannot import
+    the package); this pins the copy to ChangelogParser's, section by section
+    over the real CHANGELOG and the faigrid headings."""
+    from ops_engine.utils.changelog_parser import ChangelogParser
+
+    assert release_gates._HEADER_RE.pattern == ChangelogParser.HEADER_PATTERN.pattern
+    assert release_gates._HEADER_RE.flags == ChangelogParser.HEADER_PATTERN.flags
+    for text in (FAIGRID_CHANGELOG, (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")):
+        for version in ChangelogParser.list_versions(text):
+            expected = ChangelogParser.extract_version_notes(text, version)
+            if expected:
+                assert extract_changelog_section(text, "v" + version) == expected

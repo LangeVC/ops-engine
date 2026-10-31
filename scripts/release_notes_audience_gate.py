@@ -27,9 +27,13 @@ correct default, not a hole. This repository's own release workflow supplies
 this organisation's tracker prefixes, so its own notes stay gated: the
 vocabulary arrives from the workflow (the config layer), never from the engine.
 
-The gate is stdlib-only and never imports ``ops_engine`` (REL-006): the bare
-release runner carries neither yaml nor pydantic, so nothing outside the
-standard library may execute here.
+The ticket check is not implemented here (OE-007): it is the engine's public
+``check_release_notes_audience``, loaded from ``src/ops_engine/modules/
+release_gates.py`` by its path. This script owns only the command line, the
+vocabulary files and the withheld-term check. It never imports the package
+(REL-006): the bare release runner carries neither yaml nor pydantic, and the
+package import pulls both in. The module it loads imports only the standard
+library.
 
 Usage::
 
@@ -56,11 +60,26 @@ would release without the vocabulary the organisation chose.
 """
 
 import argparse
+import importlib.util
 import re
 import sys
 from pathlib import Path
 
-INTERNAL_TICKET_RE = re.compile(r"[A-Z]{2,5}-[0-9]+")
+GATES_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "src" / "ops_engine" / "modules" / "release_gates.py"
+)
+
+
+def _load_gates():
+    spec = importlib.util.spec_from_file_location("release_gates", GATES_PATH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+gates = _load_gates()
+
 TICKET_PREFIX_RE = re.compile(r"[A-Z]{2,5}")
 
 
@@ -107,17 +126,12 @@ def _load_ticket_prefixes(path):
     return prefixes
 
 
-def _find_offences(notes, forbid_terms, ticket_prefixes):
+def _find_forbidden(notes, forbid_terms):
     offences = set()
     for lineno, line in enumerate(notes.splitlines(), start=1):
-        if ticket_prefixes:
-            for match in INTERNAL_TICKET_RE.finditer(line):
-                prefix = match.group(0).split("-", 1)[0]
-                if prefix in ticket_prefixes:
-                    offences.add((lineno, match.group(0), "internal"))
         for term in forbid_terms:
             if term in line:
-                offences.add((lineno, term, "forbidden"))
+                offences.add((lineno, term))
     return sorted(offences)
 
 
@@ -203,26 +217,21 @@ def main(argv=None):
             return 2
 
     notes = _read_notes(args.notes_file)
-    offences = _find_offences(notes, forbid_terms, frozenset(ticket_prefixes))
-    if offences:
-        for lineno, token, kind in offences:
-            if kind == "internal":
-                sys.stderr.write(
-                    "ReleaseNotesAudienceError: line %d: internal ticket "
-                    "reference %r in the release description. Its prefix is "
-                    "among the organisation's declared tracker prefixes, so the "
-                    "body names the author's tracker. The release body is read "
-                    "by external consumers and must not name the author's "
-                    "tracker; rewrite the entry for an external reader.\n"
-                    % (lineno, token)
-                )
-            else:
-                sys.stderr.write(
-                    "ForbiddenVocabularyError: line %d: forbidden organisation "
-                    "term %r in the release description; the organisation "
-                    "withholds this vocabulary from an external reader.\n"
-                    % (lineno, token)
-                )
+    refused = False
+    try:
+        gates.check_release_notes_audience(notes, ticket_prefixes)
+    except gates.ReleaseNotesAudienceError as exc:
+        sys.stderr.write(str(exc) + "\n")
+        refused = True
+    for lineno, token in _find_forbidden(notes, forbid_terms):
+        sys.stderr.write(
+            "ForbiddenVocabularyError: line %d: forbidden organisation "
+            "term %r in the release description; the organisation "
+            "withholds this vocabulary from an external reader.\n"
+            % (lineno, token)
+        )
+        refused = True
+    if refused:
         return 1
 
     sys.stdout.write(_green_line(ticket_prefixes, forbid_terms) + "\n")

@@ -6,15 +6,19 @@ no section. This test proves the write the workflow performs against the real
 CHANGELOG.md and the real workflow.
 
 The parser half of the semantics is exercised through `ChangelogParser`, the
-library implementation imported below. Since REL-006 the workflow itself no
-longer imports it: the notes step embeds a stdlib-only copy of the same slicing
-logic so the release runner needs neither `yaml` nor `pydantic`. The
-workflow-half tests therefore assert on the workflow's data flow (the notes
-step reads CHANGELOG.md and never `git log`), not on which function or module
-implements it — pinning an extractor name is what REL-007 removed.
+library implementation imported below. The workflow itself does not import it
+(REL-006: the release runner has neither `yaml` nor `pydantic`). Since OE-007
+the notes step carries no copy of the slicing logic either: it loads
+`src/ops_engine/modules/release_gates.py` by its path and calls
+`extract_changelog_section`. The workflow-half tests assert on the data flow
+(the notes step reads CHANGELOG.md and never `git log`) and run the step's
+embedded interpreter against the real CHANGELOG.md under `python -S`.
 """
 
 import re
+import subprocess
+import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -129,11 +133,56 @@ def test_missing_entry_is_empty_string():
     assert _notes_for("2.1.4") == ""
 
 
+NOTES_MARKER = "<<'PY'"
+
+
+def _notes_interpreter() -> str:
+    """The de-indented heredoc body the notes step runs (the ``PY`` block)."""
+    lines = _release_notes_step(WORKFLOW_CONTENT).splitlines()
+    start = next(i for i, line in enumerate(lines) if NOTES_MARKER in line)
+    end = next(i for i in range(start + 1, len(lines)) if lines[i].strip() == "PY")
+    return textwrap.dedent("\n".join(lines[start + 1 : end]) + "\n")
+
+
+def _run_notes_step(tag: str):
+    """Run the step's interpreter from the repository root, as the runner's
+    checkout, with no site-packages (no yaml, no pydantic)."""
+    return subprocess.run(
+        [sys.executable, "-S", "-c", _notes_interpreter(), tag],
+        capture_output=True,
+        text=True,
+        cwd=str(REPO_ROOT),
+    )
+
+
+def test_notes_step_calls_the_engine_gate_and_carries_no_copy():
+    source = _notes_interpreter()
+    assert "src/ops_engine/modules/release_gates.py" in source
+    assert "extract_changelog_section" in source
+    assert "HEADER_PATTERN" not in source
+    assert "re.compile" not in source
+    assert "changelog_parser" not in WORKFLOW_CONTENT
+
+
+def test_notes_step_posts_the_real_changelog_section():
+    run = _run_notes_step("v3.1.0")
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert run.stdout == _notes_for("3.1.0")
+
+
+def test_notes_step_refuses_a_tag_without_a_section_by_name():
+    for tag in ("v2.1.3", "v9.9.9"):
+        run = _run_notes_step(tag)
+        assert run.returncode == 2, run.stdout + run.stderr
+        assert "MissingChangelogEntryError" in run.stderr
+        assert run.stdout == ""
+
+
 def test_workflow_fails_with_named_error_on_missing_entry():
     """The workflow names the error and exits non-zero before creating a release."""
     assert "MissingChangelogEntryError" in WORKFLOW_CONTENT
     # The named error is written to stderr (sys.stderr) and the step exits 2,
-    # so the release step never runs.
+    # so the release step never runs (the real run is above).
     assert "sys.stderr" in WORKFLOW_CONTENT
     assert "sys.exit(2)" in WORKFLOW_CONTENT
 
