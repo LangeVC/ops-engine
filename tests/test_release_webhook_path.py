@@ -76,6 +76,7 @@ def _setup(tmp_path, monkeypatch, *, changelog=CHANGELOG, ops_yaml=OPS_YAML, **c
     source.create_release = AsyncMock(side_effect=AssertionError("event forge must not be used"))
 
     target = AsyncMock()
+    target.release_exists = AsyncMock(return_value=False)
 
     async def create_release(**kwargs):
         rec.calls.append("publish")
@@ -181,3 +182,37 @@ async def test_tag_push_without_context_creates_nothing():
     with pytest.raises(MissingReleaseContextError):
         await ReleaseHandler.process_event(source, _event(), CONFIG)
     source.create_release.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_redelivery_is_a_noop_for_a_destination_that_already_has_the_release(
+    tmp_path, monkeypatch
+):
+    """A redelivered tag push must not fail or publish twice on a destination
+    whose release exists: no create, no upload, recorded as skipped."""
+    rec, source, target, identity, context, _ = _setup(tmp_path, monkeypatch)
+    target.release_exists = AsyncMock(return_value=True)
+    reports = []
+    real = ReleaseHandler.publish_release
+
+    async def spy(*args, **kwargs):
+        report = await real(*args, **kwargs)
+        reports.append(report)
+        return report
+
+    monkeypatch.setattr(ReleaseHandler, "publish_release", staticmethod(spy))
+    await ReleaseHandler.process_event(source, _event(), CONFIG, context)
+
+    target.release_exists.assert_awaited_once_with(REPO, TAG)
+    target.create_release.assert_not_called()
+    target.upload_release_asset.assert_not_called()
+    assert reports[0].failed == []
+    assert reports[0].skipped == ["forgejo:" + REPO]
+
+
+@pytest.mark.asyncio
+async def test_missing_release_is_still_published(tmp_path, monkeypatch):
+    rec, source, target, identity, context, _ = _setup(tmp_path, monkeypatch)
+    target.release_exists = AsyncMock(return_value=False)
+    await ReleaseHandler.process_event(source, _event(), CONFIG, context)
+    target.create_release.assert_awaited_once()

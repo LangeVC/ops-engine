@@ -90,6 +90,7 @@ class PublicationReport:
     tag_name: str = ""
     published: list[str] = field(default_factory=list)
     failed: list[str] = field(default_factory=list)
+    skipped: list[str] = field(default_factory=list)
 
     @property
     def partial(self) -> bool:
@@ -249,6 +250,7 @@ class ReleaseHandler:
         adapters: list[ForgeAdapter] | None = None,
         repo_dir: str | Path | None = None,
         roles: Iterable[str] | None = None,
+        skip_existing: bool = False,
     ) -> "PublicationReport":
         """Publish a built release to every destination resolved from config.
 
@@ -276,6 +278,14 @@ class ReleaseHandler:
         over the Layer-2 config (the webhook path writes the file it read at
         the tag there). ``roles`` keeps only destinations whose role is listed;
         ``None`` keeps all.
+
+        ``skip_existing`` makes publication idempotent per destination: when the
+        destination already holds a release for ``tag_name`` it is recorded in
+        ``skipped`` and nothing is created or uploaded there, so a redelivered
+        event is a no-op for it. The check runs on the destination's own
+        adapter (each destination answers for itself). It is opt-in so callers
+        that publish to a known-empty destination keep their exact call
+        sequence.
 
         Raises:
             ValueError: a supplied ``adapters`` list does not match the resolved
@@ -305,6 +315,12 @@ class ReleaseHandler:
         for destination, adapter in zip(destinations, adapters):
             label = _destination_label(destination)
             try:
+                if skip_existing and await adapter.release_exists(
+                    destination.repo, tag_name
+                ):
+                    logger.info(f"Release {tag_name} already exists on {label}, skipping")
+                    report.skipped.append(label)
+                    continue
                 await _publish_to_destination(
                     adapter,
                     destination,
@@ -476,6 +492,7 @@ async def _release_tag(
             adapters=context.adapters,
             repo_dir=layer3_dir,
             roles=("release",),
+            skip_existing=True,
         )
     if report.partial:
         logger.error(f"release {tag_name} partially published: {report.to_dict()}")

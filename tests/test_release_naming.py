@@ -87,28 +87,81 @@ class TestRenderReleaseName:
         assert name == "widget v2.0.0 {missing}"
 
 
+CHANGELOG_V1 = "## v1.0.0\n\n- Something\n\n## v1.8.0\n\n- Something\n"
+OPS_YAML_RELEASE = "destinations:\n  - {forge: forgejo, repo: testorg/test-repo, role: release}\n"
+
+
+def _release_context(tmp_path, monkeypatch, name_template=None):
+    """Drive the tag-push path with stubs; return (source, target, context).
+
+    ``target`` is the release-role destination's adapter: the release name is
+    asserted on it, because the webhook path publishes there, never on the
+    adapter that delivered the event.
+    """
+    from ops_engine.config_loader import OpsEngineConfig
+    from ops_engine.modules import release as release_module
+    from ops_engine.modules.release import ReleaseContext, TagIdentitySpec
+
+    monkeypatch.setattr(release_module, "push_canonical_tag", AsyncMock())
+    (tmp_path / "dist").mkdir(exist_ok=True)
+
+    async def get_file_content(repo, path, ref="main"):
+        return {"CHANGELOG.md": CHANGELOG_V1, ".ops.yaml": OPS_YAML_RELEASE}[path]
+
+    source = AsyncMock()
+    source.get_file_content = get_file_content
+    target = AsyncMock()
+    target.release_exists = AsyncMock(return_value=False)
+    target.create_release = AsyncMock(return_value={"id": 1})
+    ops_config = OpsEngineConfig.load(
+        {"orgs": {"testorg": {"repositories": {"test-repo": {}, "faigrid": {}}}}}
+    )
+    context = ReleaseContext(
+        ops_config=ops_config,
+        artifact_dir=tmp_path / "dist",
+        identity=TagIdentitySpec(
+            repo_dir=str(tmp_path),
+            canonical_url="https://forge.example/o/r.git",
+            canonical_token="tok",
+            mirror_remote="https://mirror.example/o/r.git",
+        ),
+        adapters=[target],
+        name_template=name_template,
+    )
+    return source, target, context
+
+
 class TestReleaseNameTemplate:
-    """Criterion 1: the name comes from a configured name_template."""
+    """Criterion 1: the name comes from a configured name_template.
+
+    Through the webhook path the name is rendered for the release-role
+    destination, and the title gate runs on the same template first.
+    """
 
     @pytest.mark.asyncio
-    async def test_name_from_configured_template(self, mock_adapter, sample_push_event):
+    async def test_name_from_configured_template(self, tmp_path, monkeypatch, sample_push_event):
         config = _ReleaseConfig(name_template="{repo_name} {tag_name} ({tag})")
-        await ReleaseHandler.process_event(mock_adapter, sample_push_event, config)
-        kwargs = mock_adapter.create_release.call_args.kwargs
+        source, target, ctx = _release_context(tmp_path, monkeypatch)
+        await ReleaseHandler.process_event(source, sample_push_event, config, ctx)
+        kwargs = target.create_release.call_args.kwargs
         assert kwargs["name"] == "test-repo v1.0.0 ({tag})"
 
     @pytest.mark.asyncio
-    async def test_default_template_is_generic(self, mock_adapter, sample_push_event):
+    async def test_default_template_is_generic(self, tmp_path, monkeypatch, sample_push_event):
         config = _ReleaseConfig()
-        await ReleaseHandler.process_event(mock_adapter, sample_push_event, config)
-        kwargs = mock_adapter.create_release.call_args.kwargs
+        source, target, ctx = _release_context(tmp_path, monkeypatch)
+        await ReleaseHandler.process_event(source, sample_push_event, config, ctx)
+        kwargs = target.create_release.call_args.kwargs
         assert kwargs["name"] == "test-repo v1.0.0"
 
     @pytest.mark.asyncio
-    async def test_empty_template_falls_back_to_generic(self, mock_adapter, sample_push_event):
+    async def test_empty_template_falls_back_to_generic(
+        self, tmp_path, monkeypatch, sample_push_event
+    ):
         config = _ReleaseConfig(name_template="")
-        await ReleaseHandler.process_event(mock_adapter, sample_push_event, config)
-        kwargs = mock_adapter.create_release.call_args.kwargs
+        source, target, ctx = _release_context(tmp_path, monkeypatch)
+        await ReleaseHandler.process_event(source, sample_push_event, config, ctx)
+        kwargs = target.create_release.call_args.kwargs
         assert kwargs["name"] == "test-repo v1.0.0"
 
 
@@ -141,7 +194,7 @@ class TestIdenticalNameAcrossForges:
         assert forgejo == github == "fusionAIze Grid v1.8.0"
 
     @pytest.mark.asyncio
-    async def test_one_convention_renders_one_name_end_to_end(self, mock_adapter):
+    async def test_one_convention_renders_one_name_end_to_end(self, tmp_path, monkeypatch):
         template = "fusionAIze Grid {tag_name}"
         forgejo_event = {
             "event_type": "push",
@@ -156,10 +209,17 @@ class TestIdenticalNameAcrossForges:
         config = _ReleaseConfig(name_template=template)
         names = []
         for event in (forgejo_event, github_event):
-            mock_adapter.create_release.reset_mock()
-            await ReleaseHandler.process_event(mock_adapter, event, config)
-            names.append(mock_adapter.create_release.call_args.kwargs["name"])
+            source, target, ctx = _release_context(tmp_path, monkeypatch)
+            ctx.ops_config = _faigrid_config()
+            await ReleaseHandler.process_event(source, event, config, ctx)
+            names.append(target.create_release.call_args.kwargs["name"])
         assert names[0] == names[1] == "fusionAIze Grid v1.8.0"
+
+
+def _faigrid_config():
+    from ops_engine.config_loader import OpsEngineConfig
+
+    return OpsEngineConfig.load({"orgs": {"langevc": {"repositories": {"faigrid": {}}}}})
 
 
 # --- REL-004: the mirror creates the GitHub release and uploads the same files --
