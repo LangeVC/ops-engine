@@ -240,6 +240,14 @@ class ReleaseConfig(BaseModel):
     changelog_path: str = Field(default="CHANGELOG.md")
     draft: bool = Field(default=False)
     create_tag_on_merge: bool = Field(default=False)
+    # Optional directory of built artifacts, RELATIVE to the artifact root the
+    # layover declares (``ReleaseContext.artifact_dir``). When the directory
+    # exists its files are attached to the release through ``publish_release``;
+    # when it is empty or absent nothing is attached, and that is allowed (the
+    # webhook has no built artifacts of its own). An absolute path or one that
+    # leaves the artifact root is refused. Read from the layover's own config,
+    # never from a repository's ``.ops.yaml`` (D18).
+    artifact_dir: Optional[str] = Field(default=None)
 
 
 class MergeConfig(BaseModel):

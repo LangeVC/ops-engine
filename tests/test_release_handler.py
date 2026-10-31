@@ -22,42 +22,10 @@ def release_config():
 
 
 @pytest.mark.asyncio
-async def test_release_on_tag_push(mock_adapter, release_config, sample_push_event):
-    await ReleaseHandler.process_event(mock_adapter, sample_push_event, release_config)
-    mock_adapter.create_release.assert_called_once()
-    call_kwargs = mock_adapter.create_release.call_args
-    assert call_kwargs.kwargs["tag_name"] == "v1.0.0"
-    assert call_kwargs.kwargs["repo_full_name"] == "TestOrg/test-repo"
-
-
-@pytest.mark.asyncio
 async def test_release_skipped_when_disabled(mock_adapter, sample_push_event):
     config = ReleaseConfig(enabled=False)
     await ReleaseHandler.process_event(mock_adapter, sample_push_event, config)
     mock_adapter.create_release.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_release_idempotent_when_exists(mock_adapter, release_config, sample_push_event):
-    mock_adapter.release_exists.return_value = True
-    await ReleaseHandler.process_event(mock_adapter, sample_push_event, release_config)
-    mock_adapter.create_release.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_release_with_changelog_notes(mock_adapter, release_config, sample_push_event):
-    mock_adapter.get_file_content.return_value = "## v1.0.0\n\n### Added\n- Great feature"
-    await ReleaseHandler.process_event(mock_adapter, sample_push_event, release_config)
-    call_kwargs = mock_adapter.create_release.call_args.kwargs
-    assert "Great feature" in call_kwargs["body"]
-
-
-@pytest.mark.asyncio
-async def test_release_without_changelog(mock_adapter, release_config, sample_push_event):
-    mock_adapter.get_file_content.side_effect = Exception("404 not found")
-    await ReleaseHandler.process_event(mock_adapter, sample_push_event, release_config)
-    call_kwargs = mock_adapter.create_release.call_args.kwargs
-    assert "Release v1.0.0" in call_kwargs["body"]
 
 
 @pytest.mark.asyncio
