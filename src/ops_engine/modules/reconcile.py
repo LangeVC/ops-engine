@@ -275,6 +275,8 @@ class ReconcileHandler:
         audit: Optional[list[str]] = None,
         workdir: Optional[str] = None,
         measure_destinations: Optional[Sequence[Destination]] = None,
+        candidate_globs: Optional[Sequence[str]] = None,
+        default_branch: str = "main",
     ) -> DriftReport:
         """One reconcile cycle: measure drift, state-sync when behind, re-measure.
 
@@ -312,7 +314,13 @@ class ReconcileHandler:
         logger.info(f"Mirror of {primary_repo} is behind ({len(report.missing)} missing, "
                     f"{len(report.differing)} differing); state-syncing")
         await MirrorHandler.sync_state(
-            canonical_url, destinations, runner=runner, audit=audit, workdir=workdir
+            canonical_url,
+            destinations,
+            runner=runner,
+            audit=audit,
+            workdir=workdir,
+            candidate_globs=candidate_globs,
+            default_branch=default_branch,
         )
         return await ReconcileHandler.measure_drift(
             primary, primary_repo, mirror, mirror_repo

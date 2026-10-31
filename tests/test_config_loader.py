@@ -83,7 +83,7 @@ def test_mirror_destination_fields_are_received():
                         "ops-engine": {
                             "mirror": {
                                 "enabled": True,
-                                "github": "LangeVC/ops-engine", "visibility": "private",
+                                "github": "LangeVC/ops-engine",
                                 "visibility": "public",
                                 "verify_on_push": True,
                             }
@@ -92,7 +92,7 @@ def test_mirror_destination_fields_are_received():
                             "github_name": "txtHumanizer",
                             "mirror": {
                                 "enabled": True,
-                                "github": "LangeVC/txtHumanizer", "visibility": "private",
+                                "github": "LangeVC/txtHumanizer",
                                 "visibility": "public",
                             },
                         },

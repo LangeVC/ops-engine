@@ -317,3 +317,61 @@ def test_config_load_refuses_the_deprecated_mirror_alias_without_visibility(alia
         OpsEngineConfig.load({"orgs": {"o": {"repositories": {"r": {"mirror": alias}}}}})
     ok = RepoConfig(mirror=MirrorConfig(visibility="private", **alias))
     assert ok.mirror.visibility == "private"
+
+
+# --- reconcile_mirror passes the repository's gate configuration on --------------
+
+def _gated_world(tmp_path, monkeypatch, default):
+    ident = ["-c", "user.name=t", "-c", "user.email=t@example.com"]
+    work = tmp_path / "work"
+    work.mkdir()
+    _git(work, "init", "-q", "-b", default)
+    (work / "a.txt").write_text("a\n")
+    _git(work, "add", ".")
+    _git(work, *ident, "commit", "-q", "-m", "base")
+    _git(work, "checkout", "-q", "-b", "feat")
+    (work / "secret").mkdir()
+    (work / "secret" / "key.txt").write_text("k\n")
+    _git(work, "add", ".")
+    _git(work, *ident, "commit", "-q", "-m", "feat")
+    canon, pub, priv = tmp_path / "canon.git", tmp_path / "pub.git", tmp_path / "priv.git"
+    for bare in (canon, pub, priv):
+        _git(tmp_path, "init", "-q", "--bare", str(bare))
+    _git(work, "push", "-q", str(canon), default, "feat")
+    rewrites = {
+        "https://github.com/LangeVC/pub.git": f"file://{pub}",
+        "https://gitlab.com/langevc/priv.git": f"file://{priv}",
+    }
+    monkeypatch.setenv("GIT_CONFIG_COUNT", str(len(rewrites)))
+    for i, (url, local) in enumerate(rewrites.items()):
+        monkeypatch.setenv(f"GIT_CONFIG_KEY_{i}", f"url.{local}.insteadOf")
+        monkeypatch.setenv(f"GIT_CONFIG_VALUE_{i}", url)
+    return canon, pub, priv
+
+
+def _reconcile(canon, **kw):
+    return asyncio.run(
+        ReconcileHandler.reconcile_mirror(
+            _Forge({"main": "a" * 40}), "o/r", _Forge({"main": "0" * 40}),
+            "LangeVC/pub", f"file://{canon}", _dests(), **kw
+        )
+    )
+
+
+def test_reconcile_mirror_applies_the_configured_candidate_globs(tmp_path, monkeypatch):
+    canon, pub, priv = _gated_world(tmp_path, monkeypatch, "main")
+    audit = []
+    _reconcile(canon, audit=audit, candidate_globs=["secret/*"])
+    assert not _has_ref(pub, "refs/heads/feat")  # RED: the default globs let it through
+    assert _has_ref(pub, "refs/heads/main")
+    assert _has_ref(priv, "refs/heads/feat")
+    assert any(l.startswith("mirror-refused") and "secret/key.txt" in l for l in audit)
+
+
+def test_reconcile_mirror_honours_a_non_main_default_branch(tmp_path, monkeypatch):
+    canon, pub, priv = _gated_world(tmp_path, monkeypatch, "trunk")
+    audit = []
+    _reconcile(canon, audit=audit, default_branch="trunk", candidate_globs=["nothing/*"])
+    # RED: with default "main" every ref is refused as 'fork point unresolved'.
+    assert _has_ref(pub, "refs/heads/trunk") and _has_ref(pub, "refs/heads/feat")
+    assert not any(l.startswith("mirror-refused") for l in audit)

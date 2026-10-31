@@ -281,7 +281,7 @@ def _five_layover_configs():
                         "ops-engine": {
                             "mirror": {
                                 "enabled": True,
-                                "github": "LangeVC/ops-engine", "visibility": "private",
+                                "github": "LangeVC/ops-engine",
                                 "visibility": "public",
                                 "verify_on_push": True,
                             }
