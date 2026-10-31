@@ -107,6 +107,13 @@ class PublicationReport:
         }
 
 
+class ArtifactDirError(ValueError):
+    """``release.artifact_dir`` is absolute or leaves the artifact root.
+
+    Raised before any write, so nothing is attached and no tag is pushed.
+    """
+
+
 class MissingReleaseContextError(RuntimeError):
     """A tag push reached the release path with no way to publish it.
 
@@ -162,6 +169,31 @@ class ReleaseContext:
     ticket_prefixes: Iterable[str] = ()
     prerelease: bool = False
     adapters: Optional[list[ForgeAdapter]] = None
+
+
+def _resolve_artifact_dir(root: str | Path, configured: Optional[str]) -> Path:
+    """Resolve ``release.artifact_dir`` under the artifact ``root``, or refuse.
+
+    ``configured`` comes from the layover's own :class:`ReleaseConfig`; ``None``
+    means the root itself. The result must stay inside ``root`` once symlinks
+    and ``..`` are resolved. A directory that does not exist is fine: it
+    attaches nothing.
+    """
+    if not configured:
+        return Path(root)
+    if Path(configured).is_absolute() or ".." in Path(configured).parts:
+        raise ArtifactDirError(
+            f"ArtifactDirError: release.artifact_dir {configured!r} must be a "
+            "relative path inside the artifact root; nothing attached."
+        )
+    resolved_root = Path(root).resolve()
+    candidate = (resolved_root / configured).resolve()
+    if candidate != resolved_root and resolved_root not in candidate.parents:
+        raise ArtifactDirError(
+            f"ArtifactDirError: release.artifact_dir {configured!r} resolves "
+            "outside the artifact root; nothing attached."
+        )
+    return candidate
 
 
 def _destination_label(destination: Destination) -> str:
@@ -390,6 +422,8 @@ def _collect_artifacts(artifact_dir: str | Path) -> list[tuple[str, bytes]]:
     """
     root = Path(artifact_dir)
     artifacts: list[tuple[str, bytes]] = []
+    if not root.is_dir():
+        return artifacts
     for path in sorted(root.iterdir()):
         if path.is_file():
             artifacts.append((path.name, path.read_bytes()))
@@ -425,6 +459,12 @@ async def _release_tag(
     publication the second, so any refusal in the gates or in the destination
     resolution happens before a tag is pushed or a release object exists.
     """
+    # Artifact directory from the layover's own config (D18); refused before
+    # any read or write if it leaves the artifact root.
+    artifact_dir = _resolve_artifact_dir(
+        context.artifact_dir, getattr(config, "artifact_dir", None)
+    )
+
     # Gates (OE-007) on the CHANGELOG and the tag.
     name_template = (
         context.name_template
@@ -482,7 +522,7 @@ async def _release_tag(
             repo,
             tag_name,
             notes,
-            context.artifact_dir,
+            artifact_dir,
             token=context.token,
             webhook_secret=context.webhook_secret,
             base_url=context.base_url,

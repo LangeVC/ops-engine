@@ -216,3 +216,75 @@ async def test_missing_release_is_still_published(tmp_path, monkeypatch):
     target.release_exists = AsyncMock(return_value=False)
     await ReleaseHandler.process_event(source, _event(), CONFIG, context)
     target.create_release.assert_awaited_once()
+
+
+# --- OE-009 criterion 4: release.artifact_dir (D18) ---------------------------
+
+
+def _config(**kw) -> ReleaseConfig:
+    return ReleaseConfig(enabled=True, trigger="tag_push", tag_pattern="v*", **kw)
+
+
+@pytest.mark.asyncio
+async def test_artifact_dir_relative_directory_is_attached(tmp_path, monkeypatch):
+    rec, source, target, identity, context, _ = _setup(tmp_path, monkeypatch)
+    (tmp_path / "dist" / "sub").mkdir()
+    (tmp_path / "dist" / "sub" / "only.txt").write_bytes(b"x")
+    await ReleaseHandler.process_event(source, _event(), _config(artifact_dir="sub"), context)
+    assert target.upload_release_asset.await_count == 1
+    assert "only.txt" in str(target.upload_release_asset.await_args)
+    assert "pkg.whl" not in str(target.upload_release_asset.await_args)
+
+
+@pytest.mark.parametrize("configured", ["missing-dir", "empty"])
+@pytest.mark.asyncio
+async def test_artifact_dir_absent_or_empty_attaches_nothing(tmp_path, monkeypatch, configured):
+    rec, source, target, identity, context, _ = _setup(tmp_path, monkeypatch)
+    (tmp_path / "dist" / "empty").mkdir()
+    await ReleaseHandler.process_event(source, _event(), _config(artifact_dir=configured), context)
+    target.create_release.assert_awaited_once()
+    target.upload_release_asset.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_artifact_dir_unset_keeps_the_root(tmp_path, monkeypatch):
+    rec, source, target, identity, context, _ = _setup(tmp_path, monkeypatch)
+    await ReleaseHandler.process_event(source, _event(), _config(), context)
+    target.upload_release_asset.assert_awaited_once()
+
+
+@pytest.mark.parametrize("which", ["dotdot", "absolute", "symlink"])
+@pytest.mark.asyncio
+async def test_artifact_dir_outside_root_is_refused_and_attaches_nothing(
+    tmp_path, monkeypatch, which
+):
+    rec, source, target, identity, context, _ = _setup(tmp_path, monkeypatch)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_bytes(b"s")
+    configured = {
+        "dotdot": "../outside",
+        "absolute": str(outside),
+        "symlink": "link",
+    }[which]
+    if which == "symlink":
+        (tmp_path / "dist" / "link").symlink_to(outside)
+    with pytest.raises(release_module.ArtifactDirError):
+        await ReleaseHandler.process_event(
+            source, _event(), _config(artifact_dir=configured), context
+        )
+    assert rec.calls == []
+    identity.assert_not_awaited()
+    target.create_release.assert_not_called()
+    target.upload_release_asset.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_repo_ops_yaml_cannot_set_artifact_dir(tmp_path, monkeypatch):
+    ops_yaml = OPS_YAML + "release:\n  artifact_dir: ../outside\n"
+    rec, source, target, identity, context, _ = _setup(
+        tmp_path, monkeypatch, ops_yaml=ops_yaml
+    )
+    await ReleaseHandler.process_event(source, _event(), _config(), context)
+    # The value at the tag is ignored: the root's files are attached as usual.
+    target.upload_release_asset.assert_awaited_once()
