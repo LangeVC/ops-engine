@@ -97,7 +97,10 @@ of scope for this revision.
     {"name": "check_release_notes_audience",  "kind": "function", "contract": true},
     {"name": "ReleaseTitleError",             "kind": "class",    "contract": true},
     {"name": "MissingChangelogEntryError",    "kind": "class",    "contract": true},
-    {"name": "ReleaseNotesAudienceError",     "kind": "class",    "contract": true}
+    {"name": "ReleaseNotesAudienceError",     "kind": "class",    "contract": true},
+    {"name": "push_canonical_tag",             "kind": "function", "contract": true},
+    {"name": "MirrorTagIdentity",             "kind": "class",    "contract": true},
+    {"name": "MirrorTagIdentityError",        "kind": "class",    "contract": true}
   ],
   "methods": [
     {
@@ -196,6 +199,33 @@ each token and its line, when `notes` holds `PREFIX-<digits>` for a declared
 prefix. A prefix that is not an uppercase 2-5 letter token is refused the same
 way, never skipped. With no prefixes it refuses nothing: the engine carries no
 organisation vocabulary.
+
+## Mirror tag identity
+
+`push_canonical_tag`, `MirrorTagIdentity` and `MirrorTagIdentityError` (all
+`contract` names above) are the function, result and error of
+`ops_engine.modules.tag_identity`, exported under names that differ from their
+module's name.
+
+```python
+async push_canonical_tag(repo_dir, tag_name, canonical_url, canonical_token, mirror_remote, runner=None) -> MirrorTagIdentity
+```
+
+It reads the canonical tag's object and peel from `canonical_url` with
+`canonical_token` (`git ls-remote`, never the local clone), restores the local
+ref `refs/tags/<tag_name>` in `repo_dir` to that object, pushes the object
+(`<sha>:refs/tags/<tag_name>`) to `mirror_remote`, and reads the mirror back,
+comparing object and peel. An annotated canonical tag arrives as the same
+annotated object on the mirror, never as a lightweight tag; a lightweight
+canonical tag stays lightweight. `mirror_remote` is used as given, so a
+credential for the mirror travels inside it. `runner` is
+`await runner(argv, cwd) -> (exit_code, output)` and defaults to real git.
+
+`MirrorTagIdentity` carries `tag_name`, `object`, `peel` and `annotated`. Every
+refusal raises a subclass of `MirrorTagIdentityError` (a `RuntimeError`) whose
+message names the refusal and the credential-free URL; a credential is never
+formatted into a message. Nothing is pushed before the canonical identity is
+established. The module imports only the standard library.
 
 ## Unpromised names
 
