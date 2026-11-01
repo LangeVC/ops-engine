@@ -543,7 +543,6 @@ class MirrorHandler:
         audit: Optional[list[str]] = None,
         workdir: Optional[str] = None,
         candidate_globs: Optional[Sequence[str]] = None,
-        protect_ahead: bool = False,
     ) -> list[str]:
         """Push every canonical head and tag to every mirror destination (OE-023).
 
@@ -571,13 +570,12 @@ class MirrorHandler:
         history refuses (fail closed). Destinations that are not ``"public"``
         still receive every ref.
 
-        Ahead protection (OE-036, D15; ``protect_ahead=True``, which
-        :meth:`ReconcileHandler.reconcile_mirror` always sets). A mirror head
+        Ahead protection (OE-036, D15; always on, for a direct call as well as
+        via :meth:`ReconcileHandler.reconcile_mirror`). A mirror head
         that strictly contains the canonical tip is kept, audited as
         ``mirror-ahead-kept``, and not overwritten unless the destination sets
         ``overwrite_ahead``. An unreadable mirror fails closed with
-        ``mirror-state-failed``. It is off for a direct call so that the exact
-        OE-023 git sequence of the plain state sync is unchanged.
+        ``mirror-state-failed``.
         """
         lines: list[str] = []
         run = runner or _run_git
@@ -640,7 +638,7 @@ class MirrorHandler:
                         refspecs = [f"+{r}:{r}" for r in gated if r not in refused]
                         if not refspecs:
                             continue
-                if protect_ahead and not dest.overwrite_ahead:
+                if not dest.overwrite_ahead:
                     ahead = await MirrorHandler._ahead_heads(run, clone, remote)
                     if ahead is None:
                         record(

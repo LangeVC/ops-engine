@@ -197,3 +197,27 @@ def test_failed_canonical_clone_makes_the_result_red():
     assert runner.pushes() == []
     assert any("canonical-clone-failed" in l for l in audit)
     assert rep.failed and not rep.green
+
+
+def _direct_sync(runner, dest):
+    audit = []
+    asyncio.run(MirrorHandler.sync_state(CANON, [dest], runner=runner, audit=audit))
+    return audit
+
+
+def test_direct_sync_state_keeps_an_ahead_mirror_by_default():
+    mirror = _Forge({"main": MSHA})
+    runner = _SyncRunner(mirror, ahead=True)
+    audit = _direct_sync(runner, _dest())
+    assert mirror.branches["main"] == MSHA
+    assert all("+refs/heads/main:refs/heads/main" not in a and "+refs/heads/*:refs/heads/*" not in a
+               for a in runner.pushes())
+    assert any(l.startswith("mirror-ahead-kept ref=refs/heads/main") for l in audit)
+
+
+def test_direct_sync_state_overwrites_an_ahead_mirror_with_the_option():
+    mirror = _Forge({"main": MSHA})
+    runner = _SyncRunner(mirror, ahead=True)
+    dest = _dest().model_copy(update={"overwrite_ahead": True})
+    _direct_sync(runner, dest)
+    assert mirror.branches["main"] == CSHA

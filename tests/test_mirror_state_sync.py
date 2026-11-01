@@ -73,10 +73,13 @@ def _sweep(runner, audit=None, **kw):
 def test_sync_clones_fresh_then_pushes_all_heads_and_tags_to_each_mirror():
     runner, audit = Runner(), []
     lines = _sync(runner, audit)
-    assert runner.verbs() == ["clone", "push", "push"]  # release destination skipped
+    # release destination skipped; each mirror is probed read-only (OE-036) before its push
+    assert runner.verbs() == [
+        "clone", "ls-remote", "for-each-ref", "push", "ls-remote", "for-each-ref", "push",
+    ]
     clone_argv, _ = runner.calls[0]
     assert clone_argv[:3] == ["git", "clone", "--bare"] and clone_argv[3] == CANON
-    pushes = [argv for argv, _ in runner.calls[1:]]
+    pushes = [argv for argv, _ in runner.calls if argv[1] == "push"]
     assert pushes[0][:3] == ["git", "push", "https://github.com/LangeVC/ops-engine.git"]
     assert pushes[1][2] == "https://gitlab.com/langevc/ops-engine.git"
     for argv in pushes:
@@ -85,6 +88,7 @@ def test_sync_clones_fresh_then_pushes_all_heads_and_tags_to_each_mirror():
         assert not any(a.startswith(":") for a in argv)
     # the pushes run inside the fresh clone, not in some other working copy
     assert all(cwd == clone_argv[4] for _, cwd in runner.calls[1:])
+    assert not any(a[1] in ("fetch", "merge-base") for a, _ in runner.calls)
     assert len(lines) == 2 and audit == lines
     assert all("exit=0" in l for l in lines)
 
@@ -107,14 +111,18 @@ def test_failed_push_is_audited_and_does_not_stop_the_other_destination():
 
     runner = Failing()
     lines = _sync(runner)
-    assert runner.verbs() == ["clone", "push", "push"]
+    assert runner.verbs() == [
+        "clone", "ls-remote", "for-each-ref", "push", "ls-remote", "for-each-ref", "push",
+    ]
     assert "exit=1" in lines[0] and "exit=0" in lines[1]
 
 
 def test_sync_never_deletes():
     runner = Runner(canonical_refs=[], mirror_refs={})
     _sync(runner)
-    assert "ls-remote" not in runner.verbs() and "for-each-ref" not in runner.verbs()
+    # the ahead probe (OE-036) reads the mirror, but nothing is ever deleted
+    pushes = [argv for argv, _ in runner.calls if argv[1] == "push"]
+    assert pushes and not any(a.startswith(":") or a == "--delete" for p in pushes for a in p[3:])
 
 
 # -- criterion 2 -------------------------------------------------------------

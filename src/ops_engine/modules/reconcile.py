@@ -331,7 +331,6 @@ class ReconcileHandler:
             audit=audit,
             workdir=workdir,
             candidate_globs=candidate_globs,
-            protect_ahead=True,
         )
         final = await ReconcileHandler.measure_drift(
             primary, primary_repo, mirror, mirror_repo
