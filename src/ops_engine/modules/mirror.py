@@ -569,6 +569,13 @@ class MirrorHandler:
         are pushed to that destination as explicit refspecs. An unreadable
         history refuses (fail closed). Destinations that are not ``"public"``
         still receive every ref.
+
+        Ahead protection (OE-036, D15; always on, for a direct call as well as
+        via :meth:`ReconcileHandler.reconcile_mirror`). A mirror head
+        that strictly contains the canonical tip is kept, audited as
+        ``mirror-ahead-kept``, and not overwritten unless the destination sets
+        ``overwrite_ahead``. An unreadable mirror fails closed with
+        ``mirror-state-failed``.
         """
         lines: list[str] = []
         run = runner or _run_git
@@ -631,9 +638,96 @@ class MirrorHandler:
                         refspecs = [f"+{r}:{r}" for r in gated if r not in refused]
                         if not refspecs:
                             continue
+                if not dest.overwrite_ahead:
+                    ahead = await MirrorHandler._ahead_heads(run, clone, remote)
+                    if ahead is None:
+                        record(
+                            f"mirror-state-failed reason=ahead-probe-failed "
+                            f"dest={dest.forge}:{dest.repo} nothing-written"
+                        )
+                        continue
+                    if ahead:
+                        for ref, (msha, csha) in sorted(ahead.items()):
+                            record(
+                                f"mirror-ahead-kept ref={ref} "
+                                f"dest={dest.forge}:{dest.repo} "
+                                f"mirror={msha} canonical={csha}"
+                            )
+                        if refspecs[0] == "+refs/heads/*:refs/heads/*":
+                            _c, heads_out = await run(
+                                ["git", "for-each-ref", "--format=%(refname)", "refs/heads"],
+                                clone,
+                            )
+                            heads = [h.strip() for h in heads_out.splitlines() if h.strip()]
+                            refspecs = [f"+{h}:{h}" for h in heads if h not in ahead] + [
+                                "+refs/tags/*:refs/tags/*"
+                            ]
+                        else:
+                            refspecs = [
+                                r for r in refspecs
+                                if r[1:].split(":", 1)[0] not in ahead
+                            ]
+                        if not refspecs:
+                            continue
                 pcode, _perr = await run(["git", "push", remote, *refspecs], clone)
                 record(f"mirror-state-push dest={dest.forge}:{dest.repo} exit={pcode}")
         return lines
+
+    @staticmethod
+    async def _ahead_heads(
+        run: Callable[[list[str], str], Awaitable[tuple[int, str]]],
+        clone: str,
+        remote: str,
+    ) -> Optional[dict[str, tuple[str, str]]]:
+        """Heads on the mirror that strictly contain the canonical tip (OE-036, D15).
+
+        Returns ``{ref: (mirror_sha, canonical_sha)}`` for each head present on
+        both sides whose mirror commit differs from canonical and has the
+        canonical commit as an ancestor. Returns ``None`` when the mirror cannot
+        be read (the caller fails closed).
+        """
+        lcode, lout = await run(["git", "ls-remote", "--heads", remote], clone)
+        if lcode != 0:
+            return None
+        mirror_heads: dict[str, str] = {}
+        for row in lout.splitlines():
+            parts = row.split()
+            if len(parts) == 2 and _OBJECT_ID.fullmatch(parts[0]):
+                mirror_heads[parts[1]] = parts[0]
+        ccode, cout = await run(
+            ["git", "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads"],
+            clone,
+        )
+        if ccode != 0:
+            return None
+        canonical: dict[str, str] = {}
+        for row in cout.splitlines():
+            parts = row.split()
+            if len(parts) == 2:
+                canonical[parts[0]] = parts[1]
+        differing = {
+            r: (m, canonical[r])
+            for r, m in mirror_heads.items()
+            if r in canonical and canonical[r] != m
+        }
+        if not differing:
+            return {}
+        fcode, _fout = await run(
+            ["git", "fetch", "--no-tags", remote, "+refs/heads/*:refs/mirror-probe/*"],
+            clone,
+        )
+        if fcode != 0:
+            return None
+        ahead: dict[str, tuple[str, str]] = {}
+        for ref, (msha, csha) in differing.items():
+            acode, _aout = await run(
+                ["git", "merge-base", "--is-ancestor", csha, msha], clone
+            )
+            if acode == 0:
+                ahead[ref] = (msha, csha)
+            elif acode != 1:
+                return None
+        return ahead
 
     @staticmethod
     async def sweep_deleted_refs(
@@ -643,7 +737,6 @@ class MirrorHandler:
         runner: Optional[Callable[[list[str], str], Awaitable[tuple[int, str]]]] = None,
         audit: Optional[list[str]] = None,
         workdir: Optional[str] = None,
-        default_branch: str = "main",
     ) -> list[str]:
         """Delete mirror heads and tags that no longer exist on canonical (OE-023).
 
@@ -654,7 +747,8 @@ class MirrorHandler:
         listed with ``git ls-remote --heads --tags`` and every ref absent from
         the canonical clone is removed with ``git push <remote> :<ref>``.
 
-        Never deleted: the default branch (``default_branch``), ``refs/heads/dev``
+        Never deleted: the default branch (read from the canonical clone's HEAD;
+        if it cannot be read nothing is deleted), ``refs/heads/dev``
         and GitHub-managed refs (``refs/pull/*``, ``refs/heads/dependabot/*``,
         ``refs/heads/copilot/*``, ``refs/heads/gh-pages``, ``refs/keep-around/*``);
         these are audited as ``mirror-ref-kept``. Every deletion is audited as
@@ -670,7 +764,6 @@ class MirrorHandler:
                 audit.append(line)
             logger.info(line)
 
-        protected_exact = {f"refs/heads/{default_branch}", "refs/heads/dev", "refs/heads/gh-pages"}
         protected_prefixes = (
             "refs/pull/",
             "refs/heads/dependabot/",
@@ -698,6 +791,15 @@ class MirrorHandler:
                     f"exit={code} nothing-deleted"
                 )
                 return lines
+            hcode, hout = await run(["git", "symbolic-ref", "HEAD"], clone)
+            head = hout.strip()
+            if hcode != 0 or not head.startswith("refs/heads/"):
+                record(
+                    f"mirror-sweep-aborted reason=canonical-head-unreadable "
+                    f"exit={hcode} nothing-deleted"
+                )
+                return lines
+            protected_exact = {head, "refs/heads/dev", "refs/heads/gh-pages"}
             for dest in destinations:
                 if dest.role != "mirror":
                     continue
@@ -1275,14 +1377,20 @@ _FORGE_HOSTS: dict[str, str] = {"github": "github.com", "gitlab": "gitlab.com"}
 
 
 async def _run_git(argv: list[str], cwd: str) -> tuple[int, str]:
-    """Run git for real; return ``(exit_code, output)`` (stdout and stderr merged)."""
+    """Run git for real; return ``(exit_code, stdout)``.
+
+    stderr is captured apart from stdout and only logged, so a diagnostic line
+    can never be parsed as command output (a ref row, a SHA).
+    """
     proc = await asyncio.create_subprocess_exec(
         *argv,
         cwd=cwd,
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
+        stderr=asyncio.subprocess.PIPE,
     )
-    out, _ = await proc.communicate()  # stderr is merged into stdout
+    out, err = await proc.communicate()
+    if err:
+        logger.debug(f"git {argv[1:2]} stderr: {err.decode(errors='replace').strip()}")
     return proc.returncode or 0, (out or b"").decode(errors="replace")
 
 
