@@ -2,127 +2,31 @@
 
 ## 3.5.0
 
-A release could be published without the checks that were meant to stand in front of it,
-a mirror could receive more than it should or lose commits it should have kept, and
-nothing could tell you which engine a layover was really running. The release path is now
-one path with its gates inside the engine, and the mirror paths refuse by name instead of
-failing quietly.
+A release could be published without the checks that were meant to stand in front of it, a mirror could receive more than it should or lose commits it should have kept, and nothing could tell you which engine a layover was really running. The release path is now one path with its gates inside the engine, and the mirror paths refuse by name instead of failing quietly.
 
-### A running engine can say which version and which configuration it runs
+### One release path
 
-A layover's pin says what it was meant to run, not what it runs. `get_runtime_identity()`
-now returns the version the process is running and the SHA-256 of the `config.yml` bytes
-it loaded; a value that cannot be determined is the string `unknown`, and the call never
-raises. Return it from your layover's health route to make the running engine visible.
+- **The gates live in the engine.** `check_release_title`, `extract_changelog_section` and `check_release_notes_audience` are public functions with their own errors, and the release workflow loads them instead of carrying copies. A tag whose CHANGELOG has no section is refused rather than released with commit subjects as its notes.
+- **A pushed tag publishes through the same gates** on every release destination, and the mirror tag must be the same object as the canonical tag (an annotated tag against a lightweight one is refused). A redelivered event is a no-op; a partial publication is audited and notified once.
+- **Missing releases can be reconciled.** `ReconcileHandler.reconcile_release_tags` publishes the releases missing for existing tags. It considers only tags at or after `reconcile.since` and refuses to run without it.
 
-### The pin drift check compares against the version that is running
+### Mirrors refuse by name
 
-The drift check compared a layover's declared pin only with the engine's own version, so a
-layover that was never restarted still read as current. A register entry may now carry a
-`health_url`; the check reads the `version` of that health answer and compares it with the
-pin. A different running version is drift and exits 1 with both versions named. A health
-route that is unreachable, answers something other than a JSON object, or reports no usable
-version is reported as inconclusive and exits 3, never as a pass. Entries without a
-`health_url` behave as before.
+- **A push event sends exactly the ref it names**, with the object it names. Nothing else moves or is deleted.
+- **The visibility gate judges the whole reachable history** on every push path (event, state sync, reconcile). It never trusts the payload's `before` value, pushes the object it judged, and refuses unreadable history or a destination that declares no visibility.
+- **A failed sync is reported as failed**, and a mirror that is ahead keeps its commits unless `overwrite_ahead: true` is set. The sweep never deletes the canonical default branch.
+- **The engine ships no default paths for the visibility gate.** A public mirror destination without `visibility_candidate_globs` is refused when the configuration loads.
 
-**To have the running version checked, add `health_url` to the register entry and return
-the `version` from `get_runtime_identity()` in that route.** Exit 3 is new: a job that
-tells only success from drift must handle it.
+### The running version is visible
 
-### One release path, with the gates inside the engine
+- **`get_runtime_identity()`** returns the version the process is running and the SHA-256 of the `config.yml` it loaded (`unknown` when it cannot be determined). The pin drift check reads `version` from a register entry's `health_url` and compares it with the pin; an unreachable or unusable answer is inconclusive and exits 3.
 
-The release workflow carried its own copies of the checks, so the workflow and the engine
-could disagree about what a releasable tag is. The three gates are now public functions,
-`check_release_title`, `extract_changelog_section` and `check_release_notes_audience`,
-each refusing with its own error (`ReleaseTitleError`, `MissingChangelogEntryError`,
-`ReleaseNotesAudienceError`). The release workflow loads them from the engine instead of
-carrying a copy. A tag whose CHANGELOG has no section, or an empty one, is refused rather
-than released with commit subjects as its notes. The workflow and the webhook handler both
-publish through `ReleaseHandler.publish_release`.
+### Upgrading
 
-### The mirror tag is the same object as the canonical tag
-
-A tag on the mirror could name the right commit and still be a different object: the
-release compared the commits the two tags resolve to, which cannot tell an annotated tag
-from a lightweight one. The canonical tag object is now pushed to the mirror as it is, and
-the mirror is read back and compared by object and by the commit it resolves to. A
-lightweight mirror tag against an annotated canonical tag, or any other mismatch, refuses
-the release by name. The canonical credential reaches git
-through the environment, not through the command line.
-
-### A pushed tag publishes its release through the same gates
-
-A tag pushed while the webhook handler was listening created a release whose body was only
-the tag name, with none of the title, notes and audience checks. The handler now reads the CHANGELOG and `.ops.yaml` at the tag,
-runs the gates, verifies the mirror tag identity and only then publishes to every release
-destination. A redelivered event is a no-op for each destination that already holds the
-release. A partial publication is audited, notified and logged once. `release.artifact_dir`
-attaches a directory of built files from under the artifact root; a path that leaves it
-is refused.
-
-**If you pass tag pushes to `ReleaseHandler.process_event`, supply a `ReleaseContext`.**
-Without one the handler refuses by name before any release object exists.
-
-### Releases missing for existing tags can be published by a reconcile
-
-A tag that was pushed while the layover was stopped never got a release. The new entry
-point `ReconcileHandler.reconcile_release_tags` publishes the releases that are missing on
-any release destination, through the same gates and the same publication as a pushed tag;
-a destination that already holds the release is left alone. A tag that is refused is
-recorded in the report and the other tags still run. It considers only tags at or after
-`reconcile.since` (a tag name or an ISO date) and refuses to run without it, so a first run
-cannot publish a repository's whole tag history. `release.reconcile: false` switches it off.
-
-**If you called `ReconcileHandler.reconcile_releases`, move to `reconcile_release_tags`.**
-The old method is removed; it created releases whose body was only the tag name.
-
-### A push event mirrors exactly the ref it names
-
-On a push the engine only waited and checked whether the mirror had caught up; it sent
-nothing itself. A push event now sends exactly the pushed ref, with the object it names,
-to every destination with the `mirror` role, and nothing else moves or is deleted. One audit line per attempt records
-ref, destination, SHA and git's exit code; a failed destination does not stop the others.
-A destination marked public receives the ref only if no commit reachable from it touches a
-candidate path; the refusal is audited by name and the paths are listed.
-
-### The visibility gate stands in front of every push path
-
-The gate judged only the commits since the point where the branch forked, so a ref could
-carry the history of a commit that had been refused, and the state sync and the reconcile
-did not apply it at all. The gate now judges the whole history reachable from the ref, on
-the event path, in the state sync and in the reconcile alike. It never trusts the `before`
-value of the payload to shorten that judgement, and it pushes the very object it judged.
-A history that cannot be read is refused. A destination that declares no visibility is
-refused. The reconcile measures and syncs one list of destinations, and refuses two lists
-that differ.
-
-### A failed sync is reported as failed, and an ahead mirror keeps its commits
-
-A state sync whose clone or push failed could finish without anyone being told, and a
-mirror that held commits the canonical side did not have was overwritten by force. A
-failed clone or push now shows in the drift report as failed, and the report is green only
-when nothing is behind, ahead or failed. A mirror branch that is ahead of the canonical
-tip is kept and reported as ahead.
-
-The sweep of refs deleted on the canonical side now never deletes the canonical default
-branch, and git's error output is never read as a list of refs.
-
-**To have a mirror overwritten even when it is ahead, set `overwrite_ahead: true` on that
-destination.** The default is to keep it.
-
-### The engine ships no default paths for the visibility gate
-
-The visibility gate was armed with a list of paths that belonged to one organisation, so
-an adopter inherited another team's idea of what must stay private. The engine now carries
-no default candidate paths. A repository with a public mirror destination that declares no
-`visibility_candidate_globs` is refused when its configuration loads, instead of passing
-everything through. A destination may declare its own `host`; a mirror destination on a
-forge other than GitHub or GitLab, which have a default host, must declare one or the
-configuration is refused.
-
-**If a repository mirrors to a public destination, declare `visibility_candidate_globs`
-for it, and declare `host` on mirror destinations of any other forge.**
-
+- Exit code **3** of the drift check is new; a job that tells only success from drift must handle it.
+- Tag pushes passed to `ReleaseHandler.process_event` need a `ReleaseContext`.
+- `ReconcileHandler.reconcile_releases` is removed; use `reconcile_release_tags`.
+- A repository that mirrors to a public destination must declare `visibility_candidate_globs`; a mirror destination on a forge other than GitHub or GitLab must declare `host`.
 
 ## 3.4.2
 
