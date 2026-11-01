@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import yaml
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 
 _DESTINATION_REMOVAL_VERSION = "4.0.0"
@@ -21,26 +21,14 @@ _DESTINATION_REMOVAL_VERSION = "4.0.0"
 # and counts as public wherever it is reached anyway.
 VALID_DESTINATION_VISIBILITIES: tuple[str, ...] = ("public", "private")
 
-# Default path classes that may carry planning substrate (OE-022). This is the
-# configuration layer's default for ``RepoConfig.visibility_candidate_globs``;
-# a repository overrides it in its config. The mirror module holds no globs.
-DEFAULT_VISIBILITY_CANDIDATE_GLOBS: tuple[str, ...] = (
-    ".skillweave/**",
-    "strategy.md",
-    "**/strategy.md",
-    "prd*.md",
-    "**/prd*.md",
-    "prd*.json",
-    "**/prd*.json",
-    "*.contract*",
-    "**/*.contract*",
-    "*contract*.md",
-    "**/*contract*.md",
-    "*proposal*.md",
-    "**/*proposal*.md",
-    "*.proposal*",
-    "**/*.proposal*",
-)
+# OE-037 (D14): the template carries no candidate globs. The path classes that
+# may carry planning substrate are the adopter's configuration
+# (``RepoConfig.visibility_candidate_globs``); a public destination without them
+# is refused at load.
+
+# OE-037: the remote host per forge when a destination declares none. A
+# destination on any other forge must declare ``host``.
+DEFAULT_FORGE_HOSTS: dict[str, str] = {"github": "github.com", "gitlab": "gitlab.com"}
 _OPS_YAML_FILENAME = ".ops.yaml"
 
 # SHA-256 (hex) of the exact Layer-2 ``config.yml`` bytes the process loaded
@@ -306,6 +294,10 @@ class Destination(BaseModel):
     # OE-036 (D15): a mirror head that is AHEAD of the canonical side keeps its
     # commits unless the destination opts in to overwriting it. Default off.
     overwrite_ahead: bool = Field(default=False)
+    # OE-037: the remote host. Empty means the forge's default host
+    # (``DEFAULT_FORGE_HOSTS``); a mirror destination on any other forge must
+    # declare it, or the configuration is refused at load.
+    host: str = Field(default="")
 
 
 class MirrorConfig(BaseModel):
@@ -411,9 +403,8 @@ class RepoConfig(BaseModel):
     destinations: list[Destination] = Field(default_factory=list)
     # OE-022: path globs the visibility gate treats as planning substrate on a
     # public destination. Configuration, not code.
-    visibility_candidate_globs: list[str] = Field(
-        default_factory=lambda: list(DEFAULT_VISIBILITY_CANDIDATE_GLOBS)
-    )
+    # OE-037 (D14): no default; see ``_public_destination_declares_globs``.
+    visibility_candidate_globs: list[str] = Field(default_factory=list)
 
     @field_validator("mirror")
     @classmethod
@@ -447,6 +438,57 @@ class RepoConfig(BaseModel):
                     f"{dest.visibility!r}; it must be 'public' or 'private'"
                 )
         return value
+
+    @field_validator("destinations")
+    @classmethod
+    def _destinations_resolve_a_host(cls, value: list[Destination]) -> list[Destination]:
+        """Refuse a mirror destination on an unknown forge that declares no host (OE-037).
+
+        The mirror gate used to skip such a destination silently; a destination
+        nobody can reach is a configuration error, so it is refused at load.
+        """
+        for dest in value:
+            if (
+                dest.role == "mirror"
+                and not dest.host
+                and dest.forge not in DEFAULT_FORGE_HOSTS
+            ):
+                raise ValueError(
+                    f"destination {dest.forge}:{dest.repo} is on forge "
+                    f"{dest.forge!r}, which has no default host; declare "
+                    "'host' for it"
+                )
+        return value
+
+    @model_validator(mode="after")
+    def _public_destination_declares_globs(self) -> "RepoConfig":
+        """Refuse a public mirror destination without ``visibility_candidate_globs`` (OE-037, D14).
+
+        Only ``role: mirror`` destinations are checked: they are the ones the
+        visibility gate judges (a release destination is never gated).
+
+        The engine carries no default globs: without the adopter's own, the
+        visibility gate would find no candidate path and let everything through.
+        """
+        if self.visibility_candidate_globs:
+            return self
+        public: list[str] = [
+            dest.repo
+            for dest in self.destinations
+            if dest.role == "mirror" and dest.visibility == "public"
+        ]
+        mirror = self.mirror
+        if mirror is not None and mirror.visibility == "public":
+            alias = mirror.github or mirror.mirror_url
+            if alias:
+                public.append(alias)
+        if public:
+            raise ValueError(
+                f"destination {public[0]} has visibility 'public' but "
+                "visibility_candidate_globs is not declared; the engine "
+                "carries no default globs"
+            )
+        return self
 
     def resolve_destinations(self) -> list[Destination]:
         """Resolve this repo's destinations into a :class:`Destination` list.
@@ -689,6 +731,7 @@ class OpsEngineConfig(BaseModel):
             mirror=repo_specific.mirror,  # no org default (repo-specific only)
             notifications=repo_specific.notifications or org_config.notifications,
             destinations=repo_specific.destinations,  # no org default (repo-specific only)
+            visibility_candidate_globs=repo_specific.visibility_candidate_globs,
         )
         _assert_typed_sections(resolved, org_name, repo_name)
         return resolved

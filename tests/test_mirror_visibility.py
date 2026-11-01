@@ -23,8 +23,36 @@ from ops_engine.modules.mirror import (
     MirrorDestinationError,
     MirrorHandler,
     Refusal,
+    VisibilityConfig,
     VisibilityDecision,
 )
+
+# OE-037: the engine carries no candidate globs; the tests declare their own.
+CFG = VisibilityConfig(
+    candidate_globs=(
+        ".skillweave/**",
+        "strategy.md",
+        "**/strategy.md",
+        "prd*.json",
+        "**/prd*.json",
+        "**/prd*.md",
+    )
+)
+
+
+def _classify(path, **kw):
+    kw.setdefault("config", CFG)
+    return MirrorHandler.classify_visibility(path, **kw)
+
+
+def _substrate_files(paths, **kw):
+    kw.setdefault("config", CFG)
+    return MirrorHandler.substrate_files(paths, **kw)
+
+
+def _gate_ref(ref, **kw):
+    kw.setdefault("config", CFG)
+    return MirrorHandler.gate_ref(ref, **kw)
 
 SCHEMA = (
     '{"$schema": "https://json-schema.org/draft/2020-12/schema", '
@@ -64,7 +92,7 @@ DIFF_ONLY = "src/app.py"
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_schema_is_product():
-    d = MirrorHandler.classify_visibility(
+    d = _classify(
         "skills/skillweave-blueprint/assets/prd.schema.json", content=SCHEMA
     )
     assert d.kind == "product"
@@ -72,7 +100,7 @@ def test_schema_is_product():
 
 
 def test_redacted_fixture_is_product():
-    d = MirrorHandler.classify_visibility(
+    d = _classify(
         "tests/fixtures/prd-schema/forgejo-first.json", content=REDACTED_PRD
     )
     assert d.kind == "product"
@@ -80,7 +108,7 @@ def test_redacted_fixture_is_product():
 
 
 def test_unredacted_prd_is_substrate():
-    d = MirrorHandler.classify_visibility(
+    d = _classify(
         "tests/fixtures/prd-schema/forgejo-first.json", content=REAL_PRD
     )
     assert d.kind == "substrate"
@@ -88,7 +116,7 @@ def test_unredacted_prd_is_substrate():
 
 
 def test_template_is_product():
-    d = MirrorHandler.classify_visibility(
+    d = _classify(
         "skills/skillweave-blueprint/references/prd-template.md", content=TEMPLATE
     )
     assert d.kind == "product"
@@ -96,7 +124,7 @@ def test_template_is_product():
 
 
 def test_synthetic_sample_is_product_by_content():
-    d = MirrorHandler.classify_visibility(
+    d = _classify(
         "prd.json",
         content='{"projectName": "Corrected — a PRD in the format the ecosystem produces"}',
     )
@@ -105,7 +133,7 @@ def test_synthetic_sample_is_product_by_content():
 
 
 def test_synthetic_sample_is_product_by_name():
-    d = MirrorHandler.classify_visibility(
+    d = _classify(
         "tests/fixtures/prd-sample.json",
         content='{"projectName": "AI Meeting Notes Summarizer", "description": "Automatic transcription"}',
     )
@@ -114,14 +142,20 @@ def test_synthetic_sample_is_product_by_name():
 
 
 def test_non_planning_path_is_product_without_content_decision():
-    d = MirrorHandler.classify_visibility("src/ops_engine/modules/mirror.py", content=REAL_PRD)
+    d = _classify("src/ops_engine/modules/mirror.py", content=REAL_PRD)
     assert d.kind == "product"
     assert d.reason == "not a planning class"
 
 
+def test_classify_without_candidate_globs_is_refused():
+    # OE-037: no default globs; a gate with no candidates would pass everything.
+    with pytest.raises(MirrorDestinationError, match="no candidate globs"):
+        MirrorHandler.classify_visibility("prd.json", content=REAL_PRD)
+
+
 def test_classify_without_content_is_refused():
     with pytest.raises(MirrorDestinationError):
-        MirrorHandler.classify_visibility("prd.json", content=None)
+        _classify("prd.json", content=None)
 
 
 def test_substrate_files_returns_only_substrate():
@@ -135,21 +169,21 @@ def test_substrate_files_returns_only_substrate():
         "tests/fixtures/prd-schema/forgejo-first.json": REAL_PRD,
         "tests/fixtures/prd-sample.json": '{"projectName": "AI Meeting Notes Summarizer"}',
     }
-    decisions = MirrorHandler.substrate_files(inventory, read=contents.get)
+    decisions = _substrate_files(inventory, read=contents.get)
     assert [d.path for d in decisions] == ["tests/fixtures/prd-schema/forgejo-first.json"]
     assert all(d.kind == "substrate" for d in decisions)
 
 
 def test_substrate_files_empty_tree_returns_empty():
-    assert MirrorHandler.substrate_files([], read=lambda p: None) == []
+    assert _substrate_files([], read=lambda p: None) == []
 
 
 def test_strategy_and_contract_paths_are_candidates():
     real = "Executive summary of the product strategy across all five orgs and their mirrors."
-    d = MirrorHandler.classify_visibility("strategy.md", content=real)
+    d = _classify("strategy.md", content=real)
     assert d.kind == "substrate"
 
-    d = MirrorHandler.classify_visibility(
+    d = _classify(
         "strategy.md", content="Neutral placeholder wording describing the work item"
     )
     assert d.kind == "product"
@@ -174,7 +208,7 @@ def _tree(substrate_path="prd.json"):
 
 def test_default_branch_refusal_is_a_release_blocker():
     paths, read = _tree()
-    refusal = MirrorHandler.gate_ref("main", paths=paths, read=read)
+    refusal = _gate_ref("main", paths=paths, read=read)
     assert refusal is not None
     assert refusal.is_default is True
     assert refusal.is_release_blocker is True
@@ -183,7 +217,7 @@ def test_default_branch_refusal_is_a_release_blocker():
 
 def test_default_branch_refusal_raises_and_names_paths_and_consequence():
     paths, read = _tree()
-    refusal = MirrorHandler.gate_ref("main", paths=paths, read=read)
+    refusal = _gate_ref("main", paths=paths, read=read)
     with pytest.raises(DefaultBranchBlockedError) as exc:
         MirrorHandler.refuse(refusal)
     msg = str(exc.value)
@@ -194,7 +228,7 @@ def test_default_branch_refusal_raises_and_names_paths_and_consequence():
 
 def test_non_default_branch_refusal_is_not_a_release_blocker():
     paths, read = _tree()
-    refusal = MirrorHandler.gate_ref("feature/x", paths=paths, read=read)
+    refusal = _gate_ref("feature/x", paths=paths, read=read)
     assert refusal is not None
     assert refusal.is_default is False
     assert refusal.is_release_blocker is False
@@ -203,10 +237,10 @@ def test_non_default_branch_refusal_is_not_a_release_blocker():
 
 def test_non_default_branch_refusal_does_not_raise():
     paths, read = _tree()
-    refusal = MirrorHandler.gate_ref("feature/x", paths=paths, read=read)
+    refusal = _gate_ref("feature/x", paths=paths, read=read)
     MirrorHandler.refuse(refusal)
     assert "RELEASE BLOCKER" not in refusal.message
-    assert refusal.message != MirrorHandler.gate_ref("main", paths=paths, read=read).message
+    assert refusal.message != _gate_ref("main", paths=paths, read=read).message
 
 
 def test_clean_ref_returns_none_and_refuse_is_silent():
@@ -215,15 +249,15 @@ def test_clean_ref_returns_none_and_refuse_is_silent():
         "src/app.py": "print('ship')",
         "skills/skillweave-blueprint/assets/prd.schema.json": SCHEMA,
     }
-    refusal = MirrorHandler.gate_ref("main", paths=paths, read=contents.get)
+    refusal = _gate_ref("main", paths=paths, read=contents.get)
     assert refusal is None
     MirrorHandler.refuse(refusal)
 
 
 def test_refusal_distinction_is_visible_in_messages():
     paths, read = _tree()
-    default_refusal = MirrorHandler.gate_ref("main", paths=paths, read=read)
-    feature_refusal = MirrorHandler.gate_ref("feature/x", paths=paths, read=read)
+    default_refusal = _gate_ref("main", paths=paths, read=read)
+    feature_refusal = _gate_ref("feature/x", paths=paths, read=read)
     assert default_refusal.message != feature_refusal.message
     assert "RELEASE BLOCKER" in default_refusal.message
     assert "BEHIND" in default_refusal.message
@@ -232,7 +266,7 @@ def test_refusal_distinction_is_visible_in_messages():
 
 def test_gate_ref_never_raises_on_its_own():
     paths, read = _tree()
-    refusal = MirrorHandler.gate_ref("main", paths=paths, read=read)
+    refusal = _gate_ref("main", paths=paths, read=read)
     assert isinstance(refusal, Refusal)
 
 
@@ -258,10 +292,10 @@ def _carried_tree_default_branch(tip_substrate=REAL_PRD):
 
 def test_event_inventory_and_full_state_inventory_give_the_same_refusal():
     paths, read = _carried_tree_default_branch()
-    from_event = MirrorHandler.gate_ref(
+    from_event = _gate_ref(
         "integration/SW-152", default_branch="main", paths=paths, read=read
     )
-    from_full_state = MirrorHandler.gate_ref(
+    from_full_state = _gate_ref(
         "integration/SW-152", default_branch="main", paths=paths, read=read
     )
     assert from_event is not None
@@ -271,10 +305,10 @@ def test_event_inventory_and_full_state_inventory_give_the_same_refusal():
 
 def test_incident_shape_is_refused_though_the_diff_is_clean():
     paths, read = _carried_tree_default_branch()
-    refusal = MirrorHandler.gate_ref("integration/SW-152", paths=paths, read=read)
+    refusal = _gate_ref("integration/SW-152", paths=paths, read=read)
     assert refusal is not None
     assert CARRIED_SUBSTRATE in refusal.substrate
-    clean = MirrorHandler.gate_ref(
+    clean = _gate_ref(
         "feature/x",
         paths=[DIFF_ONLY],
         read=lambda p: "print('ship')",
@@ -285,8 +319,8 @@ def test_incident_shape_is_refused_though_the_diff_is_clean():
 
 def test_default_branch_and_feature_ref_are_the_same_rule_differing_only_in_is_default():
     paths, read = _carried_tree_default_branch()
-    main_r = MirrorHandler.gate_ref("main", paths=paths, read=read)
-    feature_r = MirrorHandler.gate_ref("integration/JIRA-1", paths=paths, read=read)
+    main_r = _gate_ref("main", paths=paths, read=read)
+    feature_r = _gate_ref("integration/JIRA-1", paths=paths, read=read)
     assert main_r.is_default is True and main_r.is_release_blocker is True
     assert feature_r.is_default is False and feature_r.is_release_blocker is False
     assert main_r.substrate == feature_r.substrate
@@ -302,22 +336,22 @@ def test_redacted_template_tree_is_clean_from_both_paths():
     }
     paths = list(contents)
     read = contents.get
-    assert MirrorHandler.gate_ref("main", paths=paths, read=read) is None
-    assert MirrorHandler.gate_ref("main", paths=paths, read=read) is None
+    assert _gate_ref("main", paths=paths, read=read) is None
+    assert _gate_ref("main", paths=paths, read=read) is None
 
 
 def test_gate_ref_delegates_and_neither_path_classifies_again():
     paths, read = _carried_tree_default_branch()
-    refusal = MirrorHandler.gate_ref("integration/SW-152", paths=paths, read=read)
+    refusal = _gate_ref("integration/SW-152", paths=paths, read=read)
     assert isinstance(refusal, Refusal)
-    decisions = MirrorHandler.substrate_files(paths, read=read)
+    decisions = _substrate_files(paths, read=read)
     assert isinstance(decisions, list)
     assert all(isinstance(d, VisibilityDecision) for d in decisions)
 
 
 def test_refusal_produced_by_gate_has_no_override_by_default():
     paths, read = _carried_tree_default_branch()
-    refusal = MirrorHandler.gate_ref("integration/SW-152", paths=paths, read=read)
+    refusal = _gate_ref("integration/SW-152", paths=paths, read=read)
     assert refusal.override_reason is None
     from dataclasses import FrozenInstanceError
 
@@ -327,7 +361,7 @@ def test_refusal_produced_by_gate_has_no_override_by_default():
 
 def test_release_override_requires_a_reason():
     paths, read = _carried_tree_default_branch()
-    refusal = MirrorHandler.gate_ref("integration/SW-152", paths=paths, read=read)
+    refusal = _gate_ref("integration/SW-152", paths=paths, read=read)
     with pytest.raises(ValueError):
         MirrorHandler.release_override(refusal, reason="")
     with pytest.raises(ValueError):
@@ -336,7 +370,7 @@ def test_release_override_requires_a_reason():
 
 def test_release_override_returns_a_new_refusal_and_leaves_the_original():
     paths, read = _carried_tree_default_branch()
-    refusal = MirrorHandler.gate_ref("integration/SW-152", paths=paths, read=read)
+    refusal = _gate_ref("integration/SW-152", paths=paths, read=read)
     marked = MirrorHandler.release_override(
         refusal, reason="manual re-push of SW-152 after double-checking the carried PRD"
     )
@@ -350,7 +384,7 @@ def test_release_override_returns_a_new_refusal_and_leaves_the_original():
 
 def test_refuse_still_raises_on_a_marked_default_branch_refusal():
     paths, read = _carried_tree_default_branch()
-    main_r = MirrorHandler.gate_ref("main", paths=paths, read=read)
+    main_r = _gate_ref("main", paths=paths, read=read)
     marked = MirrorHandler.release_override(main_r, reason="deliberate release")
     with pytest.raises(DefaultBranchBlockedError):
         MirrorHandler.refuse(marked)
@@ -358,7 +392,7 @@ def test_refuse_still_raises_on_a_marked_default_branch_refusal():
 
 def test_refuse_is_silent_for_a_marked_feature_refusal():
     paths, read = _carried_tree_default_branch()
-    feature = MirrorHandler.gate_ref("integration/SW-152", paths=paths, read=read)
+    feature = _gate_ref("integration/SW-152", paths=paths, read=read)
     marked = MirrorHandler.release_override(feature, reason="exact-ref re-push")
     assert marked.is_default is False
     MirrorHandler.refuse(marked)
@@ -366,5 +400,5 @@ def test_refuse_is_silent_for_a_marked_feature_refusal():
 
 def test_default_branch_is_derived_not_hard_coded_for_the_real_default():
     paths, read = _carried_tree_default_branch()
-    assert MirrorHandler.gate_ref("master", default_branch="master", paths=paths, read=read).is_default
-    assert MirrorHandler.gate_ref("master", default_branch="main", paths=paths, read=read).is_default is False
+    assert _gate_ref("master", default_branch="master", paths=paths, read=read).is_default
+    assert _gate_ref("master", default_branch="main", paths=paths, read=read).is_default is False

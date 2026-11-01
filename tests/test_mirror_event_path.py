@@ -396,7 +396,7 @@ def test_p5_non_ascii_candidate_name_does_not_dodge_the_glob(tmp_path, monkeypat
 def test_config_layer_declares_candidate_globs():
     from ops_engine.config_loader import RepoConfig
 
-    assert ".skillweave/**" in RepoConfig().visibility_candidate_globs
+    assert RepoConfig().visibility_candidate_globs == []  # OE-037: no default
     assert RepoConfig(visibility_candidate_globs=["x/**"]).visibility_candidate_globs == ["x/**"]
 
 
@@ -608,3 +608,46 @@ def test_non_string_after_is_refused_audited_once_and_nothing_is_pushed(after):
     )
     assert runner.calls == []
     assert len(lines) == 1 and lines == audit and "reason=invalid-sha" in lines[0]
+
+
+# --- OE-037: a destination may declare its host ------------------------------
+
+def _hosted_dest(host=""):
+    return Destination(
+        forge="forgejo", repo="exampleorg/priv", role="mirror",
+        visibility="private", host=host,
+    )
+
+
+def test_destination_on_an_unknown_forge_is_pushed_to_when_it_declares_a_host():
+    runner, audit = Runner(), []
+    _run(_event(), [_hosted_dest("git.example.org")], runner, audit)
+    assert [argv for argv, _ in runner.calls] == [
+        ["git", "push", "https://git.example.org/exampleorg/priv.git", f"+{SHA}:refs/heads/feature-x"]
+    ]
+
+
+def test_declared_host_overrides_the_forge_default():
+    dest = Destination(
+        forge="github", repo="exampleorg/priv", role="mirror",
+        visibility="private", host="ghe.example.org",
+    )
+    runner = Runner()
+    _run(_event(), [dest], runner, [])
+    assert runner.calls[0][0][2] == "https://ghe.example.org/exampleorg/priv.git"
+
+
+def test_unknown_forge_without_host_is_refused_and_audited_not_skipped():
+    runner, audit = Runner(), []
+    lines = _run(_event(), [_hosted_dest()], runner, audit)
+    assert runner.calls == []
+    assert len(lines) == 1 and lines == audit
+    assert lines[0].startswith("mirror-refused") and "reason=no-host" in lines[0]
+
+
+def test_public_destination_judged_with_no_candidate_globs_is_refused():
+    dest = Destination(forge="github", repo="exampleorg/pub", role="mirror", visibility="public")
+    runner, audit = Runner(), []
+    lines = _run(_event(), [dest], runner, audit)
+    assert [a for a, _ in runner.calls if a[1] == "push"] == []
+    assert "reason=no-candidate-globs" in lines[0]

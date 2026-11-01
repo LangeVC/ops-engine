@@ -96,7 +96,7 @@ from typing import Any, Awaitable, Callable, Optional, Sequence
 
 from ops_engine.adapters.base import ForgeAdapter
 from ops_engine.config_loader import (
-    DEFAULT_VISIBILITY_CANDIDATE_GLOBS,
+    DEFAULT_FORGE_HOSTS,
     Destination,
     MirrorConfig,
     OpsEngineConfig,
@@ -139,13 +139,12 @@ def __getattr__(name: str) -> str:
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-# The path classes that may carry planning substrate. These are a CANDIDATE
-# filter, not the decision: a file is only inspected for substrate content when
-# its path falls into one of these classes. The decision itself is content-based
-# (see :meth:`MirrorHandler.classify_visibility`). The arms mirror the deployed
-# gate's BLOCKED_PATHS so a layover can feed the same candidate set, but here
-# they only narrow *where* content is measured — never the verdict.
-_VISIBILITY_CANDIDATE_GLOBS: tuple[str, ...] = tuple(DEFAULT_VISIBILITY_CANDIDATE_GLOBS)
+# The path classes that may carry planning substrate are configuration, not
+# code (OE-037): ``RepoConfig.visibility_candidate_globs`` reaches the gate as
+# ``candidate_globs`` or ``VisibilityConfig.candidate_globs``. They are a
+# CANDIDATE filter, not the decision: a file is only inspected for substrate
+# content when its path falls into one of them. The decision itself is
+# content-based (see :meth:`MirrorHandler.classify_visibility`).
 
 
 @dataclass(frozen=True)
@@ -169,6 +168,9 @@ class VisibilityConfig:
     enabled: bool = field(default=False)
     neutral_placeholder: str = field(default="Neutral placeholder wording")
     secret_redaction_token: str = field(default="***REDACTED***")
+    # OE-037: the candidate path classes. There is no default; classifying with
+    # none declared is refused (a gate with no candidates would pass everything).
+    candidate_globs: tuple[str, ...] = field(default=())
 
 
 class MirrorDestinationError(RuntimeError):
@@ -441,7 +443,9 @@ class MirrorHandler:
         is what was checked). Never ``--prune``, never
         ``--mirror``, never ``--all``/``--tags``: nothing but the triggering ref
         moves, and nothing on the destination is deleted. Only destinations with
-        ``role == "mirror"`` on a forge with a known remote host are pushed.
+        ``role == "mirror"`` are pushed, to the destination's declared ``host``
+        or its forge's default host; one with neither is refused with a
+        ``reason=no-host`` audit line.
 
         One audit line is recorded per push attempt (appended to ``audit`` when
         given, and logged), carrying ref, destination, SHA and git's exit code. A
@@ -485,11 +489,7 @@ class MirrorHandler:
 
         run = runner or _run_git
         refspec = f"+{sha}:{ref}"
-        globs = (
-            tuple(candidate_globs)
-            if candidate_globs is not None
-            else tuple(DEFAULT_VISIBILITY_CANDIDATE_GLOBS)
-        )
+        globs = tuple(candidate_globs) if candidate_globs is not None else ()
         touched: Optional[list[str]] = None  # computed once, only if a public dest exists
         for dest in destinations:
             if dest.role != "mirror":
@@ -502,6 +502,13 @@ class MirrorHandler:
                 logger.warning(line)
                 continue
             if MirrorHandler.effective_visibility(dest) == "public":
+                if not globs:
+                    line = MirrorHandler.no_candidate_globs_line(dest, ref=ref, sha=sha)
+                    lines.append(line)
+                    if audit is not None:
+                        audit.append(line)
+                    logger.warning(line)
+                    continue
                 if touched is None:
                     touched = await MirrorHandler._touched_candidates(
                         run, repo_dir, sha, globs
@@ -516,11 +523,13 @@ class MirrorHandler:
                         audit.append(line)
                     logger.warning(line)
                     continue
-            host = _FORGE_HOSTS.get(dest.forge)
+            host = MirrorHandler.destination_host(dest)
             if host is None:
-                logger.warning(
-                    f"mirror push skipped: no remote host for forge '{dest.forge}'"
-                )
+                line = MirrorHandler.no_host_line(dest, ref=ref, sha=sha)
+                lines.append(line)
+                if audit is not None:
+                    audit.append(line)
+                logger.warning(line)
                 continue
             remote = f"https://{host}/{dest.repo}.git"
             code, _stderr = await run(["git", "push", remote, refspec], repo_dir)
@@ -563,7 +572,7 @@ class MirrorHandler:
         Visibility gate (OE-035, same rule as :meth:`push_event`). A destination
         whose ``visibility`` is ``"public"`` does not receive a head or tag from
         whose reachable history any commit touches a candidate path
-        (``candidate_globs``, default ``DEFAULT_VISIBILITY_CANDIDATE_GLOBS``),
+        (``candidate_globs``; none declared refuses a public destination),
         judged in the fresh clone over the whole history. Each such ref is
         audited as ``mirror-refused`` naming the paths, and the remaining refs
         are pushed to that destination as explicit refspecs. An unreadable
@@ -579,11 +588,7 @@ class MirrorHandler:
         """
         lines: list[str] = []
         run = runner or _run_git
-        globs = (
-            tuple(candidate_globs)
-            if candidate_globs is not None
-            else tuple(DEFAULT_VISIBILITY_CANDIDATE_GLOBS)
-        )
+        globs = tuple(candidate_globs) if candidate_globs is not None else ()
 
         def record(line: str) -> None:
             lines.append(line)
@@ -609,12 +614,9 @@ class MirrorHandler:
                 if not MirrorHandler.visibility_declared(dest):
                     record(MirrorHandler.visibility_refusal_line(dest, ref="*"))
                     continue
-                host = _FORGE_HOSTS.get(dest.forge)
+                host = MirrorHandler.destination_host(dest)
                 if host is None:
-                    logger.warning(
-                        f"mirror state sync skipped: no remote host for forge "
-                        f"'{dest.forge}'"
-                    )
+                    record(MirrorHandler.no_host_line(dest, ref="*"))
                     continue
                 remote = f"https://{host}/{dest.repo}.git"
                 refspecs = [
@@ -622,6 +624,9 @@ class MirrorHandler:
                     "+refs/tags/*:refs/tags/*",
                 ]
                 if MirrorHandler.effective_visibility(dest) == "public":
+                    if not globs:
+                        record(MirrorHandler.no_candidate_globs_line(dest, ref="*"))
+                        continue
                     if gated is None:
                         gated = await MirrorHandler._gate_clone_refs(
                             run, clone, globs
@@ -806,11 +811,9 @@ class MirrorHandler:
                 if not MirrorHandler.visibility_declared(dest):
                     record(MirrorHandler.visibility_refusal_line(dest, ref="*"))
                     continue
-                host = _FORGE_HOSTS.get(dest.forge)
+                host = MirrorHandler.destination_host(dest)
                 if host is None:
-                    logger.warning(
-                        f"mirror sweep skipped: no remote host for forge '{dest.forge}'"
-                    )
+                    record(MirrorHandler.no_host_line(dest, ref="*"))
                     continue
                 remote = f"https://{host}/{dest.repo}.git"
                 lcode, lout = await run(
@@ -850,6 +853,27 @@ class MirrorHandler:
     def effective_visibility(dest: Destination) -> str:
         """The visibility the gate judges by: an unset or unknown value counts as public."""
         return dest.visibility if MirrorHandler.visibility_declared(dest) else "public"
+
+    @staticmethod
+    def destination_host(dest: Destination) -> Optional[str]:
+        """The remote host of ``dest``: its declared ``host``, else its forge's default (OE-037)."""
+        return dest.host or _FORGE_HOSTS.get(dest.forge)
+
+    @staticmethod
+    def no_host_line(dest: Destination, *, ref: str, sha: str = "") -> str:
+        """The audit line for a destination with no declared host on an unknown forge."""
+        return (
+            f"mirror-refused ref={ref} dest={dest.forge}:{dest.repo} "
+            f"sha={sha or '-'} reason=no-host nothing-pushed"
+        )
+
+    @staticmethod
+    def no_candidate_globs_line(dest: Destination, *, ref: str, sha: str = "") -> str:
+        """The audit line for a public destination judged with no candidate globs."""
+        return (
+            f"mirror-refused ref={ref} dest={dest.forge}:{dest.repo} "
+            f"sha={sha or '-'} reason=no-candidate-globs nothing-pushed"
+        )
 
     @staticmethod
     def visibility_refusal_line(dest: Destination, *, ref: str, sha: str = "") -> str:
@@ -1092,7 +1116,7 @@ class MirrorHandler:
 
         Visibility is a question about what a ref's tree CARRIES, not what a
         push diff touched. A file is inspected only when its path falls into a
-        planning class (see ``_VISIBILITY_CANDIDATE_GLOBS``); the verdict within
+        planning class (``config.candidate_globs``); the verdict within
         that class is content, not name:
 
         * a JSON schema (``$schema`` + object/properties) is ``product`` — a
@@ -1115,8 +1139,14 @@ class MirrorHandler:
             )
 
         cfg = config or VisibilityConfig()
+        if not cfg.candidate_globs:
+            raise MirrorDestinationError(
+                f"cannot classify visibility of '{path}': no candidate globs are "
+                "configured. The engine carries no default planning paths; a "
+                "gate with no candidates would pass everything."
+            )
 
-        if not MirrorHandler._matches_candidate(path):
+        if not MirrorHandler._matches_candidate(path, cfg.candidate_globs):
             return VisibilityDecision(path=path, kind="product", reason="not a planning class")
 
         if MirrorHandler._is_json_schema(content):
@@ -1257,9 +1287,9 @@ class MirrorHandler:
         )
 
     @staticmethod
-    def _matches_candidate(path: str) -> bool:
+    def _matches_candidate(path: str, globs: Sequence[str]) -> bool:
         """True when ``path`` falls into a planning class (candidate, not verdict)."""
-        return any(fnmatch.fnmatch(path, g) for g in _VISIBILITY_CANDIDATE_GLOBS)
+        return any(fnmatch.fnmatch(path, g) for g in globs)
 
     @staticmethod
     def _is_json_schema(content: str) -> bool:
@@ -1373,7 +1403,7 @@ class MirrorHandler:
         return bool(permissions.get("push", False))
 
 
-_FORGE_HOSTS: dict[str, str] = {"github": "github.com", "gitlab": "gitlab.com"}
+_FORGE_HOSTS: dict[str, str] = DEFAULT_FORGE_HOSTS
 
 
 async def _run_git(argv: list[str], cwd: str) -> tuple[int, str]:
