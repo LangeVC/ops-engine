@@ -7,7 +7,7 @@ the top-level package:
 from ops_engine import <name>
 ```
 
-As of this contract, `ops_engine.__all__` declares 36 names. Every name is
+As of this contract, `ops_engine.__all__` declares 46 names. Every name is
 classified below as either **contract** (consumers may rely on it) or
 **internal** (exposed only because Python has no hard privacy; not a promise).
 
@@ -40,7 +40,7 @@ mirror-destination methods named in prose below, the ones whose semantics are
 promised. Other methods on public classes are not signature-guarded here.
 
 By the same line, a model declared `contract: true` promises the **name**, not
-the **shape**. `MirrorConfig` is one of the 36 exports and is classified
+the **shape**. `MirrorConfig` is one of the 46 exports and is classified
 `contract: true` by name only: the `methods` array above gates the
 mirror-destination methods on `MirrorHandler`, not the fields of any model. A
 consumer may rely on the name `MirrorConfig` remaining importable and classified
@@ -331,6 +331,54 @@ refusal raises a subclass of `MirrorTagIdentityError` (a `RuntimeError`) whose
 message names the refusal and the credential-free URL; a credential is never
 formatted into a message. Nothing is pushed before the canonical identity is
 established. The module imports only the standard library.
+
+## One release path
+
+A tag becomes a release through one path and one publication function. The
+webhook handler (`ReleaseHandler.process_event` on a tag push) and the tag
+workflow (`.forgejo/workflows/forgejo-release.yml`) both publish through
+`ReleaseHandler.publish_release`; neither carries a publication of its own. Both
+run the three release gates above before it: the title and the CHANGELOG section
+through `check_release_title` and `extract_changelog_section`, and the audience
+through `check_release_notes_audience` (the workflow reaches the last one by
+`scripts/release_notes_audience_gate.py`, which delegates to it). The release
+reconcile below publishes through the webhook handler's path, so it too is not a
+second way to release.
+
+`ReleaseHandler.publish_release` is described under *Release publication to every
+destination (ADP-003)*. On the webhook path the order is fixed: the gates, the
+destinations read from `.ops.yaml` at the tag (a repository with no `release`
+destination is refused), the mirror tag identity (`push_canonical_tag`), then
+`publish_release`. A refusal in any step before the identity step happens before
+a tag is pushed or a release object exists. A tag push handed to
+`ReleaseHandler.process_event` without a `ReleaseContext` is refused by name
+(`MissingReleaseContextError`).
+
+## Release reconcile entry point
+
+`ReconcileHandler.reconcile_release_tags` (`ReconcileHandler` is a `contract`
+name above) publishes the releases that are missing for tags that exist. It is
+an `async` static method.
+
+```python
+ReconcileHandler.reconcile_release_tags(adapter, repo, release_config, context, reconcile_config=None, commit_date=None) -> ReleaseReconcileReport
+```
+
+Each tag of `repo` that matches `release_config.tag_pattern` is compared with the
+release objects on **every** `release` destination; a tag missing on at least one
+goes through the path in *One release path* (`skip_existing`, so a destination
+that already holds the release is left alone). A tag that is refused or fails is
+recorded in the report's `failed` and the other tags still run; the report also
+carries `published` and `up_to_date`. The mirror state sync is never called.
+
+The switch is `ReleaseConfig.reconcile` (`release.reconcile`, default `true`): a
+repository whose `release.enabled` or `release.reconcile` is false is not read.
+`ReconcileConfig.since` (`reconcile.since`) is a tag name or an ISO date
+(`YYYY-MM-DD`) and is **required**: only tags at or after it are considered, and
+a call without it raises `ReconcileSinceError` naming `reconcile.since` before
+any forge call. A date is compared with `commit_date(repo, sha)`, which a caller
+that passes a date must supply. `ReleaseReconcileReport` and
+`ReconcileSinceError` are not themselves promised names.
 
 ## Unpromised names
 
