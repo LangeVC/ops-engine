@@ -65,7 +65,11 @@ def world(tmp_path, monkeypatch):
     return canon, pub, priv
 
 
+GLOBS = [".skillweave/**", "**/prd*.json"]
+
+
 def _sync(canon, audit, **kw):
+    kw.setdefault("candidate_globs", GLOBS)
     return asyncio.run(
         MirrorHandler.sync_state(
             f"file://{canon}", _dests(), audit=audit, **kw
@@ -433,7 +437,7 @@ def test_push_event_refuses_a_branch_forked_from_a_substrate_main(tmp_path, monk
     event = {"event_type": "push", "raw": {"ref": "refs/heads/feat", "after": sha,
                                            "before": "0" * 40}}
     audit = []
-    asyncio.run(MirrorHandler.push_event(event, _dests(), repo_dir=str(work), audit=audit))
+    asyncio.run(MirrorHandler.push_event(event, _dests(), repo_dir=str(work), audit=audit, candidate_globs=GLOBS))
     assert "prd.json" not in _objects(pub)
     assert not _has_ref(pub, "refs/heads/feat")
     assert _has_ref(priv, "refs/heads/feat")
@@ -446,5 +450,5 @@ def test_clean_branch_from_clean_main_still_reaches_public(tmp_path, monkeypatch
     assert _has_ref(pub, "refs/heads/feat") and _has_ref(pub, "refs/heads/main")
     event = {"event_type": "push", "raw": {"ref": "refs/heads/feat", "after": sha,
                                            "before": "0" * 40}}
-    lines = asyncio.run(MirrorHandler.push_event(event, _dests(), repo_dir=str(work)))
+    lines = asyncio.run(MirrorHandler.push_event(event, _dests(), repo_dir=str(work), candidate_globs=GLOBS))
     assert not any(l.startswith("mirror-refused") for l in lines)

@@ -81,6 +81,7 @@ def test_mirror_destination_fields_are_received():
                 "langevc": {
                     "repositories": {
                         "ops-engine": {
+                            "visibility_candidate_globs": ["docs/private/**"],
                             "mirror": {
                                 "enabled": True,
                                 "github": "LangeVC/ops-engine",
@@ -89,6 +90,7 @@ def test_mirror_destination_fields_are_received():
                             }
                         },
                         "txt-humanizer": {
+                            "visibility_candidate_globs": ["docs/private/**"],
                             "github_name": "txtHumanizer",
                             "mirror": {
                                 "enabled": True,
@@ -193,6 +195,7 @@ def _repo_with_destinations(destinations, mirror=None):
             "langevc": OrgConfig(
                 repositories={
                     "ops-engine": RepoConfig(
+                        visibility_candidate_globs=["docs/private/**"],
                         destinations=destinations,
                         mirror=mirror,
                     )
@@ -320,6 +323,7 @@ def test_github_only_destination_without_forgejo():
             "solo": OrgConfig(
                 repositories={
                     "solo-repo": RepoConfig(
+                        visibility_candidate_globs=["docs/private/**"],
                         destinations=[
                             Destination(forge="github", repo="solo/solo-repo", role="mirror", visibility="public"),
                         ]
@@ -334,3 +338,131 @@ def test_github_only_destination_without_forgejo():
     assert out[0].forge == "github"
     assert out[0].repo == "solo/solo-repo"
     assert "forgejo" not in out[0].model_dump().values()
+
+
+# --- OE-037 (D14): no default candidate globs; destination host --------------
+
+import pytest
+from pydantic import ValidationError
+
+
+def test_public_mirror_destination_without_candidate_globs_is_refused_naming_the_repo():
+    with pytest.raises(ValidationError) as excinfo:
+        RepoConfig(
+            destinations=[
+                Destination(forge="github", repo="exampleorg/pub", role="mirror", visibility="public")
+            ]
+        )
+    assert "exampleorg/pub" in str(excinfo.value)
+    assert "visibility_candidate_globs" in str(excinfo.value)
+
+
+def test_public_mirror_destination_with_candidate_globs_loads():
+    config = RepoConfig(
+        visibility_candidate_globs=["docs/private/**"],
+        destinations=[
+            Destination(forge="github", repo="exampleorg/pub", role="mirror", visibility="public")
+        ],
+    )
+    assert config.visibility_candidate_globs == ["docs/private/**"]
+
+
+def test_public_deprecated_alias_without_candidate_globs_is_refused():
+    with pytest.raises(ValidationError) as excinfo:
+        RepoConfig(mirror=MirrorConfig(github="exampleorg/pub", visibility="public"))
+    assert "exampleorg/pub" in str(excinfo.value)
+
+
+def test_private_destination_needs_no_candidate_globs():
+    config = RepoConfig(
+        destinations=[
+            Destination(forge="github", repo="exampleorg/priv", role="mirror", visibility="private")
+        ]
+    )
+    assert config.visibility_candidate_globs == []
+
+
+def test_resolved_repo_config_keeps_the_repos_own_candidate_globs():
+    config = _repo_with_destinations(
+        [Destination(forge="github", repo="exampleorg/pub", role="mirror", visibility="public")]
+    )
+    resolved = config.get_repo_config("langevc", "ops-engine")
+    assert resolved.visibility_candidate_globs == ["docs/private/**"]
+
+
+def test_mirror_destination_on_an_unknown_forge_without_host_is_refused_at_load():
+    with pytest.raises(ValidationError) as excinfo:
+        RepoConfig(
+            destinations=[
+                Destination(forge="forgejo", repo="exampleorg/priv", role="mirror", visibility="private")
+            ]
+        )
+    assert "exampleorg/priv" in str(excinfo.value)
+    assert "host" in str(excinfo.value)
+
+
+def test_mirror_destination_on_an_unknown_forge_with_host_loads():
+    config = RepoConfig(
+        destinations=[
+            Destination(
+                forge="forgejo", repo="exampleorg/priv", role="mirror",
+                visibility="private", host="git.example.org",
+            )
+        ]
+    )
+    assert config.destinations[0].host == "git.example.org"
+
+
+def test_known_forges_need_no_host():
+    config = RepoConfig(
+        destinations=[
+            Destination(forge="github", repo="exampleorg/a", role="mirror", visibility="private"),
+            Destination(forge="gitlab", repo="exampleorg/b", role="mirror", visibility="private"),
+        ]
+    )
+    assert [d.host for d in config.destinations] == ["", ""]
+
+
+# --- OE-037: Layer 3 over Layer 2 keeps the no-default-globs rule ------------
+
+def _public_dest():
+    return Destination(forge="github", repo="exampleorg/pub", role="mirror", visibility="public")
+
+
+def test_layer3_emptying_the_globs_over_a_public_destination_is_refused_at_load():
+    import pytest
+
+    layer2 = RepoConfig(destinations=[_public_dest()], visibility_candidate_globs=["x/**"])
+    layer3 = RepoConfig(visibility_candidate_globs=[])
+    with pytest.raises(ValueError) as excinfo:
+        layer2.merge_layer3(layer3)
+    assert "exampleorg/pub" in str(excinfo.value)
+    assert "visibility_candidate_globs" in str(excinfo.value)
+
+
+def test_layer3_public_destination_relying_on_layer2_globs_loads(tmp_path):
+    from ops_engine.config_loader import load_ops_yaml
+
+    (tmp_path / ".ops.yaml").write_text(
+        "destinations:\n"
+        "  - {forge: github, repo: exampleorg/pub, role: mirror, visibility: public}\n",
+        encoding="utf-8",
+    )
+    layer3 = load_ops_yaml(tmp_path)
+    merged = RepoConfig(visibility_candidate_globs=["x/**"]).merge_layer3(layer3)
+    assert merged.visibility_candidate_globs == ["x/**"]
+    assert merged.destinations[0].visibility == "public"
+
+
+def test_layer3_public_destination_with_no_globs_anywhere_is_refused_at_merge(tmp_path):
+    import pytest
+    from ops_engine.config_loader import load_ops_yaml
+
+    (tmp_path / ".ops.yaml").write_text(
+        "destinations:\n"
+        "  - {forge: github, repo: exampleorg/pub, role: mirror, visibility: public}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError) as excinfo:
+        RepoConfig().merge_layer3(load_ops_yaml(tmp_path))
+    assert "exampleorg/pub" in str(excinfo.value)

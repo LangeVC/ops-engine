@@ -301,3 +301,53 @@ def test_audit_selftest_runs_hermetic():
     assert res.returncode == 0, res.stdout + res.stderr
     assert "class 5" in res.stdout
 
+
+
+_OE037_METHODS = {
+    ("MirrorHandler", "push_event"),
+    ("MirrorHandler", "sync_state"),
+    ("MirrorHandler", "sweep_deleted_refs"),
+    ("ReconcileHandler", "measure_drift"),
+    ("ReconcileHandler", "reconcile_mirror"),
+}
+_OE037_FIELDS = {
+    ("RepoConfig", "visibility_candidate_globs"),
+    ("Destination", "host"),
+}
+
+
+def test_oe037_methods_are_declared_and_their_class_is_exported():
+    """push_event, sync_state, sweep_deleted_refs, measure_drift and
+    reconcile_mirror are declared with parameters, and the class that carries
+    each one is in ``__all__`` (so the method is reachable from the package)."""
+    declaration = _load_declaration()
+    declared = {(m["class"], m["name"]) for m in declaration["methods"]}
+    assert _OE037_METHODS <= declared, sorted(_OE037_METHODS - declared)
+    exported = set(_actual_all())
+    for class_name, _name in _OE037_METHODS:
+        assert class_name in exported, f"{class_name} is not exported"
+    # the declared methods exist in source with the declared signature
+    # (test_promised_method_signatures_match_code); here: they are reachable
+    package = importlib.import_module("ops_engine")
+    for class_name, name in _OE037_METHODS:
+        assert callable(getattr(getattr(package, class_name), name))
+
+
+def test_oe037_fields_are_declared_and_exist_in_source():
+    declaration = _load_declaration()
+    fields = declaration.get("fields", [])
+    declared = {(f["class"], f["name"]): f for f in fields}
+    assert _OE037_FIELDS <= set(declared), sorted(_OE037_FIELDS - set(declared))
+    for (class_name, name), f in declared.items():
+        tree = ast.parse(_module_file(f["module"]).read_text(encoding="utf-8"))
+        cls = next(
+            (n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == class_name),
+            None,
+        )
+        assert cls is not None, f"{f['module']}.{class_name} not found in source"
+        names = {
+            n.target.id
+            for n in cls.body
+            if isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name)
+        }
+        assert name in names, f"{class_name}.{name} is declared but not a field in source"

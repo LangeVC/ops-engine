@@ -279,6 +279,7 @@ def _five_layover_configs():
                 "langevc": {
                     "repositories": {
                         "ops-engine": {
+                            "visibility_candidate_globs": ["docs/private/**"],
                             "mirror": {
                                 "enabled": True,
                                 "github": "LangeVC/ops-engine",

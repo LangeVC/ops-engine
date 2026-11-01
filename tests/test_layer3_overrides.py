@@ -26,6 +26,7 @@ def _layer2():
             "langevc": OrgConfig(
                 repositories={
                     "ops-engine": RepoConfig(
+                        visibility_candidate_globs=["docs/private/**"],
                         destinations=[
                             Destination(
                                 forge="github",

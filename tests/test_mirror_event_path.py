@@ -396,7 +396,7 @@ def test_p5_non_ascii_candidate_name_does_not_dodge_the_glob(tmp_path, monkeypat
 def test_config_layer_declares_candidate_globs():
     from ops_engine.config_loader import RepoConfig
 
-    assert ".skillweave/**" in RepoConfig().visibility_candidate_globs
+    assert RepoConfig().visibility_candidate_globs == []  # OE-037: no default
     assert RepoConfig(visibility_candidate_globs=["x/**"]).visibility_candidate_globs == ["x/**"]
 
 

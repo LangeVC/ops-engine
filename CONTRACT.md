@@ -100,7 +100,8 @@ of scope for this revision.
     {"name": "ReleaseNotesAudienceError",     "kind": "class",    "contract": true},
     {"name": "push_canonical_tag",             "kind": "function", "contract": true},
     {"name": "MirrorTagIdentity",             "kind": "class",    "contract": true},
-    {"name": "MirrorTagIdentityError",        "kind": "class",    "contract": true}
+    {"name": "MirrorTagIdentityError",        "kind": "class",    "contract": true},
+    {"name": "ReconcileHandler",              "kind": "class",    "contract": true}
   ],
   "methods": [
     {
@@ -122,6 +123,72 @@ of scope for this revision.
       "required_args": ["destination"],
       "kwargs": ["token", "api_base"],
       "required_kwargs": []
+    },
+    {
+      "class": "MirrorHandler",
+      "module": "ops_engine.modules.mirror",
+      "name": "push_event",
+      "kind": "async_staticmethod",
+      "args": ["event", "destinations"],
+      "required_args": ["event", "destinations"],
+      "kwargs": ["repo_dir", "runner", "audit", "candidate_globs"],
+      "required_kwargs": ["repo_dir"]
+    },
+    {
+      "class": "MirrorHandler",
+      "module": "ops_engine.modules.mirror",
+      "name": "sync_state",
+      "kind": "async_staticmethod",
+      "args": ["canonical_url", "destinations"],
+      "required_args": ["canonical_url", "destinations"],
+      "kwargs": ["runner", "audit", "workdir", "candidate_globs"],
+      "required_kwargs": []
+    },
+    {
+      "class": "MirrorHandler",
+      "module": "ops_engine.modules.mirror",
+      "name": "sweep_deleted_refs",
+      "kind": "async_staticmethod",
+      "args": ["canonical_url", "destinations"],
+      "required_args": ["canonical_url", "destinations"],
+      "kwargs": ["runner", "audit", "workdir"],
+      "required_kwargs": []
+    },
+    {
+      "class": "ReconcileHandler",
+      "module": "ops_engine.modules.reconcile",
+      "name": "measure_drift",
+      "kind": "async_staticmethod",
+      "args": ["primary", "primary_repo", "mirror", "mirror_repo"],
+      "required_args": ["primary", "primary_repo", "mirror", "mirror_repo"],
+      "kwargs": [],
+      "required_kwargs": []
+    },
+    {
+      "class": "ReconcileHandler",
+      "module": "ops_engine.modules.reconcile",
+      "name": "reconcile_mirror",
+      "kind": "async_staticmethod",
+      "args": ["primary", "primary_repo", "mirror", "mirror_repo", "canonical_url", "destinations"],
+      "required_args": ["primary", "primary_repo", "mirror", "mirror_repo", "canonical_url", "destinations"],
+      "kwargs": ["runner", "audit", "workdir", "measure_destinations", "candidate_globs"],
+      "required_kwargs": []
+    }
+  ],
+  "fields": [
+    {
+      "class": "RepoConfig",
+      "module": "ops_engine.config_loader",
+      "name": "visibility_candidate_globs",
+      "type": "list[str]",
+      "default": "[]"
+    },
+    {
+      "class": "Destination",
+      "module": "ops_engine.config_loader",
+      "name": "host",
+      "type": "str",
+      "default": "\"\""
     }
   ]
 }
@@ -155,6 +222,44 @@ It takes **no parameters**. It returns the running ops-engine version and the
 SHA-256 of the Layer-2 `config.yml` bytes the config loader loaded; a value
 that cannot be determined is the string `"unknown"`, and the call never raises.
 The `RuntimeIdentity` return type is not itself a promised name.
+
+## Mirror push, state sync, sweep and reconcile (OE-037)
+
+`ReconcileHandler` (a `contract` name above) is the class
+`ops_engine.modules.reconcile.ReconcileHandler`; `MirrorHandler` was already
+promised. Five of their methods are declared in the `methods` array of the
+declaration block with their parameters, and two configuration fields in its
+`fields` array. All five methods are `async` static methods.
+
+```python
+MirrorHandler.push_event(event, destinations, *, repo_dir, runner=None, audit=None, candidate_globs=None) -> list[str]
+MirrorHandler.sync_state(canonical_url, destinations, *, runner=None, audit=None, workdir=None, candidate_globs=None) -> list[str]
+MirrorHandler.sweep_deleted_refs(canonical_url, destinations, *, runner=None, audit=None, workdir=None) -> list[str]
+ReconcileHandler.measure_drift(primary, primary_repo, mirror, mirror_repo) -> DriftReport
+ReconcileHandler.reconcile_mirror(primary, primary_repo, mirror, mirror_repo, canonical_url, destinations, *, runner=None, audit=None, workdir=None, measure_destinations=None, candidate_globs=None) -> DriftReport
+```
+
+`push_event` pushes exactly the ref a push event names to every `mirror`
+destination; `sync_state` pushes every canonical head and tag from a fresh
+clone and never deletes; `sweep_deleted_refs` deletes mirror refs that no
+longer exist on the canonical side, and only when called; `measure_drift`
+compares heads and tags of both forges read-only; `reconcile_mirror` measures,
+state-syncs when behind, and measures again. The first three return the audit
+lines of the call. `candidate_globs` are the path globs the visibility gate
+judges on a public destination.
+
+```python
+RepoConfig.visibility_candidate_globs: list[str] = []
+Destination.host: str = ""
+```
+
+`visibility_candidate_globs` are the adopter's own path globs that may carry
+planning substrate. The engine carries **no default** globs: a repository with
+a public mirror destination that declares none is refused at configuration
+load. `Destination.host` is the remote host of a destination; empty means the
+default host of its forge (`github` and `gitlab` have one). A `mirror`
+destination on any other forge must declare `host`, or the configuration is
+refused at load.
 
 ## Release gates
 
