@@ -32,7 +32,7 @@ CHANGELOG = "# Changes\n\n## v1.2.3\n\n- Faster start.\n\n## v1.2.2\n\n- Older.\
 OPS_YAML = """\
 destinations:
   - {forge: forgejo, repo: exampleorg/engine, role: release}
-  - {forge: github, repo: exampleorg/mirror-only, role: mirror}
+  - {forge: github, repo: exampleorg/mirror-only, role: mirror, visibility: private}
 """
 
 
@@ -146,7 +146,7 @@ async def test_tag_push_runs_gates_then_identity_then_publish(tmp_path, monkeypa
         ),
         ({"ops_yaml": None}, TAG, MissingOpsYamlError),
         (
-            {"ops_yaml": "destinations:\n  - {forge: github, repo: exampleorg/m, role: mirror}\n"},
+            {"ops_yaml": "destinations:\n  - {forge: github, repo: exampleorg/m, role: mirror, visibility: private}\n"},
             TAG,
             MissingReleaseDestinationsError,
         ),
