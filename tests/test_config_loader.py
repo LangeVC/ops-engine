@@ -421,3 +421,48 @@ def test_known_forges_need_no_host():
         ]
     )
     assert [d.host for d in config.destinations] == ["", ""]
+
+
+# --- OE-037: Layer 3 over Layer 2 keeps the no-default-globs rule ------------
+
+def _public_dest():
+    return Destination(forge="github", repo="exampleorg/pub", role="mirror", visibility="public")
+
+
+def test_layer3_emptying_the_globs_over_a_public_destination_is_refused_at_load():
+    import pytest
+
+    layer2 = RepoConfig(destinations=[_public_dest()], visibility_candidate_globs=["x/**"])
+    layer3 = RepoConfig(visibility_candidate_globs=[])
+    with pytest.raises(ValueError) as excinfo:
+        layer2.merge_layer3(layer3)
+    assert "exampleorg/pub" in str(excinfo.value)
+    assert "visibility_candidate_globs" in str(excinfo.value)
+
+
+def test_layer3_public_destination_relying_on_layer2_globs_loads(tmp_path):
+    from ops_engine.config_loader import load_ops_yaml
+
+    (tmp_path / ".ops.yaml").write_text(
+        "destinations:\n"
+        "  - {forge: github, repo: exampleorg/pub, role: mirror, visibility: public}\n",
+        encoding="utf-8",
+    )
+    layer3 = load_ops_yaml(tmp_path)
+    merged = RepoConfig(visibility_candidate_globs=["x/**"]).merge_layer3(layer3)
+    assert merged.visibility_candidate_globs == ["x/**"]
+    assert merged.destinations[0].visibility == "public"
+
+
+def test_layer3_public_destination_with_no_globs_anywhere_is_refused_at_merge(tmp_path):
+    import pytest
+    from ops_engine.config_loader import load_ops_yaml
+
+    (tmp_path / ".ops.yaml").write_text(
+        "destinations:\n"
+        "  - {forge: github, repo: exampleorg/pub, role: mirror, visibility: public}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError) as excinfo:
+        RepoConfig().merge_layer3(load_ops_yaml(tmp_path))
+    assert "exampleorg/pub" in str(excinfo.value)

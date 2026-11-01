@@ -402,3 +402,78 @@ def test_default_branch_is_derived_not_hard_coded_for_the_real_default():
     paths, read = _carried_tree_default_branch()
     assert _gate_ref("master", default_branch="master", paths=paths, read=read).is_default
     assert _gate_ref("master", default_branch="main", paths=paths, read=read).is_default is False
+
+
+# --- OE-037: a destination may declare its host; no default candidate globs ---
+
+import asyncio  # noqa: E402
+
+from ops_engine.config_loader import Destination  # noqa: E402
+
+_SHA = "a" * 40
+
+
+class _Runner:
+    def __init__(self):
+        self.calls = []
+
+    async def __call__(self, argv, cwd):
+        self.calls.append((list(argv), cwd))
+        return 0, ""
+
+
+def _push_event():
+    return {
+        "event_type": "push",
+        "repo": "example/repo",
+        "raw": {"ref": "refs/heads/feature-x", "after": _SHA},
+    }
+
+
+def _push(dests, runner, audit):
+    return asyncio.run(
+        MirrorHandler.push_event(
+            _push_event(), dests, repo_dir="/work/repo", runner=runner, audit=audit
+        )
+    )
+
+
+def _hosted_dest(host=""):
+    return Destination(
+        forge="forgejo", repo="exampleorg/priv", role="mirror",
+        visibility="private", host=host,
+    )
+
+
+def test_destination_on_an_unknown_forge_is_pushed_to_when_it_declares_a_host():
+    runner, audit = _Runner(), []
+    _push([_hosted_dest("git.example.org")], runner, audit)
+    assert [argv for argv, _ in runner.calls] == [
+        ["git", "push", "https://git.example.org/exampleorg/priv.git", f"+{_SHA}:refs/heads/feature-x"]
+    ]
+
+
+def test_declared_host_overrides_the_forge_default():
+    dest = Destination(
+        forge="github", repo="exampleorg/priv", role="mirror",
+        visibility="private", host="ghe.example.org",
+    )
+    runner = _Runner()
+    _push([dest], runner, [])
+    assert runner.calls[0][0][2] == "https://ghe.example.org/exampleorg/priv.git"
+
+
+def test_unknown_forge_without_host_is_refused_and_audited_not_skipped():
+    runner, audit = _Runner(), []
+    lines = _push([_hosted_dest()], runner, audit)
+    assert runner.calls == []
+    assert len(lines) == 1 and lines == audit
+    assert lines[0].startswith("mirror-refused") and "reason=no-host" in lines[0]
+
+
+def test_public_destination_judged_with_no_candidate_globs_is_refused():
+    dest = Destination(forge="github", repo="exampleorg/pub", role="mirror", visibility="public")
+    runner, audit = _Runner(), []
+    lines = _push([dest], runner, audit)
+    assert [a for a, _ in runner.calls if a[1] == "push"] == []
+    assert "reason=no-candidate-globs" in lines[0]

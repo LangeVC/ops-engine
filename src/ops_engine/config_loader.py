@@ -11,7 +11,14 @@ from pathlib import Path
 from typing import Any, Optional
 
 import yaml
-from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 
 _DESTINATION_REMOVAL_VERSION = "4.0.0"
@@ -461,7 +468,7 @@ class RepoConfig(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def _public_destination_declares_globs(self) -> "RepoConfig":
+    def _public_destination_declares_globs(self, info: ValidationInfo) -> "RepoConfig":
         """Refuse a public mirror destination without ``visibility_candidate_globs`` (OE-037, D14).
 
         Only ``role: mirror`` destinations are checked: they are the ones the
@@ -470,6 +477,14 @@ class RepoConfig(BaseModel):
         The engine carries no default globs: without the adopter's own, the
         visibility gate would find no candidate path and let everything through.
         """
+        if (info.context or {}).get("defer_candidate_globs"):
+            # A Layer-3 ``.ops.yaml`` is validated alone, but it may rely on the
+            # globs Layer 2 declares; the check runs on the merged result.
+            return self
+        return self._require_candidate_globs()
+
+    def _require_candidate_globs(self) -> "RepoConfig":
+        """The D14 check itself; also run on the Layer-2 + Layer-3 merge."""
         if self.visibility_candidate_globs:
             return self
         public: list[str] = [
@@ -554,7 +569,11 @@ class RepoConfig(BaseModel):
         requires reading two files to know its value.
         """
         overrides = {field: getattr(layer3, field) for field in layer3.model_fields_set}
-        return self.model_copy(update=overrides, deep=True)
+        merged = self.model_copy(update=overrides, deep=True)
+        # model_copy does not revalidate: a Layer 3 that sets the globs empty over
+        # a public Layer-2 destination must be refused here, at load (OE-037, D14).
+        merged._require_candidate_globs()
+        return merged
 
 
 class ForgejoIdentity(BaseModel):
@@ -769,7 +788,9 @@ def load_ops_yaml(repo_dir: Path | str) -> Optional[RepoConfig]:
             path, detail=f"expected a mapping, got {type(raw).__name__}"
         )
     try:
-        return RepoConfig.model_validate(raw)
+        return RepoConfig.model_validate(
+            raw, context={"defer_candidate_globs": True}
+        )
     except ValidationError as exc:
         raise OpsYamlError(path, detail=str(exc)) from exc
 

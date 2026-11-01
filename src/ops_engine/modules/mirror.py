@@ -1294,7 +1294,7 @@ class MirrorHandler:
     @staticmethod
     def _is_json_schema(content: str) -> bool:
         """A JSON-schema-shaped document (``$schema`` + object properties), not a
-        PRD instance. The shipped ``prd.schema.json`` is this shape and must
+        planning-document instance. A shipped schema file is this shape and must
         never block."""
         return (
             '"$schema"' in content
