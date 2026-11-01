@@ -31,6 +31,8 @@ from .modules.dispatcher import CronDispatcher
 from .modules.release import ReleaseHandler
 from .modules.merge import MergeHandler
 from .modules.mirror import MirrorHandler
+# The reconcile handler (OE-037). The module is reconcile; no exported name equals it.
+from .modules.reconcile import ReconcileHandler
 from .modules.notification import NotificationHandler
 from .modules.migration_runner import (
     MigrationRunner,
@@ -114,4 +116,6 @@ __all__ = [
     "push_canonical_tag",
     "MirrorTagIdentity",
     "MirrorTagIdentityError",
+    # Reconcile (OE-037)
+    "ReconcileHandler",
 ]
