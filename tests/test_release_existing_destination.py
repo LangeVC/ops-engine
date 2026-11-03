@@ -31,6 +31,7 @@ from ops_engine.modules.release import ReleaseHandler
 
 REPO = "exampleorg/engine"
 TAG = "v9.9.9"
+TITLE = "engine v9.9.9"  # the default name template rendered for REPO and TAG
 
 
 def _config(forge: str) -> OpsEngineConfig:
@@ -173,7 +174,154 @@ async def test_release_exists_false_when_neither_lookup_finds_the_tag(make):
 async def test_second_publication_is_a_no_op(forge, make, status, body, tmp_path):
     # The draft exists on the destination, by-tag cannot see it, the list can:
     # the second call finds it first and never posts.
-    dest = FakeDestination(status, body, listed=[{"tag_name": TAG, "draft": True}])
+    dest = FakeDestination(status, body, listed=[{"tag_name": TAG, "draft": True, "name": TITLE,
+                                        "assets": [{"name": "a.whl"}]}])
     report, _ = await _publish(forge, make(dest), tmp_path)
     assert report.skipped and not report.failed
     assert dest.creates() == 0
+
+
+# --- OE-039 dispatch 2: an incomplete existing release, and 409/422 detail ----
+
+RELEASE_ID = 4711
+
+
+class RecordingNotifications:
+    """Capture the body ``_notify_partial`` hands to the notification channel."""
+
+    def __init__(self, monkeypatch):
+        self.bodies: list[str] = []
+
+        async def fake_process_event(event, config, context=None):
+            self.bodies.append((context or {}).get("body", ""))
+
+        monkeypatch.setattr(
+            "ops_engine.modules.release.NotificationHandler.process_event",
+            fake_process_event,
+        )
+
+
+def _notifying_config(forge: str) -> OpsEngineConfig:
+    return OpsEngineConfig.load(
+        {
+            "orgs": {
+                "exampleorg": {
+                    "repositories": {
+                        "engine": {
+                            "destinations": [
+                                {"forge": forge, "repo": REPO, "role": "release"}
+                            ],
+                            "notifications": {
+                                "enabled": True,
+                                "channels": [{"type": "slack", "url": "https://hook.invalid/x"}],
+                            },
+                        }
+                    }
+                }
+            }
+        }
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("make,forge", [(_forgejo, "forgejo"), (_github, "github")])
+async def test_existing_release_without_assets_is_incomplete_and_names_the_files(
+    make, forge, tmp_path
+):
+    dest = FakeDestination(
+        409, listed=[{"id": RELEASE_ID, "tag_name": TAG, "name": TITLE, "assets": []}]
+    )
+    report, audit = await _publish(forge, make(dest), tmp_path)
+    assert report.partial and report.failed and not report.skipped
+    assert dest.creates() == 0
+    assert len(audit) == 1
+    assert "result=incomplete" in audit[0]
+    assert "missing assets: a.whl" in audit[0]
+    assert f"existing_release_id={RELEASE_ID}" in audit[0]
+
+
+@pytest.mark.asyncio
+async def test_existing_release_with_another_title_is_incomplete(tmp_path):
+    dest = FakeDestination(
+        409,
+        listed=[{"id": RELEASE_ID, "tag_name": TAG, "name": "something else",
+                 "assets": [{"name": "a.whl"}]}],
+    )
+    report, audit = await _publish("forgejo", _forgejo(dest), tmp_path)
+    assert report.partial and not report.skipped
+    assert "title is 'something else'" in audit[0] and repr(TITLE) in audit[0]
+    assert "missing assets" not in audit[0]
+
+
+@pytest.mark.asyncio
+async def test_incomplete_existing_release_reaches_the_notification(tmp_path, monkeypatch):
+    sink = RecordingNotifications(monkeypatch)
+    dest = FakeDestination(
+        409, listed=[{"id": RELEASE_ID, "tag_name": TAG, "name": TITLE, "assets": []}]
+    )
+    report, _ = await _publish("forgejo", _forgejo(dest), tmp_path)
+    from ops_engine.modules.release import _notify_partial
+
+    await _notify_partial(_notifying_config("forgejo"), REPO, TAG, report)
+    assert len(sink.bodies) == 1
+    assert "incomplete existing release" in sink.bodies[0]
+    assert "a.whl" in sink.bodies[0]
+    assert f"existing_release_id={RELEASE_ID}" in sink.bodies[0]
+
+
+@pytest.mark.asyncio
+async def test_create_409_with_no_visible_release_is_still_skipped(tmp_path):
+    # By-tag 404 and an empty list (the token cannot see drafts): the create
+    # answers 409. The follow-up lookup also finds nothing, so the destination
+    # is skipped as before; with the release visible it is checked like any other.
+    dest = FakeDestination(409)
+    report, audit = await _publish("forgejo", _forgejo(dest), tmp_path)
+    assert report.skipped and "incomplete" not in audit[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("make,forge,status,body", [
+    (_forgejo, "forgejo", 409, None),
+    (_github, "github", 422, {"message": "Validation Failed",
+                              "errors": [{"code": "invalid", "field": "target_commitish"}]}),
+])
+async def test_partial_publication_names_http_status_and_existing_release_id(
+    make, forge, status, body, tmp_path, monkeypatch
+):
+    # Without skip_existing the duplicate answer is a failure: the audit line
+    # and the notification must name the status and the id of the release the
+    # destination already holds.
+    sink = RecordingNotifications(monkeypatch)
+    dest = FakeDestination(
+        status, body, listed=[{"id": RELEASE_ID, "tag_name": TAG, "name": TITLE}]
+    )
+    audit: list[str] = []
+    art = tmp_path / "dist"
+    art.mkdir()
+    (art / "a.whl").write_bytes(b"x")
+    report = await ReleaseHandler.publish_release(
+        _config(forge), REPO, TAG, "notes", art, adapters=[make(dest)], audit=audit,
+    )
+    assert report.partial
+    expected = f"http={status} existing_release_id={RELEASE_ID}"
+    assert audit == [
+        f"release-publish tag={TAG} dest={report.failed[0]} result=failed {expected}"
+    ]
+    from ops_engine.modules.release import _notify_partial
+
+    await _notify_partial(_notifying_config(forge), REPO, TAG, report)
+    assert expected in sink.bodies[0]
+
+
+@pytest.mark.asyncio
+async def test_a_failure_that_is_not_409_or_422_carries_no_status_detail(tmp_path):
+    dest = FakeDestination(500)
+    audit: list[str] = []
+    art = tmp_path / "dist"
+    art.mkdir()
+    (art / "a.whl").write_bytes(b"x")
+    report = await ReleaseHandler.publish_release(
+        _config("forgejo"), REPO, TAG, "notes", art, adapters=[_forgejo(dest)], audit=audit,
+    )
+    assert report.partial
+    assert audit == [f"release-publish tag={TAG} dest={report.failed[0]} result=failed"]

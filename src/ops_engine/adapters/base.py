@@ -111,6 +111,18 @@ class ForgeAdapter(ABC):
         """
         pass
 
+    async def find_release(
+        self, repo_full_name: str, tag_name: str
+    ) -> Optional[dict[str, Any]]:
+        """Return the destination's release for the tag (any state), or None.
+
+        The dict is the forge's own release object: ``id``, ``name`` (the
+        title) and ``assets`` (each with a ``name``). Not abstract: the default
+        answers None, meaning "no details known", so a caller never invents a
+        mismatch for an adapter that cannot show them.
+        """
+        return None
+
     async def release_conflict(
         self, exc: Exception, repo_full_name: str, tag_name: str
     ) -> bool:

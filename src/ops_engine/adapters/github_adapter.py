@@ -245,10 +245,14 @@ class GithubAdapter(ForgeAdapter):
         resp = await self._request("GET", f"/repos/{repo_full_name}/git/ref/heads/{branch}")
         return resp.json()["object"]["sha"]
 
-    async def release_exists(self, repo_full_name: str, tag_name: str) -> bool:
+    async def find_release(
+        self, repo_full_name: str, tag_name: str
+    ) -> Optional[dict[str, Any]]:
         try:
-            await self._request("GET", f"/repos/{repo_full_name}/releases/tags/{tag_name}")
-            return True
+            resp = await self._request(
+                "GET", f"/repos/{repo_full_name}/releases/tags/{tag_name}"
+            )
+            return resp.json()
         except httpx.HTTPStatusError as e:
             if e.response.status_code != 404:
                 raise
@@ -258,9 +262,12 @@ class GithubAdapter(ForgeAdapter):
             rows = await self._list_all_pages(f"/repos/{repo_full_name}/releases")
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
-                return False
+                return None
             raise
-        return any(r.get("tag_name") == tag_name for r in rows)
+        return next((r for r in rows if r.get("tag_name") == tag_name), None)
+
+    async def release_exists(self, repo_full_name: str, tag_name: str) -> bool:
+        return await self.find_release(repo_full_name, tag_name) is not None
 
     async def release_conflict(
         self, exc: Exception, repo_full_name: str, tag_name: str
