@@ -118,3 +118,12 @@ def test_the_missing_section_is_refused_by_name():
     with pytest.raises(Exception) as excinfo:
         extract_changelog_section(CHANGELOG, "v9.9.9")
     assert "9.9.9" in str(excinfo.value)
+
+
+def test_the_readme_version_badge_follows_the_declared_version():
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    declared = re.search(r'^version\s*=\s*"([^"]+)"', pyproject, re.M).group(1)
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    badge = re.search(r'badge/version-([^-"]+)-[a-z]+\.svg" alt="Version ([^"]+)"', readme)
+    assert badge, "README.md carries no version badge"
+    assert badge.group(1) == badge.group(2) == declared
