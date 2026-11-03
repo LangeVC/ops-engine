@@ -1,5 +1,18 @@
 # Changelog
 
+## 3.5.1
+
+A release that already existed on a destination could be reported as a failure, and the dependency scan could stop a release over a finding that was not serious. Both now behave as intended.
+
+### Existing releases are recognised
+
+- **A destination that already holds the release is left alone.** A create call answered with 409 (Forgejo) or 422 (GitHub) means the release exists, whether it is published, a draft or a pre-release, so a second run changes nothing there.
+- **An incomplete existing release is reported.** One with a different title or without this build's assets fails the run and the notification names what differs, with the HTTP status and the release id.
+
+### The dependency scan decides by severity
+
+- **A finding below CVSS 7.0 is listed and no longer stops the release.** A finding at 7.0 or above stops it, and a scanner failure stops it with its own message and exit status. The scanner's output is printed before the decision.
+
 ## 3.5.0
 
 A release could be published without the checks that were meant to stand in front of it, a mirror could receive more than it should or lose commits it should have kept, and nothing could tell you which engine a layover was really running. The release path is now one path with its gates inside the engine, and the mirror paths refuse by name instead of failing quietly.
