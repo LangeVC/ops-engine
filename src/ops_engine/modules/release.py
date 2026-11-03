@@ -385,19 +385,10 @@ class ReleaseHandler:
                 if skip_existing and await adapter.release_exists(
                     destination.repo, tag_name
                 ):
-                    supplement = await _plan_supplement(
-                        adapter, destination, tag_name,
+                    if await _try_supplement(
+                        adapter, destination, report, audit, tag_name, label,
                         release_name, release_notes, artifacts,
-                    )
-                    if supplement is not None:
-                        detail = await _apply_supplement(
-                            adapter, destination, release_name, artifacts, supplement
-                        )
-                        logger.info(
-                            f"Release {tag_name} on {label} supplemented: {detail}"
-                        )
-                        report.supplemented.append(label)
-                        _audit_destination(audit, tag_name, label, "supplemented", detail)
+                    ):
                         continue
                     problems = await _existing_release_problems(
                         adapter, destination, tag_name, release_name, artifacts,
@@ -422,6 +413,14 @@ class ReleaseHandler:
                     tolerate_existing=skip_existing,
                 )
                 if not created:
+                    # The create call answered a duplicate: the release was
+                    # created between the lookup and the create. Same rule as
+                    # for a release the lookup showed (OE-042a).
+                    if await _try_supplement(
+                        adapter, destination, report, audit, tag_name, label,
+                        release_name, release_notes, artifacts,
+                    ):
+                        continue
                     problems = await _existing_release_problems(
                         adapter, destination, tag_name, release_name, artifacts,
                         release_notes,
@@ -564,6 +563,37 @@ def _title_key(title: str) -> str:
 def _same_title(a: object, b: str) -> bool:
     """Titles equal ignoring case and whitespace (see :func:`_title_key`)."""
     return isinstance(a, str) and _title_key(a) == _title_key(b)
+
+
+async def _try_supplement(
+    adapter: ForgeAdapter,
+    destination: Destination,
+    report: "PublicationReport",
+    audit: Optional[list[str]],
+    tag_name: str,
+    label: str,
+    release_name: str,
+    release_notes: str,
+    artifacts: list[tuple[str, bytes]],
+) -> bool:
+    """Supplement the existing release of ``destination`` when the rule applies.
+
+    Shared by the existing-release path and the duplicate-on-create path, so
+    both run the same logic. Returns True when the destination was
+    supplemented and recorded; False leaves the judgement to the caller.
+    """
+    supplement = await _plan_supplement(
+        adapter, destination, tag_name, release_name, release_notes, artifacts
+    )
+    if supplement is None:
+        return False
+    detail = await _apply_supplement(
+        adapter, destination, release_name, artifacts, supplement
+    )
+    logger.info(f"Release {tag_name} on {label} supplemented: {detail}")
+    report.supplemented.append(label)
+    _audit_destination(audit, tag_name, label, "supplemented", detail)
+    return True
 
 
 async def _plan_supplement(

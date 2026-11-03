@@ -342,3 +342,73 @@ async def test_titles_are_equal_after_lowercasing_and_removing_space_hyphen_unde
         assert dest.writes() == []
         assert len(report.failed) == 1 and report.supplemented == []
         assert f"'{title}'" in report.failure_details[report.failed[0]]
+
+
+class RacingDestination(FakeDestination):
+    """The by-tag lookup answers 404 until the create call has been made; the
+    create call then answers a duplicate because the bot's release exists by
+    then (409 on Forgejo, 422 on GitHub), and the lookup shows it afterwards."""
+
+    def __init__(self, release: dict, create_status: int):
+        super().__init__(release, create_status)
+        self.created_attempted = False
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "GET" and not self.created_attempted:
+            self.calls.append((request.method, path))
+            if "/releases/tags/" in path:
+                return httpx.Response(404, json={"message": "not found"})
+            if path.endswith("/releases"):
+                return httpx.Response(200, json=[])
+        if request.method == "POST" and path.endswith("/releases"):
+            self.created_attempted = True
+        return super().handler(request)
+
+
+@pytest.mark.parametrize(
+    "forge,make,status", [("forgejo", _forgejo, 409), ("github", _github, 422)]
+)
+@pytest.mark.asyncio
+async def test_duplicate_answer_on_create_supplements_like_an_existing_release(
+    forge, make, status, tmp_path
+):
+    dest = RacingDestination(_bot_release(), status)
+    report, audit = await _publish(forge, make(dest), tmp_path)
+
+    assert dest.patches == [{"name": GATED_TITLE}]
+    assert sorted(dest.uploads) == sorted(FILES)
+    assert not any(m == "DELETE" for m, _ in dest.calls)
+    assert len([1 for m, p in dest.calls if m == "POST" and p.endswith("/releases")]) == 1
+    assert len(report.supplemented) == 1
+    assert report.failed == [] and report.published == [] and report.skipped == []
+    assert len(audit) == 1 and "result=supplemented" in audit[0]
+    assert BOT_TITLE in audit[0] and GATED_TITLE in audit[0]
+
+
+@pytest.mark.parametrize(
+    "forge,make,status", [("forgejo", _forgejo, 409), ("github", _github, 422)]
+)
+@pytest.mark.asyncio
+async def test_duplicate_answer_with_different_notes_fails_and_changes_nothing(
+    forge, make, status, tmp_path
+):
+    dest = RacingDestination(_bot_release(body="other notes"), status)
+    report, audit = await _publish(forge, make(dest), tmp_path)
+
+    assert dest.patches == [] and dest.uploads == []
+    assert report.supplemented == [] and report.skipped == []
+    assert len(report.failed) == 1
+    assert "notes differ" in "".join(report.failure_details.values())
+
+
+@pytest.mark.asyncio
+async def test_duplicate_answer_with_complete_release_is_skipped(tmp_path):
+    complete = _bot_release(
+        name=GATED_TITLE, assets=[{"name": n} for n in FILES]
+    )
+    dest = RacingDestination(complete, 409)
+    report, _ = await _publish("forgejo", _forgejo(dest), tmp_path)
+
+    assert dest.patches == [] and dest.uploads == []
+    assert len(report.skipped) == 1 and report.failed == []
