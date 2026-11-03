@@ -432,9 +432,32 @@ jobs:
 
           # The gate's decision is made over the JSON osv-scanner emits, so the
           # exit code below is the gate's, not the scanner's habit of exiting
-          # non-zero on ANY finding.
-          /tmp/osv-scanner scan --sbom=sbom.cdx.json --format=json 2>/dev/null \
-            > /tmp/osv-scan.json
+          # non-zero on ANY finding. The scanner's own messages (stdout and
+          # stderr) are printed BEFORE that decision, so a reader of the log
+          # sees what the scanner said, not only what the gate concluded.
+          #
+          # Exit codes of osv-scanner 2.5.1, MEASURED by running the pinned
+          # release on fixture SBOMs (not remembered):
+          #   0    scan ran, no findings
+          #   1    scan ran, findings reported in the JSON
+          #   127  SBOM unreadable ("extraction failed on specified lockfile")
+          #   128  SBOM with no components ("No package sources found")
+          # 0 and 1 both mean the JSON is complete and the evaluator below
+          # decides; any other status is a scanner failure.
+          set +e
+          /tmp/osv-scanner scan --sbom=sbom.cdx.json --format=json \
+            > /tmp/osv-scan.json 2> /tmp/osv-scan.err
+          scanner_status=$?
+          set -e
+          echo "osv-gate: scanner exit status ${scanner_status}"
+          echo "osv-gate: scanner stderr follows"
+          cat /tmp/osv-scan.err
+          echo "osv-gate: scanner stdout follows"
+          cat /tmp/osv-scan.json
+          if [[ "$scanner_status" -ne 0 && "$scanner_status" -ne 1 ]]; then
+            echo "::error::osv-scanner failed (exit ${scanner_status}); no verdict on the SBOM was produced, so nothing is approved." >&2
+            exit "$scanner_status"
+          fi
           OSV_SCAN_JSON=/tmp/osv-scan.json python3 - <<'OSV_GATE_PY'
           import json
           import os
