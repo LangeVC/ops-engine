@@ -217,6 +217,48 @@ def test_finding_at_the_floor_stops_with_refused_and_the_score(tmp_path):
     assert "somepkg" in proc.stdout
 
 
+def test_cvss4_finding_as_the_scanner_emits_it_stops_with_refused_and_the_score(
+    tmp_path,
+):
+    # Measured (certifi 2026.7.22, osv-scanner 2.5.1 darwin_arm64): a CVSS 4.0
+    # finding arrives as max_severity "9.1", a string, in a group that lists
+    # two ids; the scanner exits 1. RED at the base commit: that exit 1 ended
+    # the step before RELEASE REFUSED could appear.
+    certifi = json.dumps(
+        {
+            "results": [
+                {
+                    "source": {"path": "sbom.cdx.json", "type": "sbom"},
+                    "packages": [
+                        {
+                            "package": {
+                                "name": "certifi",
+                                "version": "2026.7.22",
+                                "ecosystem": "PyPI",
+                            },
+                            "groups": [
+                                {
+                                    "ids": [
+                                        "PYSEC-2026-4320",
+                                        "GHSA-6q48-6c7w-9gw2",
+                                    ],
+                                    "aliases": ["GHSA-6q48-6c7w-9gw2"],
+                                    "max_severity": "9.1",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+    proc = run_step(tmp_path, stdout=certifi, stderr="", exit_code=1)
+    log = log_of(proc)
+    assert proc.returncode != 0, log
+    assert "RELEASE REFUSED" in log
+    assert "9.1" in log
+
+
 def test_exit_2_with_empty_output_names_the_scanner_and_its_status(tmp_path):
     # RED at the base commit: the error named neither the scanner nor its status.
     proc = run_step(tmp_path, stdout="", stderr="", exit_code=2)
