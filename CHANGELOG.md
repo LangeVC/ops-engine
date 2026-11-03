@@ -1,5 +1,19 @@
 # Changelog
 
+## 3.5.2
+
+A release created beforehand by the layover's ops bot made the release step fail, because its title and its files did not match what the build produces. The step now completes such a release instead of failing on it.
+
+### An existing release is supplemented
+
+- **A release made beforehand gets its title corrected and its missing files supplemented.** When its notes equal this build's notes and its title equals the release title after lowercasing and removing spaces, hyphens and underscores, the title is set to the release title and exactly the files it lacks are uploaded. Nothing is overwritten, re-created or deleted.
+- **The same applies when the create call answers 409 or 422**, because the bot created the release a moment earlier.
+
+### Differences stay errors
+
+- **A release whose notes differ is left untouched and fails the destination**, and the notification names the difference. A title that differs by more than case, spaces, hyphens and underscores is treated the same way.
+- **The step lists every destination** as published, supplemented or failed.
+
 ## 3.5.1
 
 A release that already existed on a destination could be reported as a failure, and the dependency scan could stop a release over a finding that was not serious. Both now behave as intended.

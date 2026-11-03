@@ -64,12 +64,6 @@ def _version_sync(*args: str):
 def test_version_sync_check_passes_at_the_release_version():
     result = _version_sync("check")
     assert result.returncode == 0, result.stdout + result.stderr
-    assert VERSION in result.stdout
-
-
-def test_the_release_tag_matches_the_declared_version():
-    result = _version_sync("check-tag", "v%s" % VERSION)
-    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_the_notes_section_exists_and_is_short():
@@ -111,7 +105,10 @@ def test_pyproject_and_the_newest_changelog_heading_agree_on_the_version():
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     declared = re.search(r'^version\s*=\s*"([^"]+)"', pyproject, re.M).group(1)
     newest = re.search(r"^##\s+v?(\d+\.\d+\.\d+\S*)", CHANGELOG, re.M).group(1)
-    assert declared == newest == VERSION
+    # The 3.5.1 section stays in the changelog; the newest heading moves on with
+    # each release, so it must equal the declared version, not this release's.
+    assert declared == newest
+    assert re.search(r"^##\s+%s\s*$" % re.escape(VERSION), CHANGELOG, re.M)
 
 
 def test_the_missing_section_is_refused_by_name():
