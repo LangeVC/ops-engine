@@ -777,12 +777,24 @@ jobs:
                   "release-assets",
                   name_template=name_template,
                   adapters=adapters,
+                  # OE-042b — a release that already exists on a destination
+                  # (made by the layover ops bot before this run) is not an
+                  # error: the engine supplements it (corrected title, missing
+                  # files) when its notes are this build's, and fails the
+                  # destination naming the difference when they are not.
+                  skip_existing=True,
               )
 
               published = ", ".join(report.published) or "(none)"
+              supplemented = ", ".join(report.supplemented) or "(none)"
+              skipped = ", ".join(report.skipped) or "(none)"
               failed = ", ".join(report.failed) or "(none)"
-              print(f"published destinations: {published}")
-              print(f"failed destinations:    {failed}")
+              print(f"published destinations:    {published}")
+              print(f"supplemented destinations: {supplemented}")
+              print(f"skipped destinations:      {skipped}")
+              print(f"failed destinations:       {failed}")
+              for label in report.failed:
+                  print(f"  {label}: {report.failure_details.get(label) or '(no detail)'}")
               if report.failed:
                   # A partial publication is a REPORTED failure, never a silent
                   # success: the run goes red so the operator sees the drift.
