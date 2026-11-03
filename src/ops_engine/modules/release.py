@@ -2,6 +2,7 @@
 
 import fnmatch
 import logging
+import re
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -94,6 +95,10 @@ class PublicationReport:
     published: list[str] = field(default_factory=list)
     failed: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
+    # Destinations whose existing release (made by someone else, with the notes
+    # of this build) got its title corrected and its missing files uploaded.
+    # Not failures: they are not in ``failed``.
+    supplemented: list[str] = field(default_factory=list)
     # label -> what an operator needs to read: the HTTP status and the
     # destination's existing release id (409/422), or what differs on an
     # existing release (incomplete). Both labels are also in ``failed``.
@@ -339,7 +344,14 @@ class ReleaseHandler:
         title, or it lacks assets of this build): it is then recorded in
         ``failed`` and ``incomplete`` names what differs. A failure the
         destination answered with 409 or 422 carries ``http=<status>
-        existing_release_id=<id>``, in the audit line and in the notification. When any destination failed, one warning line is logged for
+        existing_release_id=<id>``, in the audit line and in the notification.
+
+        An existing release with the notes of this build (equal after
+        stripping) and a title equal to the gated title ignoring case and
+        whitespace is supplemented, not failed: the title is corrected and
+        exactly the missing files are uploaded; it is listed in
+        ``supplemented`` and the audit line reads ``result=supplemented``.
+        Files already attached are untouched; nothing is re-created or deleted. When any destination failed, one warning line is logged for
         the whole call (the engine has no event log, D20).
 
         Raises:
@@ -373,6 +385,20 @@ class ReleaseHandler:
                 if skip_existing and await adapter.release_exists(
                     destination.repo, tag_name
                 ):
+                    supplement = await _plan_supplement(
+                        adapter, destination, tag_name,
+                        release_name, release_notes, artifacts,
+                    )
+                    if supplement is not None:
+                        detail = await _apply_supplement(
+                            adapter, destination, release_name, artifacts, supplement
+                        )
+                        logger.info(
+                            f"Release {tag_name} on {label} supplemented: {detail}"
+                        )
+                        report.supplemented.append(label)
+                        _audit_destination(audit, tag_name, label, "supplemented", detail)
+                        continue
                     problems = await _existing_release_problems(
                         adapter, destination, tag_name, release_name, artifacts
                     )
@@ -497,6 +523,101 @@ async def _existing_release_problems(
     if problems:
         problems.insert(0, f"existing_release_id={found.get('id', 'unknown')}")
     return problems
+
+
+@dataclass
+class _Supplement:
+    """What to change on an existing release: its id, the title it carries
+    now (None when it already equals the gated title) and the missing files."""
+
+    release_id: object
+    old_title: Optional[str]
+    missing: list[tuple[str, bytes]]
+
+
+def _title_key(title: str) -> str:
+    """Case-folded title with every run of whitespace, ``-`` and ``_`` as one space.
+
+    The hyphen and the underscore count as whitespace because the real bot
+    title differs from the gated one in exactly that way
+    (``ops-engine v3.5.1`` against ``Ops Engine v3.5.1``). Any other
+    character keeps the titles apart.
+    """
+    return " ".join(re.sub(r"[-_]+", " ", title).split()).casefold()
+
+
+def _same_title(a: object, b: str) -> bool:
+    """Titles equal ignoring case and whitespace (see :func:`_title_key`)."""
+    return isinstance(a, str) and _title_key(a) == _title_key(b)
+
+
+async def _plan_supplement(
+    adapter: ForgeAdapter,
+    destination: Destination,
+    tag_name: str,
+    release_name: str,
+    release_notes: str,
+    artifacts: list[tuple[str, bytes]],
+) -> Optional[_Supplement]:
+    """Decide whether an existing release is to be supplemented (OE-042a).
+
+    The rule: the release holds exactly the notes of this build (text equal
+    after stripping) and a title equal to the gated ``release_name`` ignoring
+    case and whitespace (a hyphen or underscore counts as whitespace).
+    Then the title is to be corrected and the files of the build that are not
+    attached uploaded. Returns None when the rule does not
+    apply (a different note or title, no release details, or nothing to
+    change), so the caller judges the release as before: a complete one is
+    skipped, any other difference fails the destination with the difference
+    named. Attached files are never part of the plan.
+    """
+    found = await adapter.find_release(destination.repo, tag_name)
+    if not isinstance(found, dict) or found.get("id") is None:
+        return None
+    if (found.get("body") or "").strip() != release_notes.strip():
+        return None
+    title = found.get("name")
+    if not _same_title(title, release_name):
+        return None
+    attached = {
+        a.get("name") for a in (found.get("assets") or []) if isinstance(a, dict)
+    }
+    missing = [(n, d) for n, d in artifacts if n not in attached]
+    retitle = title != release_name
+    if not retitle and not missing:
+        return None
+    return _Supplement(found["id"], title if retitle else None, missing)
+
+
+async def _apply_supplement(
+    adapter: ForgeAdapter,
+    destination: Destination,
+    release_name: str,
+    artifacts: list[tuple[str, bytes]],
+    plan: _Supplement,
+) -> str:
+    """Carry out a plan: correct the title, then upload the missing files.
+
+    Nothing is created or deleted. Any error propagates, so the caller records
+    the destination as failed; a rerun plans only what is still missing.
+    Returns the audit detail naming the title correction and the files.
+    """
+    parts = [f"existing_release_id={plan.release_id}"]
+    if plan.old_title is not None:
+        await adapter.update_release_title(
+            destination.repo, plan.release_id, release_name
+        )
+        parts.append(f"title corrected from {plan.old_title!r} to {release_name!r}")
+    for name, data in plan.missing:
+        await adapter.upload_release_asset(
+            repo_full_name=destination.repo,
+            release_id=plan.release_id,
+            asset_name=name,
+            data=data,
+        )
+    if plan.missing:
+        parts.append("uploaded: " + ", ".join(n for n, _ in plan.missing))
+    return "; ".join(parts)
 
 
 def _record_incomplete(

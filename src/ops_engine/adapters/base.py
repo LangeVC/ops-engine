@@ -123,6 +123,20 @@ class ForgeAdapter(ABC):
         """
         return None
 
+    async def update_release_title(
+        self, repo_full_name: str, release_id: int, name: str
+    ) -> dict[str, Any]:
+        """Change the title of an existing release, by release id.
+
+        Only the title is sent; the notes, the state and the assets stay as
+        they are. Not abstract: the default raises ``NotImplementedError``, so
+        an adapter (or fake) that cannot change a title keeps working for every
+        other call and a caller that needs the change fails visibly.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} cannot change the title of a release"
+        )
+
     async def release_conflict(
         self, exc: Exception, repo_full_name: str, tag_name: str
     ) -> bool:
