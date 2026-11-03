@@ -29,7 +29,6 @@ import json
 import os
 import stat
 import subprocess
-import textwrap
 from pathlib import Path
 
 import pytest
@@ -112,6 +111,7 @@ def run_step(
     }
     return subprocess.run(
         ["bash", "-eo", "pipefail", "-c", script],
+        check=False,
         cwd=work,
         env=env,
         capture_output=True,
