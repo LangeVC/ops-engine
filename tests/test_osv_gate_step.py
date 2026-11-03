@@ -195,3 +195,62 @@ def test_other_exit_codes_are_a_scanner_failure_that_names_the_status(tmp_path, 
     assert "scanner-double: extraction failed" in log
     assert f"exit {code}" in log
     assert "RELEASE PERMITTED" not in log
+
+
+def test_finding_below_the_floor_keeps_the_step_green_and_is_listed(tmp_path):
+    # RED at the base commit: a scanner exiting 1 with a 5.3 finding aborted
+    # the step before the evaluator printed anything.
+    proc = run_step(tmp_path, stdout=_finding_json("5.3"), stderr="", exit_code=1)
+    log = log_of(proc)
+    assert proc.returncode == 0, log
+    assert "somepkg" in proc.stdout
+    assert "5.3" in proc.stdout
+    assert "GHSA-test-0001" in proc.stdout
+    assert "RELEASE REFUSED" not in log
+
+
+def test_finding_at_the_floor_stops_with_refused_and_the_score(tmp_path):
+    proc = run_step(tmp_path, stdout=_finding_json("9.8"), stderr="", exit_code=1)
+    assert proc.returncode == 1, log_of(proc)
+    refused = [ln for ln in proc.stdout.splitlines() if "RELEASE REFUSED" in ln]
+    assert refused and "9.8" in refused[0]
+    assert "somepkg" in proc.stdout
+
+
+def test_exit_2_with_empty_output_names_the_scanner_and_its_status(tmp_path):
+    # RED at the base commit: the error named neither the scanner nor its status.
+    proc = run_step(tmp_path, stdout="", stderr="", exit_code=2)
+    log = log_of(proc)
+    assert proc.returncode != 0
+    assert "osv-scanner failed (exit 2)" in log
+    assert "RELEASE REFUSED" not in log
+    assert "RELEASE PERMITTED" not in log
+
+
+@pytest.mark.parametrize("code", [0, 1])
+def test_invalid_json_is_a_scanner_failure_with_the_status(tmp_path, code):
+    # RED at the base commit: json.load raised a bare traceback.
+    proc = run_step(tmp_path, stdout="not json at all", stderr="", exit_code=code)
+    log = log_of(proc)
+    assert proc.returncode != 0
+    assert f"osv-scanner failed (exit {code})" in log
+    assert "not valid JSON" in log
+    assert "Traceback" not in log
+    assert "RELEASE REFUSED" not in log
+    assert "RELEASE PERMITTED" not in log
+
+
+def test_missing_sbom_keeps_its_named_error(tmp_path):
+    work = tmp_path / "work"
+    work.mkdir()
+    proc = subprocess.run(
+        ["bash", "-eo", "pipefail", "-c", _step_run_block()],
+        check=False,
+        cwd=work,
+        env={"PATH": os.environ["PATH"], "HOME": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert proc.returncode == 1
+    assert "NoSbomToScanError" in log_of(proc)

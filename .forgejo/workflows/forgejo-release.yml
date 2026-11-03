@@ -458,14 +458,25 @@ jobs:
             echo "::error::osv-scanner failed (exit ${scanner_status}); no verdict on the SBOM was produced, so nothing is approved." >&2
             exit "$scanner_status"
           fi
-          OSV_SCAN_JSON=/tmp/osv-scan.json python3 - <<'OSV_GATE_PY'
+          OSV_SCANNER_STATUS="$scanner_status" OSV_SCAN_JSON=/tmp/osv-scan.json python3 - <<'OSV_GATE_PY'
           import json
           import os
           import sys
 
           FLOOR = 7.0  # CVSS base score; must match the prose floor above.
-          with open(os.environ["OSV_SCAN_JSON"], encoding="utf-8") as fh:
-              data = json.load(fh)
+          try:
+              with open(os.environ["OSV_SCAN_JSON"], encoding="utf-8") as fh:
+                  data = json.load(fh)
+          except ValueError as exc:
+              # A status of 0 or 1 promised complete JSON; its absence is a
+              # scanner failure, reported apart from the refusal at the floor.
+              print(
+                  f"::error::osv-scanner failed (exit {os.environ['OSV_SCANNER_STATUS']}): "
+                  f"its output is not valid JSON ({exc}); no verdict on the SBOM was produced, "
+                  "so nothing is approved.",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
           findings = 0
           worst = 0.0
           rows = []
