@@ -233,14 +233,38 @@ class ForgejoAdapter(ForgeAdapter):
         resp = await self._request("GET", f"/repos/{repo_full_name}/branches/{branch}")
         return resp.json()["commit"]["id"]
 
-    async def release_exists(self, repo_full_name: str, tag_name: str) -> bool:
+    async def find_release(
+        self, repo_full_name: str, tag_name: str
+    ) -> Optional[dict[str, Any]]:
         try:
-            await self._request("GET", f"/repos/{repo_full_name}/releases/tags/{tag_name}")
-            return True
+            resp = await self._request(
+                "GET", f"/repos/{repo_full_name}/releases/tags/{tag_name}"
+            )
+            return resp.json()
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code != 404:
+                raise
+        # By-tag said 404. Look in the release list, which carries drafts for a
+        # token with write access, before saying the destination is empty.
+        try:
+            rows = await self._list_all_pages(f"/repos/{repo_full_name}/releases")
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
-                return False
+                return None
             raise
+        return next((r for r in rows if r.get("tag_name") == tag_name), None)
+
+    async def release_exists(self, repo_full_name: str, tag_name: str) -> bool:
+        return await self.find_release(repo_full_name, tag_name) is not None
+
+    async def release_conflict(
+        self, exc: Exception, repo_full_name: str, tag_name: str
+    ) -> bool:
+        # Forgejo answers 409 when a release row for the tag exists, in any
+        # state (CreateRelease: ErrReleaseAlreadyExist / existing non-tag row).
+        return (
+            isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 409
+        )
 
     async def create_pull_request(
         self, repo_full_name: str, title: str, body: str,

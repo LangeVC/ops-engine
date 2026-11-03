@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+import httpx
+
 from ops_engine.adapters.base import ForgeAdapter
 from ops_engine.adapters.factory import adapters_for
 from ops_engine.config_loader import Destination, OpsEngineConfig, ReleaseConfig
@@ -92,6 +94,10 @@ class PublicationReport:
     published: list[str] = field(default_factory=list)
     failed: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
+    # label -> what an operator needs to read: the HTTP status and the
+    # destination's existing release id (409/422), or what differs on an
+    # existing release (incomplete). Both labels are also in ``failed``.
+    failure_details: dict[str, str] = field(default_factory=dict)
 
     @property
     def partial(self) -> bool:
@@ -318,15 +324,22 @@ class ReleaseHandler:
         destination already holds a release for ``tag_name`` it is recorded in
         ``skipped`` and nothing is created or uploaded there, so a redelivered
         event is a no-op for it. The check runs on the destination's own
-        adapter (each destination answers for itself). It is opt-in so callers
+        adapter (each destination answers for itself), and a create call the
+        forge answers as a duplicate (409 Forgejo, 422 GitHub) is recorded the
+        same way, so a release the by-tag lookup cannot see (a draft) is not a
+        failure. It is opt-in so callers
         that publish to a known-empty destination keep their exact call
         sequence.
 
         ``audit`` follows the ``MirrorHandler.push_event`` convention: when a
         list is given, one line per destination is appended to it
-        (``release-publish tag=... dest=... result=published|failed|skipped``).
+        (``release-publish tag=... dest=... result=published|failed|skipped|incomplete``).
         A destination skipped because its release already exists is not a
-        failure. When any destination failed, one warning line is logged for
+        failure, unless that release is incomplete (its title is not the gated
+        title, or it lacks assets of this build): it is then recorded in
+        ``failed`` and ``incomplete`` names what differs. A failure the
+        destination answered with 409 or 422 carries ``http=<status>
+        existing_release_id=<id>``, in the audit line and in the notification. When any destination failed, one warning line is logged for
         the whole call (the engine has no event log, D20).
 
         Raises:
@@ -360,11 +373,17 @@ class ReleaseHandler:
                 if skip_existing and await adapter.release_exists(
                     destination.repo, tag_name
                 ):
+                    problems = await _existing_release_problems(
+                        adapter, destination, tag_name, release_name, artifacts
+                    )
+                    if problems:
+                        _record_incomplete(report, audit, tag_name, label, problems)
+                        continue
                     logger.info(f"Release {tag_name} already exists on {label}, skipping")
                     report.skipped.append(label)
                     _audit_destination(audit, tag_name, label, "skipped")
                     continue
-                await _publish_to_destination(
+                created = await _publish_to_destination(
                     adapter,
                     destination,
                     tag_name=tag_name,
@@ -373,11 +392,29 @@ class ReleaseHandler:
                     artifacts=artifacts,
                     draft=draft,
                     prerelease=prerelease,
+                    tolerate_existing=skip_existing,
                 )
+                if not created:
+                    problems = await _existing_release_problems(
+                        adapter, destination, tag_name, release_name, artifacts
+                    )
+                    if problems:
+                        _record_incomplete(report, audit, tag_name, label, problems)
+                        continue
+                    logger.info(
+                        f"Release {tag_name} already exists on {label} "
+                        "(create answered a duplicate), skipping"
+                    )
+                    report.skipped.append(label)
+                    _audit_destination(audit, tag_name, label, "skipped")
+                    continue
             except Exception as exc:  # noqa: BLE001 (record — the report, not abort)
                 logger.error(f"partial publication: {label} failed: {exc}")
                 report.failed.append(label)
-                _audit_destination(audit, tag_name, label, "failed")
+                detail = await _conflict_detail(adapter, destination, tag_name, exc)
+                if detail:
+                    report.failure_details[label] = detail
+                _audit_destination(audit, tag_name, label, "failed", detail)
             else:
                 report.published.append(label)
                 _audit_destination(audit, tag_name, label, "published")
@@ -391,10 +428,89 @@ class ReleaseHandler:
 
 
 def _audit_destination(
-    audit: Optional[list[str]], tag_name: str, label: str, result: str
+    audit: Optional[list[str]],
+    tag_name: str,
+    label: str,
+    result: str,
+    detail: str = "",
 ) -> None:
     if audit is not None:
-        audit.append(f"release-publish tag={tag_name} dest={label} result={result}")
+        line = f"release-publish tag={tag_name} dest={label} result={result}"
+        audit.append(f"{line} {detail}" if detail else line)
+
+
+async def _conflict_detail(
+    adapter: ForgeAdapter,
+    destination: Destination,
+    tag_name: str,
+    exc: Exception,
+) -> str:
+    """Name the HTTP status and the destination's existing release id.
+
+    Only for a destination that answered 409 or 422: ``http=<status>
+    existing_release_id=<id>``. The id comes from a lookup that must not hide
+    the original failure, so a lookup error or a missing release gives
+    ``existing_release_id=unknown``. Any other failure has no detail.
+    """
+    if not isinstance(exc, httpx.HTTPStatusError):
+        return ""
+    status = exc.response.status_code
+    if status not in (409, 422):
+        return ""
+    release_id: object = "unknown"
+    try:
+        found = await adapter.find_release(destination.repo, tag_name)
+        if isinstance(found, dict) and found.get("id") is not None:
+            release_id = found["id"]
+    except Exception as lookup_exc:  # noqa: BLE001 (the original error stays the story)
+        logger.warning(f"could not look up the existing release of {destination.repo}: {lookup_exc}")
+    return f"http={status} existing_release_id={release_id}"
+
+
+async def _existing_release_problems(
+    adapter: ForgeAdapter,
+    destination: Destination,
+    tag_name: str,
+    release_name: str,
+    artifacts: list[tuple[str, bytes]],
+) -> list[str]:
+    """What differs between the destination's release and this build.
+
+    Compares the title with the gated ``release_name`` and the attached asset
+    names with the artifacts of this build. An adapter that shows no release
+    details (``find_release`` not a dict) gives no problems. Empty list: the
+    existing release is the one this build would have made.
+    """
+    found = await adapter.find_release(destination.repo, tag_name)
+    if not isinstance(found, dict):
+        return []
+    problems: list[str] = []
+    title = found.get("name")
+    if title != release_name:
+        problems.append(f"title is {title!r}, expected {release_name!r}")
+    attached = {
+        a.get("name") for a in (found.get("assets") or []) if isinstance(a, dict)
+    }
+    missing = [name for name, _ in artifacts if name not in attached]
+    if missing:
+        problems.append(f"missing assets: {', '.join(missing)}")
+    if problems:
+        problems.insert(0, f"existing_release_id={found.get('id', 'unknown')}")
+    return problems
+
+
+def _record_incomplete(
+    report: "PublicationReport",
+    audit: Optional[list[str]],
+    tag_name: str,
+    label: str,
+    problems: list[str],
+) -> None:
+    detail = "; ".join(problems)
+    logger.error(f"partial publication: {label} holds an incomplete release: {detail}")
+    report.failed.append(label)
+    report.failure_details[label] = f"incomplete existing release ({detail})"
+    _audit_destination(audit, tag_name, label, "incomplete", detail)
 
 
 async def _notify_partial(
@@ -419,6 +535,10 @@ async def _notify_partial(
             "body": (
                 "FAILED: partial publication. "
                 f"published={report.published} failed={report.failed}"
+                + "".join(
+                    f"\n{label}: {detail}"
+                    for label, detail in report.failure_details.items()
+                )
             ),
         },
     )
@@ -434,22 +554,39 @@ async def _publish_to_destination(
     artifacts: list[tuple[str, bytes]],
     draft: bool,
     prerelease: bool,
-) -> None:
+    tolerate_existing: bool = False,
+) -> bool:
     """Create the release on one destination and attach every artifact to it.
+
+    Returns True when the release was created and its artifacts attached. With
+    ``tolerate_existing``, a create call the forge answers as a duplicate
+    (``adapter.release_conflict``: 409 on Forgejo, 422 on GitHub) means the
+    destination already holds the release in some state the by-tag lookup did
+    not show: nothing is attached and False is returned. Only the create call
+    is read this way; an upload error stays a failure.
 
     The release id comes from ``create_release``'s return value, so the uploads
     target the release object just created — no second lookup and no
     re-download. An exception anywhere in the create-or-attach sequence fails
     the whole destination, which the caller records as a partial publication.
     """
-    created = await adapter.create_release(
-        repo_full_name=destination.repo,
-        tag_name=tag_name,
-        name=release_name,
-        body=release_notes,
-        draft=draft,
-        prerelease=prerelease,
-    )
+    try:
+        created = await adapter.create_release(
+            repo_full_name=destination.repo,
+            tag_name=tag_name,
+            name=release_name,
+            body=release_notes,
+            draft=draft,
+            prerelease=prerelease,
+        )
+    except Exception as exc:  # noqa: BLE001 (only a duplicate answer is absorbed)
+        # ``is True``: only an adapter's explicit yes absorbs the error.
+        if (
+            tolerate_existing
+            and await adapter.release_conflict(exc, destination.repo, tag_name) is True
+        ):
+            return False
+        raise
     release_id = created["id"]
     for asset_name, data in artifacts:
         await adapter.upload_release_asset(
@@ -458,6 +595,7 @@ async def _publish_to_destination(
             asset_name=asset_name,
             data=data,
         )
+    return True
 
 
 def _collect_artifacts(artifact_dir: str | Path) -> list[tuple[str, bytes]]:

@@ -245,14 +245,53 @@ class GithubAdapter(ForgeAdapter):
         resp = await self._request("GET", f"/repos/{repo_full_name}/git/ref/heads/{branch}")
         return resp.json()["object"]["sha"]
 
-    async def release_exists(self, repo_full_name: str, tag_name: str) -> bool:
+    async def find_release(
+        self, repo_full_name: str, tag_name: str
+    ) -> Optional[dict[str, Any]]:
         try:
-            await self._request("GET", f"/repos/{repo_full_name}/releases/tags/{tag_name}")
-            return True
+            resp = await self._request(
+                "GET", f"/repos/{repo_full_name}/releases/tags/{tag_name}"
+            )
+            return resp.json()
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code != 404:
+                raise
+        # By-tag returns published releases only, so a draft answers 404. The
+        # release list carries drafts for a token with push access.
+        try:
+            rows = await self._list_all_pages(f"/repos/{repo_full_name}/releases")
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
-                return False
+                return None
             raise
+        return next((r for r in rows if r.get("tag_name") == tag_name), None)
+
+    async def release_exists(self, repo_full_name: str, tag_name: str) -> bool:
+        return await self.find_release(repo_full_name, tag_name) is not None
+
+    async def release_conflict(
+        self, exc: Exception, repo_full_name: str, tag_name: str
+    ) -> bool:
+        # GitHub answers 422 for a duplicate tag. The code errors[].code
+        # "already_exists" is NOT confirmed by a measurement (LVC-299 records
+        # only the 422, not the body); it is assumed from GitHub's documented
+        # error shape, and 422 is also its generic validation failure: an
+        # unexpected code stays a failure; a body without codes is settled by a
+        # lookup.
+        if not (
+            isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 422
+        ):
+            return False
+        try:
+            errors = exc.response.json().get("errors") or []
+            codes = {e.get("code") for e in errors if isinstance(e, dict)}
+        except (ValueError, AttributeError):
+            codes = set()
+        if "already_exists" in codes:
+            return True
+        if codes:
+            return False
+        return await self.release_exists(repo_full_name, tag_name)
 
     async def create_pull_request(
         self, repo_full_name: str, title: str, body: str,
