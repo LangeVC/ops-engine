@@ -103,8 +103,24 @@ class ForgeAdapter(ABC):
 
     @abstractmethod
     async def release_exists(self, repo_full_name: str, tag_name: str) -> bool:
-        """Check if a release for the given tag already exists."""
+        """Check if a release for the given tag already exists.
+
+        Answers True for a release of ANY state (published, draft,
+        pre-release): a forge's by-tag lookup can miss a draft, so an
+        implementation must not report False on the by-tag 404 alone.
+        """
         pass
+
+    async def release_conflict(
+        self, exc: Exception, repo_full_name: str, tag_name: str
+    ) -> bool:
+        """Say whether ``exc``, raised by ``create_release``, means the forge
+        already holds a release for the tag (a duplicate, not a failure).
+
+        Not abstract: the default answers False, so an adapter that does not
+        know its forge's duplicate answer keeps every error a failure.
+        """
+        return False
 
     @abstractmethod
     async def create_pull_request(

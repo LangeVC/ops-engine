@@ -318,7 +318,10 @@ class ReleaseHandler:
         destination already holds a release for ``tag_name`` it is recorded in
         ``skipped`` and nothing is created or uploaded there, so a redelivered
         event is a no-op for it. The check runs on the destination's own
-        adapter (each destination answers for itself). It is opt-in so callers
+        adapter (each destination answers for itself), and a create call the
+        forge answers as a duplicate (409 Forgejo, 422 GitHub) is recorded the
+        same way, so a release the by-tag lookup cannot see (a draft) is not a
+        failure. It is opt-in so callers
         that publish to a known-empty destination keep their exact call
         sequence.
 
@@ -364,7 +367,7 @@ class ReleaseHandler:
                     report.skipped.append(label)
                     _audit_destination(audit, tag_name, label, "skipped")
                     continue
-                await _publish_to_destination(
+                created = await _publish_to_destination(
                     adapter,
                     destination,
                     tag_name=tag_name,
@@ -373,7 +376,16 @@ class ReleaseHandler:
                     artifacts=artifacts,
                     draft=draft,
                     prerelease=prerelease,
+                    tolerate_existing=skip_existing,
                 )
+                if not created:
+                    logger.info(
+                        f"Release {tag_name} already exists on {label} "
+                        "(create answered a duplicate), skipping"
+                    )
+                    report.skipped.append(label)
+                    _audit_destination(audit, tag_name, label, "skipped")
+                    continue
             except Exception as exc:  # noqa: BLE001 (record — the report, not abort)
                 logger.error(f"partial publication: {label} failed: {exc}")
                 report.failed.append(label)
@@ -434,22 +446,39 @@ async def _publish_to_destination(
     artifacts: list[tuple[str, bytes]],
     draft: bool,
     prerelease: bool,
-) -> None:
+    tolerate_existing: bool = False,
+) -> bool:
     """Create the release on one destination and attach every artifact to it.
+
+    Returns True when the release was created and its artifacts attached. With
+    ``tolerate_existing``, a create call the forge answers as a duplicate
+    (``adapter.release_conflict``: 409 on Forgejo, 422 on GitHub) means the
+    destination already holds the release in some state the by-tag lookup did
+    not show: nothing is attached and False is returned. Only the create call
+    is read this way; an upload error stays a failure.
 
     The release id comes from ``create_release``'s return value, so the uploads
     target the release object just created — no second lookup and no
     re-download. An exception anywhere in the create-or-attach sequence fails
     the whole destination, which the caller records as a partial publication.
     """
-    created = await adapter.create_release(
-        repo_full_name=destination.repo,
-        tag_name=tag_name,
-        name=release_name,
-        body=release_notes,
-        draft=draft,
-        prerelease=prerelease,
-    )
+    try:
+        created = await adapter.create_release(
+            repo_full_name=destination.repo,
+            tag_name=tag_name,
+            name=release_name,
+            body=release_notes,
+            draft=draft,
+            prerelease=prerelease,
+        )
+    except Exception as exc:  # noqa: BLE001 (only a duplicate answer is absorbed)
+        # ``is True``: only an adapter's explicit yes absorbs the error.
+        if (
+            tolerate_existing
+            and await adapter.release_conflict(exc, destination.repo, tag_name) is True
+        ):
+            return False
+        raise
     release_id = created["id"]
     for asset_name, data in artifacts:
         await adapter.upload_release_asset(
@@ -458,6 +487,7 @@ async def _publish_to_destination(
             asset_name=asset_name,
             data=data,
         )
+    return True
 
 
 def _collect_artifacts(artifact_dir: str | Path) -> list[tuple[str, bytes]]:

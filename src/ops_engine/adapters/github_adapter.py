@@ -250,9 +250,38 @@ class GithubAdapter(ForgeAdapter):
             await self._request("GET", f"/repos/{repo_full_name}/releases/tags/{tag_name}")
             return True
         except httpx.HTTPStatusError as e:
+            if e.response.status_code != 404:
+                raise
+        # By-tag returns published releases only, so a draft answers 404. The
+        # release list carries drafts for a token with push access.
+        try:
+            rows = await self._list_all_pages(f"/repos/{repo_full_name}/releases")
+        except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
                 return False
             raise
+        return any(r.get("tag_name") == tag_name for r in rows)
+
+    async def release_conflict(
+        self, exc: Exception, repo_full_name: str, tag_name: str
+    ) -> bool:
+        # GitHub answers 422 for a duplicate tag, with errors[].code
+        # "already_exists", but 422 is also its generic validation failure: any
+        # other code is not a duplicate; no usable body is settled by a lookup.
+        if not (
+            isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 422
+        ):
+            return False
+        try:
+            errors = exc.response.json().get("errors") or []
+            codes = {e.get("code") for e in errors if isinstance(e, dict)}
+        except (ValueError, AttributeError):
+            codes = set()
+        if "already_exists" in codes:
+            return True
+        if codes:
+            return False
+        return await self.release_exists(repo_full_name, tag_name)
 
     async def create_pull_request(
         self, repo_full_name: str, title: str, body: str,
