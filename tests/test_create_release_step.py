@@ -327,3 +327,26 @@ def test_a_bot_release_gets_the_gated_title_and_the_four_files(tmp_path):
     assert re.search(r"^skipped destinations:\s+\(none\)$", log, re.MULTILINE), log
     assert re.search(r"^failed destinations:\s+\(none\)$", log, re.MULTILINE), log
     assert "PartialPublicationError" not in log
+
+
+def test_the_race_with_the_bot_is_supplemented_through_the_real_block(tmp_path):
+    # The by-tag lookup and the list answer 404 until the create call; the create
+    # call answers 409 (the bot made the release in between) and the release is
+    # served from then on. RED at base 6a0b8aee: the 409 fails the destination
+    # and the run exits 1 with the title unchanged and nothing uploaded.
+    forgejo = Forge("forgejo", bot_release(), race=True)
+    github = Forge("github")
+    proc = run_step(tmp_path, forgejo, github)
+    log = log_of(proc)
+
+    assert proc.returncode == 0, log
+    assert ("POST", f"/api/v1/repos/{FORGEJO_REPO}/releases") in forgejo.requests
+    release = forgejo.releases[TAG]
+    assert release["name"] == GATED_TITLE
+    assert sorted(a["name"] for a in release["assets"]) == sorted(FILES)
+    assert re.search(
+        rf"^supplemented destinations:\s+forgejo:{re.escape(FORGEJO_REPO)}$",
+        log,
+        re.MULTILINE,
+    ), log
+    assert re.search(r"^failed destinations:\s+\(none\)$", log, re.MULTILINE), log
