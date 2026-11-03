@@ -350,3 +350,32 @@ def test_the_race_with_the_bot_is_supplemented_through_the_real_block(tmp_path):
         re.MULTILINE,
     ), log
     assert re.search(r"^failed destinations:\s+\(none\)$", log, re.MULTILINE), log
+
+
+def test_different_notes_stay_an_error_through_the_real_block(tmp_path):
+    # An existing release with other notes is not this build's: the run exits
+    # non-zero, changes no title, uploads nothing, and the log names the
+    # difference and the existing release id. RED at base 6a0b8aee: the run
+    # exits 1 as well, but prints neither the difference nor the id.
+    other = bot_release()
+    other["body"] = "Notes somebody else wrote for this tag.\n"
+    forgejo = Forge("forgejo", other)
+    github = Forge("github")
+    proc = run_step(tmp_path, forgejo, github)
+    log = log_of(proc)
+
+    assert proc.returncode != 0, log
+    assert forgejo.uploads == []
+    assert forgejo.patches == []
+    release = forgejo.releases[TAG]
+    assert release["name"] == BOT_TITLE
+    assert release["assets"] == []
+    assert release["body"] == other["body"]
+    assert "notes differ from the notes of this build" in log, log
+    assert "existing_release_id=41" in log, log
+    assert re.search(
+        rf"^failed destinations:\s+forgejo:{re.escape(FORGEJO_REPO)}$",
+        log,
+        re.MULTILINE,
+    ), log
+    assert re.search(r"^supplemented destinations:\s+\(none\)$", log, re.MULTILINE), log
