@@ -261,3 +261,84 @@ async def test_default_update_release_title_raises_not_implemented():
     Bare.__abstractmethods__ = frozenset()
     with pytest.raises(NotImplementedError):
         await Bare().update_release_title("o/r", 1, "t")
+
+
+@pytest.mark.parametrize("forge,make", [("forgejo", _forgejo), ("github", _github)])
+@pytest.mark.asyncio
+async def test_different_notes_are_named_in_the_failure_detail(forge, make, tmp_path):
+    # The RED case of OE-042a: the gated title, no files, other notes. The
+    # failure must name the notes, not only the missing files.
+    dest = FakeDestination(
+        _bot_release(name=GATED_TITLE, body="notes of some other build")
+    )
+    report, audit = await _publish(forge, make(dest), tmp_path)
+
+    assert dest.writes() == []
+    assert len(report.failed) == 1 and report.supplemented == []
+    detail = report.failure_details[report.failed[0]]
+    assert "notes differ" in detail
+    assert f"existing_release_id={RELEASE_ID}" in detail
+    assert "result=incomplete" in audit[0] and "notes differ" in audit[0]
+
+
+@pytest.mark.asyncio
+async def test_different_notes_and_complete_files_still_fail_naming_the_notes(tmp_path):
+    dest = FakeDestination(
+        _bot_release(
+            name=GATED_TITLE,
+            body="notes of some other build",
+            assets=[{"name": n} for n in FILES],
+        )
+    )
+    report, _ = await _publish("forgejo", _forgejo(dest), tmp_path)
+
+    assert dest.writes() == []
+    assert len(report.failed) == 1 and report.skipped == []
+    assert "notes differ" in report.failure_details[report.failed[0]]
+
+
+@pytest.mark.asyncio
+async def test_different_title_names_both_titles_and_the_release_id(tmp_path):
+    dest = FakeDestination(_bot_release(name="Something else v3.5.1"))
+    report, _ = await _publish("forgejo", _forgejo(dest), tmp_path)
+
+    assert dest.writes() == []
+    detail = report.failure_details[report.failed[0]]
+    assert "'Something else v3.5.1'" in detail and f"'{GATED_TITLE}'" in detail
+    assert f"existing_release_id={RELEASE_ID}" in detail
+    assert "notes differ" not in detail
+
+
+@pytest.mark.asyncio
+async def test_different_notes_and_different_title_name_both_differences(tmp_path):
+    dest = FakeDestination(_bot_release(name="Something else v3.5.1", body="other"))
+    report, _ = await _publish("forgejo", _forgejo(dest), tmp_path)
+
+    detail = report.failure_details[report.failed[0]]
+    assert dest.writes() == []
+    assert "notes differ" in detail and "Something else v3.5.1" in detail
+
+
+@pytest.mark.parametrize(
+    "title,corrected",
+    [
+        ("ops-engine v3.5.1", True),
+        ("OPS_ENGINE   V3.5.1", True),
+        ("other-engine v3.5.1", False),
+        ("Ops Engine v3.5.0", False),
+    ],
+)
+@pytest.mark.asyncio
+async def test_titles_are_equal_after_lowercasing_and_removing_space_hyphen_underscore(
+    title, corrected, tmp_path
+):
+    dest = FakeDestination(_bot_release(name=title))
+    report, _ = await _publish("forgejo", _forgejo(dest), tmp_path)
+
+    if corrected:
+        assert dest.patches == [{"name": GATED_TITLE}]
+        assert len(report.supplemented) == 1 and report.failed == []
+    else:
+        assert dest.writes() == []
+        assert len(report.failed) == 1 and report.supplemented == []
+        assert f"'{title}'" in report.failure_details[report.failed[0]]

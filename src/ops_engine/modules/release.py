@@ -400,7 +400,8 @@ class ReleaseHandler:
                         _audit_destination(audit, tag_name, label, "supplemented", detail)
                         continue
                     problems = await _existing_release_problems(
-                        adapter, destination, tag_name, release_name, artifacts
+                        adapter, destination, tag_name, release_name, artifacts,
+                        release_notes,
                     )
                     if problems:
                         _record_incomplete(report, audit, tag_name, label, problems)
@@ -422,7 +423,8 @@ class ReleaseHandler:
                 )
                 if not created:
                     problems = await _existing_release_problems(
-                        adapter, destination, tag_name, release_name, artifacts
+                        adapter, destination, tag_name, release_name, artifacts,
+                        release_notes,
                     )
                     if problems:
                         _record_incomplete(report, audit, tag_name, label, problems)
@@ -499,6 +501,7 @@ async def _existing_release_problems(
     tag_name: str,
     release_name: str,
     artifacts: list[tuple[str, bytes]],
+    release_notes: Optional[str] = None,
 ) -> list[str]:
     """What differs between the destination's release and this build.
 
@@ -506,11 +509,22 @@ async def _existing_release_problems(
     names with the artifacts of this build. An adapter that shows no release
     details (``find_release`` not a dict) gives no problems. Empty list: the
     existing release is the one this build would have made.
+
+    When ``release_notes`` is given, a release whose notes differ (text after
+    stripping) is reported as ``notes differ`` so the failure names it.
     """
     found = await adapter.find_release(destination.repo, tag_name)
     if not isinstance(found, dict):
         return []
     problems: list[str] = []
+    # Both forges always carry ``body`` (null on GitHub for an empty one); an
+    # object without the key is a detail-less stand-in and is not judged.
+    if (
+        release_notes is not None
+        and "body" in found
+        and (found["body"] or "").strip() != release_notes.strip()
+    ):
+        problems.append("notes differ from the notes of this build")
     title = found.get("name")
     if title != release_name:
         problems.append(f"title is {title!r}, expected {release_name!r}")
@@ -536,14 +550,15 @@ class _Supplement:
 
 
 def _title_key(title: str) -> str:
-    """Case-folded title with every run of whitespace, ``-`` and ``_`` as one space.
+    """Lower-cased title with every space, hyphen and underscore removed.
 
-    The hyphen and the underscore count as whitespace because the real bot
-    title differs from the gated one in exactly that way
-    (``ops-engine v3.5.1`` against ``Ops Engine v3.5.1``). Any other
-    character keeps the titles apart.
+    DEVIATION from the criterion wording ("case and whitespace"), by owner
+    decision: the real bot title differs from the gated one in a hyphen
+    (``ops-engine v3.5.1`` against ``Ops Engine v3.5.1``), so hyphens and
+    underscores are ignored as well, and all of them are removed, not
+    collapsed. Any other difference keeps the titles apart.
     """
-    return " ".join(re.sub(r"[-_]+", " ", title).split()).casefold()
+    return re.sub(r"[\s_-]+", "", title).casefold()
 
 
 def _same_title(a: object, b: str) -> bool:
@@ -563,7 +578,7 @@ async def _plan_supplement(
 
     The rule: the release holds exactly the notes of this build (text equal
     after stripping) and a title equal to the gated ``release_name`` ignoring
-    case and whitespace (a hyphen or underscore counts as whitespace).
+    case and whitespace (hyphens and underscores are ignored too).
     Then the title is to be corrected and the files of the build that are not
     attached uploaded. Returns None when the rule does not
     apply (a different note or title, no release details, or nothing to
