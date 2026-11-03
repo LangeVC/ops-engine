@@ -272,9 +272,12 @@ class GithubAdapter(ForgeAdapter):
     async def release_conflict(
         self, exc: Exception, repo_full_name: str, tag_name: str
     ) -> bool:
-        # GitHub answers 422 for a duplicate tag, with errors[].code
-        # "already_exists", but 422 is also its generic validation failure: any
-        # other code is not a duplicate; no usable body is settled by a lookup.
+        # GitHub answers 422 for a duplicate tag. The code errors[].code
+        # "already_exists" is NOT confirmed by a measurement (LVC-299 records
+        # only the 422, not the body); it is assumed from GitHub's documented
+        # error shape, and 422 is also its generic validation failure: an
+        # unexpected code stays a failure; a body without codes is settled by a
+        # lookup.
         if not (
             isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 422
         ):

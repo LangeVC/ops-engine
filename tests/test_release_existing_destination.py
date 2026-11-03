@@ -14,8 +14,12 @@ Source of the forge facts (read 2026-11-03, not assumed):
            the specified tag" (rest-api-description, repos/get-release-by-tag),
            so a DRAFT answers 404. GET /releases: "Only users with push access
            will receive listings for draft releases" (repos/list-releases).
-           Creating a second release for a tag answers 422 with
-           ``errors[].code == "already_exists"`` (measured in LVC-299).
+           Creating a second release for a tag answers 422 (LVC-299 records the
+           422 only, not the body). The code ``errors[].code == "already_exists"``
+           is NOT confirmed by a measurement; it is assumed from GitHub's
+           documented error shape (the reference documents 422 only as generic
+           validation_failed). An unexpected code stays a failure; a body
+           without codes is settled by a lookup.
 
 The fake destination here is an ``httpx`` transport behind the real adapters, so
 the adapters' own request pipeline runs; only the socket is replaced.
@@ -135,8 +139,8 @@ async def test_github_create_422_already_exists_reports_destination_as_holding_t
 
 @pytest.mark.asyncio
 async def test_github_bare_422_is_checked_before_it_is_called_a_duplicate(tmp_path):
-    # A 422 without the already_exists code is not proof of a duplicate: with
-    # nothing listed for the tag it stays a failure.
+    # A 422 without the (assumed, unmeasured) already_exists code is not proof
+    # of a duplicate: with nothing listed for the tag it stays a failure.
     dest = FakeDestination(422, {"message": "Validation Failed",
                                  "errors": [{"code": "invalid", "field": "target_commitish"}]})
     report, _ = await _publish("github", _github(dest), tmp_path)
