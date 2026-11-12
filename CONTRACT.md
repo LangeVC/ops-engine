@@ -131,7 +131,7 @@ of scope for this revision.
       "kind": "async_staticmethod",
       "args": ["event", "destinations"],
       "required_args": ["event", "destinations"],
-      "kwargs": ["repo_dir", "runner", "audit", "candidate_globs"],
+      "kwargs": ["repo_dir", "runner", "audit", "candidate_globs", "visibility_exceptions"],
       "required_kwargs": ["repo_dir"]
     },
     {
@@ -141,7 +141,7 @@ of scope for this revision.
       "kind": "async_staticmethod",
       "args": ["canonical_url", "destinations"],
       "required_args": ["canonical_url", "destinations"],
-      "kwargs": ["runner", "audit", "workdir", "candidate_globs"],
+      "kwargs": ["runner", "audit", "workdir", "candidate_globs", "visibility_exceptions"],
       "required_kwargs": []
     },
     {
@@ -181,6 +181,13 @@ of scope for this revision.
       "module": "ops_engine.config_loader",
       "name": "visibility_candidate_globs",
       "type": "list[str]",
+      "default": "[]"
+    },
+    {
+      "class": "RepoConfig",
+      "module": "ops_engine.config_loader",
+      "name": "visibility_exceptions",
+      "type": "list[VisibilityException]",
       "default": "[]"
     },
     {
@@ -228,12 +235,12 @@ The `RuntimeIdentity` return type is not itself a promised name.
 `ReconcileHandler` (a `contract` name above) is the class
 `ops_engine.modules.reconcile.ReconcileHandler`; `MirrorHandler` was already
 promised. Five of their methods are declared in the `methods` array of the
-declaration block with their parameters, and two configuration fields in its
+declaration block with their parameters, and three configuration fields in its
 `fields` array. All five methods are `async` static methods.
 
 ```python
-MirrorHandler.push_event(event, destinations, *, repo_dir, runner=None, audit=None, candidate_globs=None) -> list[str]
-MirrorHandler.sync_state(canonical_url, destinations, *, runner=None, audit=None, workdir=None, candidate_globs=None) -> list[str]
+MirrorHandler.push_event(event, destinations, *, repo_dir, runner=None, audit=None, candidate_globs=None, visibility_exceptions=None) -> list[str]
+MirrorHandler.sync_state(canonical_url, destinations, *, runner=None, audit=None, workdir=None, candidate_globs=None, visibility_exceptions=None) -> list[str]
 MirrorHandler.sweep_deleted_refs(canonical_url, destinations, *, runner=None, audit=None, workdir=None) -> list[str]
 ReconcileHandler.measure_drift(primary, primary_repo, mirror, mirror_repo) -> DriftReport
 ReconcileHandler.reconcile_mirror(primary, primary_repo, mirror, mirror_repo, canonical_url, destinations, *, runner=None, audit=None, workdir=None, measure_destinations=None, candidate_globs=None) -> DriftReport
@@ -248,16 +255,26 @@ state-syncs when behind, and measures again. The first three return the audit
 lines of the call. `candidate_globs` are the path globs the visibility gate
 judges on a public destination.
 
+`visibility_exceptions` are `(path, blob)` pairs the gate excuses. A pair
+excuses candidate content only when it names BOTH that path and the exact
+object id stored there: the same path at another blob, and the same blob at
+another path, are still refused (P36-001). The refusal line names each offence
+as `offending=<commit>:<path>@<blob>`.
+
 ```python
 RepoConfig.visibility_candidate_globs: list[str] = []
+RepoConfig.visibility_exceptions: list[VisibilityException] = []
 Destination.host: str = ""
 ```
 
 `visibility_candidate_globs` are the adopter's own path globs that may carry
 planning substrate. The engine carries **no default** globs: a repository with
 a public mirror destination that declares none is refused at configuration
-load. `Destination.host` is the remote host of a destination; empty means the
-default host of its forge (`github` and `gitlab` have one). A `mirror`
+load. `visibility_exceptions` are the adopter's exact `(path, blob)` pairs the
+gate excuses, each a full lowercase hexadecimal object id; the engine carries
+none, so the list is empty by default and a malformed entry is refused at
+configuration load. `Destination.host` is the remote host of a destination;
+empty means the default host of its forge (`github` and `gitlab` have one). A `mirror`
 destination on any other forge must declare `host`, or the configuration is
 refused at load.
 

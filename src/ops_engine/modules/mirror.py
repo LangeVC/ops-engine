@@ -139,6 +139,79 @@ def __getattr__(name: str) -> str:
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
+def _parse_candidate_offences(
+    raw_output: str, globs: Sequence[str]
+) -> list[tuple[str, str, str]]:
+    """Parse ``git log -m --root --raw --no-abbrev -z --format=%H`` output.
+
+    Returns the candidate-path offences as ``(commit, path, blob)`` records: the
+    commit that carried the path, the path, and the object id of the content
+    stored there. Identity is the whole record, so a consumer that excuses one
+    record cannot excuse the same path at another blob or the same blob at
+    another path (P36-001).
+
+    The stream is NUL-separated: a bare object id is the current commit, a token
+    whose first character (ignoring the record-separating newline) is ``:`` is a
+    raw record header ``:<oldmode> <newmode> <old blob> <new blob> <status>``,
+    and the header is followed by one path token — two for a rename or copy.
+    A deletion carries a zero new blob, so the content it removed is described
+    by the old blob. Records are deduplicated by ``(path, blob)``, keeping the
+    newest commit (``git log`` walks newest first).
+    """
+    tokens = raw_output.split("\0")
+    commit = ""
+    offences: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        if token.lstrip("\n").startswith(":"):
+            header = token.lstrip("\n").split()
+            i += 1
+            if len(header) < 5:
+                continue
+            _oldmode, _newmode, old_blob, new_blob, status = header[:5]
+            blob = old_blob if status.startswith("D") else new_blob
+            paths_in_record = 2 if status[:1] in ("R", "C") else 1
+            for _ in range(paths_in_record):
+                if i >= len(tokens):
+                    break
+                path = tokens[i].strip("\n")
+                i += 1
+                if not path or not any(fnmatch.fnmatch(path, g) for g in globs):
+                    continue
+                if (path, blob) in seen:
+                    continue
+                seen.add((path, blob))
+                offences.append((commit, path, blob))
+            continue
+        candidate = token.strip("\n")
+        if candidate and _OBJECT_ID.fullmatch(candidate):
+            commit = candidate
+        i += 1
+    return offences
+
+
+def _unexcused_offences(
+    offences: Sequence[tuple[str, str, str]],
+    excused: frozenset[tuple[str, str]],
+) -> list[tuple[str, str, str]]:
+    """The offences no ``(path, blob)`` exception covers (P36-001).
+
+    The match is on the whole pair. A record with no blob (the fail-closed
+    sentinel) is never excused.
+    """
+    return [o for o in offences if not (o[2] and (o[1], o[2]) in excused)]
+
+
+def _offence_field(offences: Sequence[tuple[str, str, str]]) -> str:
+    """``commit:path@blob`` per offence, comma-joined, for the refusal line."""
+    return ",".join(
+        f"{commit}:{path}@{blob}" if blob else path
+        for commit, path, blob in offences
+    )
+
+
 # The path classes that may carry planning substrate are configuration, not
 # code (OE-037): ``RepoConfig.visibility_candidate_globs`` reaches the gate as
 # ``candidate_globs`` or ``VisibilityConfig.candidate_globs``. They are a
@@ -434,6 +507,9 @@ class MirrorHandler:
         runner: Optional[Callable[[list[str], str], Awaitable[tuple[int, str]]]] = None,
         audit: Optional[list[str]] = None,
         candidate_globs: Optional[Sequence[str]] = None,
+        visibility_exceptions: Optional[
+            Sequence[tuple[str, str]]
+        ] = None,
     ) -> list[str]:
         """Push exactly the triggering ref to every mirror destination (OE-022).
 
@@ -457,14 +533,21 @@ class MirrorHandler:
 
         Visibility gate (public destinations only). A destination whose
         configured ``visibility`` is ``"public"`` receives the ref only if NO
-        commit reachable from the ref touches a candidate path
+        UNEXCUSED commit reachable from the ref touches a candidate path
         (``candidate_globs``; configuration:
         ``RepoConfig.visibility_candidate_globs``). The whole reachable history
         is judged, because pushing a ref sends it; the payload's ``before`` SHA
         is never trusted to shorten the judgement, so a ref cannot ship the
         history of a refused ancestor. A refusal is audited as a
-        ``mirror-refused`` line naming the paths, and nothing is pushed to that
-        destination. A history that cannot be read refuses (fail closed).
+        ``mirror-refused`` line naming each offence as ``commit:path@blob``, and
+        nothing is pushed to that destination. A history that cannot be read
+        refuses (fail closed).
+
+        ``visibility_exceptions`` are ``(path, blob)`` pairs the gate excuses
+        (configuration: ``RepoConfig.visibility_exceptions``). A pair excuses a
+        candidate path only when it names BOTH that path and the exact object id
+        stored there; the same path at another blob, or the same blob at another
+        path, is still refused (P36-001). Empty by default.
         Destinations that are not ``"public"`` are mirrored without any gate. A
         destination whose visibility is neither public nor private is refused.
         """
@@ -490,7 +573,9 @@ class MirrorHandler:
         run = runner or _run_git
         refspec = f"+{sha}:{ref}"
         globs = tuple(candidate_globs) if candidate_globs is not None else ()
-        touched: Optional[list[str]] = None  # computed once, only if a public dest exists
+        excused = frozenset(visibility_exceptions or ())
+        # computed once, only if a public destination exists
+        refused_by_content: Optional[list[tuple[str, str, str]]] = None
         for dest in destinations:
             if dest.role != "mirror":
                 continue
@@ -509,14 +594,19 @@ class MirrorHandler:
                         audit.append(line)
                     logger.warning(line)
                     continue
-                if touched is None:
-                    touched = await MirrorHandler._touched_candidates(
-                        run, repo_dir, sha, globs
+                if refused_by_content is None:
+                    refused_by_content = _unexcused_offences(
+                        await MirrorHandler._candidate_offences(
+                            run, repo_dir, sha, globs
+                        ),
+                        excused,
                     )
-                if touched:
+                if refused_by_content:
+                    paths = sorted({path for _c, path, _b in refused_by_content})
                     line = (
                         f"mirror-refused ref={ref} dest={dest.forge}:{dest.repo} "
-                        f"sha={sha} paths={','.join(touched)}"
+                        f"sha={sha} paths={','.join(paths)} "
+                        f"offending={_offence_field(refused_by_content)}"
                     )
                     lines.append(line)
                     if audit is not None:
@@ -552,6 +642,9 @@ class MirrorHandler:
         audit: Optional[list[str]] = None,
         workdir: Optional[str] = None,
         candidate_globs: Optional[Sequence[str]] = None,
+        visibility_exceptions: Optional[
+            Sequence[tuple[str, str]]
+        ] = None,
     ) -> list[str]:
         """Push every canonical head and tag to every mirror destination (OE-023).
 
@@ -571,13 +664,16 @@ class MirrorHandler:
 
         Visibility gate (OE-035, same rule as :meth:`push_event`). A destination
         whose ``visibility`` is ``"public"`` does not receive a head or tag from
-        whose reachable history any commit touches a candidate path
+        whose reachable history any commit touches an UNEXCUSED candidate path
         (``candidate_globs``; none declared refuses a public destination),
         judged in the fresh clone over the whole history. Each such ref is
-        audited as ``mirror-refused`` naming the paths, and the remaining refs
-        are pushed to that destination as explicit refspecs. An unreadable
-        history refuses (fail closed). Destinations that are not ``"public"``
-        still receive every ref.
+        audited as ``mirror-refused`` naming each offence as ``commit:path@blob``,
+        and the remaining refs are pushed to that destination as explicit
+        refspecs. An unreadable history refuses (fail closed). Destinations that
+        are not ``"public"`` still receive every ref.
+
+        ``visibility_exceptions`` are ``(path, blob)`` pairs excusing exactly
+        that content — the same rule as :meth:`push_event` (P36-001).
 
         Ahead protection (OE-036, D15; always on, for a direct call as well as
         via :meth:`ReconcileHandler.reconcile_mirror`). A mirror head
@@ -589,6 +685,7 @@ class MirrorHandler:
         lines: list[str] = []
         run = runner or _run_git
         globs = tuple(candidate_globs) if candidate_globs is not None else ()
+        excused = frozenset(visibility_exceptions or ())
 
         def record(line: str) -> None:
             lines.append(line)
@@ -605,9 +702,10 @@ class MirrorHandler:
                     f"exit={code} nothing-written"
                 )
                 return lines
-            # Refs and their refused paths, computed once and only when a public
-            # destination exists: ref -> (sha, touched candidate paths; empty = clean).
-            gated: Optional[dict[str, tuple[str, list[str]]]] = None
+            # Refs and their refused offences, computed once and only when a
+            # public destination exists: ref -> (sha, unexcused offences; empty
+            # = every candidate is excused or none is touched).
+            gated: Optional[dict[str, tuple[str, list[tuple[str, str, str]]]]] = None
             for dest in destinations:
                 if dest.role != "mirror":
                     continue
@@ -628,17 +726,24 @@ class MirrorHandler:
                         record(MirrorHandler.no_candidate_globs_line(dest, ref="*"))
                         continue
                     if gated is None:
-                        gated = await MirrorHandler._gate_clone_refs(
-                            run, clone, globs
-                        )
+                        gated = {
+                            ref: (sha, _unexcused_offences(offences, excused))
+                            for ref, (sha, offences) in (
+                                await MirrorHandler._gate_clone_refs(
+                                    run, clone, globs
+                                )
+                            ).items()
+                        }
                     refused = {r: (sha, p) for r, (sha, p) in gated.items() if p}
                     if refused:
-                        for ref, (sha, paths) in refused.items():
+                        for ref, (sha, offences) in refused.items():
+                            paths = sorted({path for _c, path, _b in offences})
                             record(
                                 f"mirror-refused ref={ref} "
                                 f"dest={dest.forge}:{dest.repo} "
                                 f"sha={sha} "
-                                f"paths={','.join(paths)}"
+                                f"paths={','.join(paths)} "
+                                f"offending={_offence_field(offences)}"
                             )
                         refspecs = [f"+{r}:{r}" for r in gated if r not in refused]
                         if not refspecs:
@@ -889,10 +994,10 @@ class MirrorHandler:
         run: Callable[[list[str], str], Awaitable[tuple[int, str]]],
         clone: str,
         globs: Sequence[str],
-    ) -> dict[str, tuple[str, list[str]]]:
+    ) -> dict[str, tuple[str, list[tuple[str, str, str]]]]:
         """Judge every head and tag of ``clone`` against the candidate paths.
 
-        Returns ``ref -> (commit sha, touched candidate paths)``; an empty path
+        Returns ``ref -> (commit sha, candidate offences)``; an empty offence
         list means the ref is clean. A ref list that cannot be read yields a
         single ``refs`` entry that refuses (fail closed).
         """
@@ -905,8 +1010,8 @@ class MirrorHandler:
             clone,
         )
         if code != 0:
-            return {"refs": ("", ["<refs unreadable>"])}
-        result: dict[str, tuple[str, list[str]]] = {}
+            return {"refs": ("-", [("-", "<refs unreadable>", "")])}
+        result: dict[str, tuple[str, list[tuple[str, str, str]]]] = {}
         for row in out.splitlines():
             parts = row.split()
             if len(parts) < 2:
@@ -914,28 +1019,30 @@ class MirrorHandler:
             ref, sha = parts[0], parts[-1]  # peeled commit for annotated tags
             result[ref] = (
                 sha,
-                await MirrorHandler._touched_candidates(
-                    run, clone, sha, globs
-                ),
+                await MirrorHandler._candidate_offences(run, clone, sha, globs),
             )
         return result
 
     @staticmethod
-    async def _touched_candidates(
+    async def _candidate_offences(
         run: Callable[[list[str], str], Awaitable[tuple[int, str]]],
         repo_dir: str,
         sha: str,
         globs: Sequence[str],
-    ) -> list[str]:
-        """Candidate paths touched by any commit reachable from ``sha``.
+    ) -> list[tuple[str, str, str]]:
+        """Candidate ``(commit, path, blob)`` offences reachable from ``sha``.
 
         The judged set is the WHOLE reachable history (merges against each
         parent, root commits included): pushing a ref sends that history, so a
         ref inherits the refusal of any ancestor that touched a candidate path.
         The payload's pre-push SHA is never trusted to shorten the judgement.
-        Paths are read NUL-separated and unquoted, so a non-ASCII name cannot
-        dodge a glob. Returns the matching paths, or ``["<history unresolved>"]``
-        when the history cannot be read (the gate fails closed).
+
+        Each offence names the commit that carried the path and the object id
+        stored there, so the gate can excuse one exact piece of content without
+        excusing the path in general (P36-001). Paths are read NUL-separated and
+        unquoted, so a non-ASCII name cannot dodge a glob. When the history
+        cannot be read the single sentinel offence carries no blob and is never
+        excused (the gate fails closed).
         """
         # A tree, blob or tag-of-tree makes `git log` exit 0 with no output, which
         # would read as clean: only an object that peels to a commit is judged.
@@ -943,18 +1050,17 @@ class MirrorHandler:
             ["git", "rev-parse", "--verify", "-q", f"{sha}^{{commit}}"], repo_dir
         )
         if pcode != 0:
-            return ["<not a commit>"]
+            return [(sha, "<not a commit>", "")]
         code, out = await run(
             [
                 "git", "-c", "core.quotePath=false", "log", "-m", "--root",
-                "--name-only", "-z", "--format=", sha,
+                "--raw", "--no-abbrev", "-z", "--format=%H", sha,
             ],
             repo_dir,
         )
         if code != 0:
-            return ["<history unresolved>"]
-        paths = sorted({p.strip("\n") for p in out.split("\0") if p.strip("\n")})
-        return [p for p in paths if any(fnmatch.fnmatch(p, g) for g in globs)]
+            return [(sha, "<history unresolved>", "")]
+        return _parse_candidate_offences(out, globs)
 
     @staticmethod
     def resolve_destination(

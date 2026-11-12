@@ -6,6 +6,7 @@ v3.2: Added Destination (DST-001) — the forge becomes a value, not a key name.
 """
 
 import hashlib
+import re
 import warnings
 from pathlib import Path
 from typing import Any, Optional
@@ -387,6 +388,43 @@ class MigrationTargetConfig(BaseModel):
     mode: str = Field(default="manual_apply")
 
 
+# P36-001: one excused piece of planning substrate. An exception names BOTH a
+# path and the blob SHA stored there, so it can only excuse exactly that
+# content: the same path at another blob, or the same blob at another path, is
+# not excused.
+_BLOB_SHA_RE = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+
+
+class VisibilityException(BaseModel):
+    """A ``(path, blob)`` pair the visibility gate lets through (P36-001).
+
+    ``path`` must be a non-empty, non-whitespace repository path; ``blob`` must
+    be a full lowercase hexadecimal object id (SHA-1 40 or SHA-256 64). A
+    malformed entry is refused here, at the configuration boundary, rather than
+    at gate time where it would silently never match.
+    """
+
+    path: str
+    blob: str
+
+    @field_validator("path")
+    @classmethod
+    def _path_is_named(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("visibility exception 'path' must not be empty")
+        return value
+
+    @field_validator("blob")
+    @classmethod
+    def _blob_is_a_full_object_id(cls, value: str) -> str:
+        if not _BLOB_SHA_RE.fullmatch(value):
+            raise ValueError(
+                "visibility exception 'blob' must be 40 or 64 lowercase "
+                f"hexadecimal characters, got {value!r}"
+            )
+        return value
+
+
 # --- Aggregate Configs ---
 
 
@@ -412,6 +450,9 @@ class RepoConfig(BaseModel):
     # public destination. Configuration, not code.
     # OE-037 (D14): no default; see ``_public_destination_declares_globs``.
     visibility_candidate_globs: list[str] = Field(default_factory=list)
+    # P36-001: exact ``(path, blob)`` pairs the visibility gate excuses. Empty
+    # by default: without an explicit exception the gate refuses as before.
+    visibility_exceptions: list[VisibilityException] = Field(default_factory=list)
 
     @field_validator("mirror")
     @classmethod
@@ -504,6 +545,14 @@ class RepoConfig(BaseModel):
                 "carries no default globs"
             )
         return self
+
+    def visibility_exception_pairs(self) -> tuple[tuple[str, str], ...]:
+        """The configured exceptions as immutable ``(path, blob)`` pairs (P36-001).
+
+        The gate compares whole pairs; there is deliberately no path-only view
+        a caller could match on.
+        """
+        return tuple((e.path, e.blob) for e in self.visibility_exceptions)
 
     def resolve_destinations(self) -> list[Destination]:
         """Resolve this repo's destinations into a :class:`Destination` list.
@@ -751,6 +800,7 @@ class OpsEngineConfig(BaseModel):
             notifications=repo_specific.notifications or org_config.notifications,
             destinations=repo_specific.destinations,  # no org default (repo-specific only)
             visibility_candidate_globs=repo_specific.visibility_candidate_globs,
+            visibility_exceptions=repo_specific.visibility_exceptions,
         )
         _assert_typed_sections(resolved, org_name, repo_name)
         return resolved
