@@ -55,7 +55,12 @@ def _config(forge: str) -> OpsEngineConfig:
                     "repositories": {
                         "ops-engine": {
                             "destinations": [
-                                {"forge": forge, "repo": REPO, "role": "release"}
+                                {
+                                    "forge": forge,
+                                    "repo": REPO,
+                                    "role": "release",
+                                    "credential_variable": "OPS_TOKEN",
+                                }
                             ]
                         }
                     }
