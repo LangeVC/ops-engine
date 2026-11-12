@@ -33,8 +33,14 @@ _GH_SECRET = "github-webhook-secret"
 
 def _release_destinations() -> list[Destination]:
     return [
-        Destination(forge="forgejo", repo="exampleorg/engine", role="release"),
-        Destination(forge="github", repo="exampleorg/engine", role="release"),
+        Destination(
+            forge="forgejo", repo="exampleorg/engine", role="release",
+            credential_variable="FORGEJO_TOKEN",
+        ),
+        Destination(
+            forge="github", repo="exampleorg/engine", role="release",
+            credential_variable="GITHUB_TOKEN",
+        ),
     ]
 
 
@@ -50,11 +56,13 @@ def _both_forge_release_config() -> OpsEngineConfig:
                                     "forge": "forgejo",
                                     "repo": "exampleorg/engine",
                                     "role": "release",
+                                    "credential_variable": "FORGEJO_TOKEN",
                                 },
                                 {
                                     "forge": "github",
                                     "repo": "exampleorg/engine",
                                     "role": "release",
+                                    "credential_variable": "GITHUB_TOKEN",
                                 },
                             ]
                         }
@@ -87,7 +95,7 @@ async def test_publish_release_serves_each_destination_its_own_credential(tmp_pa
 
     adapters = adapters_for(
         destinations,
-        credentials={"forgejo": cred_forgejo, "github": cred_github},
+        credentials={"FORGEJO_TOKEN": cred_forgejo, "GITHUB_TOKEN": cred_github},
         base_url="https://code.example.org",
     )
 
@@ -140,7 +148,7 @@ async def test_forgejo_destination_never_receives_github_token(tmp_path):
 
     adapters = adapters_for(
         destinations,
-        credentials={"forgejo": cred_forgejo, "github": cred_github},
+        credentials={"FORGEJO_TOKEN": cred_forgejo, "GITHUB_TOKEN": cred_github},
         base_url="https://code.example.org",
     )
 

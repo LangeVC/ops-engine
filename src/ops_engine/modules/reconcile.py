@@ -291,6 +291,25 @@ class ReconcileHandler:
             ]
         adapters = context.adapters
         if adapters is None:
+            if context.credentials is not None:
+                # P36-002 criterion 3: build per-destination; a missing
+                # credential fails only that destination. A destination we
+                # can't check is treated as missing so the release path
+                # records it.
+                for destination in destinations:
+                    try:
+                        dest_adapters = adapters_for(
+                            [destination],
+                            base_url=context.base_url,
+                            credentials=context.credentials,
+                        )
+                    except Exception:
+                        return True
+                    if not await dest_adapters[0].release_exists(
+                        destination.repo, tag_name
+                    ):
+                        return True
+                return False
             adapters = adapters_for(
                 destinations,
                 token=context.token,
@@ -416,6 +435,7 @@ class ReconcileHandler:
         workdir: Optional[str] = None,
         measure_destinations: Optional[Sequence[Destination]] = None,
         candidate_globs: Optional[Sequence[str]] = None,
+        credentials: Optional[dict[str, str]] = None,
     ) -> DriftReport:
         """One reconcile cycle: measure drift, state-sync when behind, re-measure.
 
@@ -459,6 +479,7 @@ class ReconcileHandler:
             audit=audit,
             workdir=workdir,
             candidate_globs=candidate_globs,
+            credentials=credentials,
         )
         final = await ReconcileHandler.measure_drift(
             primary, primary_repo, mirror, mirror_repo

@@ -758,7 +758,10 @@ class MirrorHandler:
                         if not refspecs:
                             continue
                 if not dest.overwrite_ahead:
-                    ahead = await MirrorHandler._ahead_heads(run, clone, remote)
+                    ahead_env = _push_credential_env(dest, remote, credentials)
+                    ahead = await MirrorHandler._ahead_heads(
+                        run, clone, remote, env=ahead_env or None,
+                    )
                     if ahead is None:
                         record(
                             f"mirror-state-failed reason=ahead-probe-failed "
@@ -803,6 +806,7 @@ class MirrorHandler:
         run: Callable[[list[str], str], Awaitable[tuple[int, str]]],
         clone: str,
         remote: str,
+        env: Optional[dict] = None,
     ) -> Optional[dict[str, tuple[str, str]]]:
         """Heads on the mirror that strictly contain the canonical tip (OE-036, D15).
 
@@ -810,8 +814,17 @@ class MirrorHandler:
         both sides whose mirror commit differs from canonical and has the
         canonical commit as an ancestor. Returns ``None`` when the mirror cannot
         be read (the caller fails closed).
+
+        ``env``, when given, is the credential environment for the remote-facing
+        calls (ls-remote, fetch); it is merged into the subprocess environment
+        so the credential reaches git through ``http.extraHeader`` (P36-002).
         """
-        lcode, lout = await run(["git", "ls-remote", "--heads", remote], clone)
+        if env is not None:
+            lcode, lout = await _run_git(
+                ["git", "ls-remote", "--heads", remote], clone, env=env,
+            )
+        else:
+            lcode, lout = await run(["git", "ls-remote", "--heads", remote], clone)
         if lcode != 0:
             return None
         mirror_heads: dict[str, str] = {}
@@ -837,10 +850,18 @@ class MirrorHandler:
         }
         if not differing:
             return {}
-        fcode, _fout = await run(
-            ["git", "fetch", "--no-tags", remote, "+refs/heads/*:refs/mirror-probe/*"],
-            clone,
-        )
+        if env is not None:
+            fcode, _fout = await _run_git(
+                ["git", "fetch", "--no-tags", remote,
+                 "+refs/heads/*:refs/mirror-probe/*"],
+                clone, env=env,
+            )
+        else:
+            fcode, _fout = await run(
+                ["git", "fetch", "--no-tags", remote,
+                 "+refs/heads/*:refs/mirror-probe/*"],
+                clone,
+            )
         if fcode != 0:
             return None
         ahead: dict[str, tuple[str, str]] = {}
@@ -937,9 +958,16 @@ class MirrorHandler:
                     record(MirrorHandler.no_host_line(dest, ref="*"))
                     continue
                 remote = f"https://{host}/{dest.repo}.git"
-                lcode, lout = await run(
-                    ["git", "ls-remote", "--heads", "--tags", remote], clone
-                )
+                sweep_env = _push_credential_env(dest, remote, credentials)
+                if sweep_env:
+                    lcode, lout = await _run_git(
+                        ["git", "ls-remote", "--heads", "--tags", remote],
+                        clone, env=sweep_env,
+                    )
+                else:
+                    lcode, lout = await run(
+                        ["git", "ls-remote", "--heads", "--tags", remote], clone
+                    )
                 if lcode != 0:
                     record(
                         f"mirror-sweep-aborted reason=mirror-refs-unreadable "

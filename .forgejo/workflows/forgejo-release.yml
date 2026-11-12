@@ -636,6 +636,19 @@ jobs:
           # that ReleaseHandler.publish_release (whose internal
           # resolve_destinations takes no repo_dir) re-resolves the same list.
           org, _, repo_name = repo.partition("/")
+          def _destination_dict(d):
+              entry = {
+                  "forge": d.forge,
+                  "repo": d.repo,
+                  "role": d.role,
+                  "visibility": d.visibility,
+              }
+              if d.credential_variable:
+                  entry["credential_variable"] = d.credential_variable
+              if d.host:
+                  entry["host"] = d.host
+              return entry
+
           config = OpsEngineConfig.load(
               {
                   "orgs": {
@@ -643,13 +656,7 @@ jobs:
                           "repositories": {
                               repo_name: {
                                   "destinations": [
-                                      {
-                                          "forge": d.forge,
-                                          "repo": d.repo,
-                                          "role": d.role,
-                                          "visibility": d.visibility,
-                                      }
-                                      for d in destinations
+                                      _destination_dict(d) for d in destinations
                                   ]
                               }
                           }
@@ -750,15 +757,16 @@ jobs:
                   _push_mirror_tag(_mirror_remote(mirror_dest.repo))
 
               # ADP-011 — the factory serves the credential each destination's
-              # forge declares, so the two forges' distinct tokens are mapped
-              # in one call. A destination whose forge has no credential here
-              # is a named refusal, not a silent unauthenticated publication.
+              # credential_variable declares, so the two forges' distinct tokens
+              # are mapped in one call. A destination whose variable has no
+              # credential here is a named refusal, not a silent unauthenticated
+              # publication.
               credentials = {
-                  "forgejo": Credential(
+                  "FORGEJO_TOKEN": Credential(
                       token=os.environ["FORGEJO_TOKEN"],
                       webhook_secret=os.environ["FORGEJO_WEBHOOK_SECRET"],
                   ),
-                  "github": Credential(
+                  "GH_MIRROR_TOKEN": Credential(
                       token=os.environ["GH_MIRROR_TOKEN"],
                       webhook_secret=os.environ["GH_MIRROR_WEBHOOK_SECRET"],
                   ),

@@ -220,7 +220,7 @@ def test_config_from_the_workflow_shape_resolves_two_destinations():
     exactly the canonical Forgejo destination plus the configured mirrors — a
     real run of resolve_destinations, not a text read."""
     raw_destinations = yaml.safe_load(
-        "- {forge: github, repo: LangeVC/ops-engine, role: release}\n"
+        "- {forge: github, repo: LangeVC/ops-engine, role: release, credential_variable: GH_MIRROR_TOKEN}\n"
     )
     repo = "langevc/ops-engine"
     org, _, repo_name = repo.partition("/")
@@ -231,7 +231,7 @@ def test_config_from_the_workflow_shape_resolves_two_destinations():
                     "repositories": {
                         repo_name: {
                             "destinations": [
-                                {"forge": "forgejo", "repo": repo, "role": "release"}
+                                {"forge": "forgejo", "repo": repo, "role": "release", "credential_variable": "FORGEJO_TOKEN"}
                             ]
                             + raw_destinations
                         }

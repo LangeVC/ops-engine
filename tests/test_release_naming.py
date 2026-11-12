@@ -88,7 +88,7 @@ class TestRenderReleaseName:
 
 
 CHANGELOG_V1 = "## v1.0.0\n\n- Something\n\n## v1.8.0\n\n- Something\n"
-OPS_YAML_RELEASE = "destinations:\n  - {forge: forgejo, repo: testorg/test-repo, role: release}\n"
+OPS_YAML_RELEASE = "destinations:\n  - {forge: forgejo, repo: testorg/test-repo, role: release, credential_variable: FORGEJO_TOKEN}\n"
 
 
 def _release_context(tmp_path, monkeypatch, name_template=None):

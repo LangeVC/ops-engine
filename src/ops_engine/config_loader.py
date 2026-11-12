@@ -513,6 +513,26 @@ class RepoConfig(BaseModel):
                 )
         return value
 
+    @field_validator("destinations")
+    @classmethod
+    def _release_destinations_declare_credential_variable(
+        cls, value: list[Destination],
+    ) -> list[Destination]:
+        """Refuse a release destination without its own credential variable (P36-002).
+
+        Each release destination must name the environment variable that
+        supplies its credential, so two destinations on the same forge receive
+        distinct tokens and a Forgejo destination never receives the GitHub
+        token. The refusal names the destination, not just the forge.
+        """
+        for dest in value:
+            if dest.role == "release" and not dest.credential_variable.strip():
+                raise ValueError(
+                    f"release destination {dest.forge}:{dest.repo} must "
+                    f"declare 'credential_variable'"
+                )
+        return value
+
     @model_validator(mode="after")
     def _public_destination_declares_globs(self, info: ValidationInfo) -> "RepoConfig":
         """Refuse a public mirror destination without ``visibility_candidate_globs`` (OE-037, D14).

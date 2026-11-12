@@ -171,7 +171,7 @@ of scope for this revision.
       "kind": "async_staticmethod",
       "args": ["primary", "primary_repo", "mirror", "mirror_repo", "canonical_url", "destinations"],
       "required_args": ["primary", "primary_repo", "mirror", "mirror_repo", "canonical_url", "destinations"],
-      "kwargs": ["runner", "audit", "workdir", "measure_destinations", "candidate_globs"],
+      "kwargs": ["runner", "audit", "workdir", "measure_destinations", "candidate_globs", "credentials"],
       "required_kwargs": []
     }
   ],
@@ -243,7 +243,7 @@ MirrorHandler.push_event(event, destinations, *, repo_dir, runner=None, audit=No
 MirrorHandler.sync_state(canonical_url, destinations, *, runner=None, audit=None, workdir=None, candidate_globs=None, visibility_exceptions=None, credentials=None) -> list[str]
 MirrorHandler.sweep_deleted_refs(canonical_url, destinations, *, runner=None, audit=None, workdir=None, credentials=None) -> list[str]
 ReconcileHandler.measure_drift(primary, primary_repo, mirror, mirror_repo) -> DriftReport
-ReconcileHandler.reconcile_mirror(primary, primary_repo, mirror, mirror_repo, canonical_url, destinations, *, runner=None, audit=None, workdir=None, measure_destinations=None, candidate_globs=None) -> DriftReport
+ReconcileHandler.reconcile_mirror(primary, primary_repo, mirror, mirror_repo, canonical_url, destinations, *, runner=None, audit=None, workdir=None, measure_destinations=None, candidate_globs=None, credentials=None) -> DriftReport
 ```
 
 `push_event` pushes exactly the ref a push event names to every `mirror`

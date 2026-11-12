@@ -132,6 +132,18 @@ def adapters_for(
     credential shape supplies it.
     """
     if credentials is None:
+        # P36-002: the 3.5.2 shared variable stays accepted for one release
+        # and logs a deprecation (PRD data_contract).
+        if token:
+            import warnings
+            warnings.warn(
+                "adapters_for: shared token via the 'token' parameter is "
+                "deprecated since ops-engine 3.6.0; use per-destination "
+                "credentials via the 'credentials' mapping instead. "
+                "This path will be removed in 4.0.0.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         return [
             adapter_for(
                 destination,

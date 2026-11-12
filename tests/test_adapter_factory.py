@@ -56,6 +56,7 @@ def _both_forge_config() -> OpsEngineConfig:
                                     "forge": "forgejo",
                                     "repo": "exampleorg/engine",
                                     "role": "release",
+                                    "credential_variable": "FORGEJO_TOKEN",
                                 },
                             ]
                         }

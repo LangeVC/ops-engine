@@ -66,10 +66,12 @@ destinations:
     repo: {FORGEJO_REPO}
     role: release
     visibility: public
+    credential_variable: FORGEJO_TOKEN
   - forge: github
     repo: {GITHUB_REPO}
     role: release
     visibility: public
+    credential_variable: GH_MIRROR_TOKEN
 """
 
 

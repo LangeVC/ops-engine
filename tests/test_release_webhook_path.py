@@ -31,7 +31,7 @@ TAG = "v1.2.3"
 CHANGELOG = "# Changes\n\n## v1.2.3\n\n- Faster start.\n\n## v1.2.2\n\n- Older.\n"
 OPS_YAML = """\
 destinations:
-  - {forge: forgejo, repo: exampleorg/engine, role: release}
+  - {forge: forgejo, repo: exampleorg/engine, role: release, credential_variable: FORGEJO_TOKEN}
   - {forge: github, repo: exampleorg/mirror-only, role: mirror, visibility: private}
 """
 
@@ -294,8 +294,8 @@ async def test_repo_ops_yaml_cannot_set_artifact_dir(tmp_path, monkeypatch):
 
 TWO_RELEASE_OPS_YAML = """\
 destinations:
-  - {forge: forgejo, repo: exampleorg/engine, role: release}
-  - {forge: github, repo: exampleorg/engine-pub, role: release}
+  - {forge: forgejo, repo: exampleorg/engine, role: release, credential_variable: FORGEJO_TOKEN}
+  - {forge: github, repo: exampleorg/engine-pub, role: release, credential_variable: GITHUB_TOKEN}
 """
 
 
