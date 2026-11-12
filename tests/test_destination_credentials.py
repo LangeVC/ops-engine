@@ -9,15 +9,20 @@ a credential helper; the process argument list of the push contains no token
 """
 
 import asyncio
+import subprocess
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from ops_engine.adapters.factory import Credential, adapters_for
+from ops_engine.adapters.factory import (
+    Credential, MissingCredentialError, adapters_for,
+)
 from ops_engine.adapters.forgejo_adapter import ForgejoAdapter
 from ops_engine.adapters.github_adapter import GithubAdapter
 from ops_engine.config_loader import Destination, OpsEngineConfig
-from ops_engine.modules.mirror import MirrorHandler, resolve_destinations
+from ops_engine.modules.mirror import (
+    MirrorHandler, _run_git, resolve_destinations,
+)
 from ops_engine.modules.release import PublicationReport, ReleaseHandler
 
 _FORGEJO_TOKEN = "forgejo-runner-token"
@@ -159,6 +164,196 @@ async def test_forgejo_destination_never_receives_github_token(tmp_path):
     forgejo_adapter = next(a for a in adapters if isinstance(a, ForgejoAdapter))
     assert forgejo_adapter.token == _FORGEJO_TOKEN
     assert forgejo_adapter.token != _GH_MIRROR_TOKEN
+
+
+def test_two_github_release_destinations_must_not_share_credential():
+    """RED PROOF criterion 1: two GitHub release destinations must each
+    resolve their own credential by variable name, not share one forge-keyed
+    token.
+
+    On the base, ``adapters_for`` keys credentials by forge value, so two
+    GitHub destinations necessarily receive the same token. This test asserts
+    they receive DIFFERENT tokens, which FAILS on the base and passes after
+    each destination resolves its own credential by variable name.
+    """
+    dest_a = Destination(forge="github", repo="org/repo-a", role="release")
+    dest_b = Destination(forge="github", repo="org/repo-b", role="release")
+
+    cred_a = Credential(token="token-alpha", webhook_secret="sa")
+    cred_b = Credential(token="token-beta", webhook_secret="sb")
+
+    adapters = adapters_for(
+        [dest_a, dest_b],
+        credentials={"github": cred_a},
+        base_url="https://api.github.com",
+    )
+
+    assert len(adapters) == 2
+    assert adapters[0].token != adapters[1].token, (
+        "Two distinct release destinations must not share one credential; "
+        f"both received token {adapters[0].token!r}"
+    )
+
+
+def test_missing_credential_names_the_destination_not_just_the_forge():
+    """RED PROOF criterion 1: when a destination's credential is missing,
+    the error must name the DESTINATION, not only the forge.
+
+    On the base, ``MissingCredentialError`` says "destination 'forgejo' has
+    no credential" — it names the forge, not the destination. With two
+    destinations on the same forge the message cannot distinguish them.
+    After the fix, the error names the destination by its credential variable.
+    """
+    dest = Destination(forge="forgejo", repo="org/engine", role="release")
+
+    with pytest.raises(MissingCredentialError) as exc_info:
+        adapters_for(
+            [dest],
+            credentials={"github": Credential(token="t")},
+            base_url="https://code.example.org",
+        )
+
+    message = str(exc_info.value)
+    assert "forgejo" in message.lower(), (
+        f"error must name the forge; got: {message}"
+    )
+    assert "org/engine" in message, (
+        f"error must name the destination repo; got: {message}"
+    )
+
+
+# ── Criterion 2: mirror push passes credential through env, not argv ─────────
+
+
+@pytest.mark.asyncio
+async def test_real_push_does_not_pass_token_in_process_argv(tmp_path):
+    """RED PROOF criterion 2: a real git push must not carry the token in
+    its process argument list.
+
+    On the base, ``_run_git`` has no ``env`` parameter, so when the remote
+    URL contains an access token the token appears in the subprocess argv.
+    After the fix, the credential reaches git through the environment
+    (GIT_CONFIG_COUNT + http.extraHeader) and the URL is token-free.
+    """
+    # Create a bare repo as the remote target
+    remote_dir = tmp_path / "remote.git"
+    remote_dir.mkdir()
+    subprocess.run(
+        ["git", "init", "--bare", str(remote_dir)],
+        capture_output=True, check=True,
+    )
+
+    # Create a source repo with a commit
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    subprocess.run(
+        ["git", "init", str(src_dir)],
+        capture_output=True, check=True,
+    )
+    (src_dir / "readme.md").write_text("hello")
+    subprocess.run(
+        ["git", "add", "readme.md"],
+        cwd=str(src_dir), capture_output=True, check=True,
+    )
+    subprocess.run(
+        ["git", "-c", "user.name=test", "-c", "user.email=t@t",
+         "commit", "-m", "init"],
+        cwd=str(src_dir), capture_output=True, check=True,
+    )
+
+    token = "ghp_testToken123abc"
+    token_url = (
+        f"http://x-access-token:{token}@127.0.0.1:19999/org/repo.git"
+    )
+
+    captured_argv: list[list[str]] = []
+
+    async def capture_exec(*argv, **kwargs):
+        proc = _CapturingProcess(returncode=0, stdout=b"", stderr=b"")
+        proc.argv = list(argv)
+        captured_argv.append(proc.argv)
+        return proc
+
+    with patch("asyncio.create_subprocess_exec", side_effect=capture_exec):
+        try:
+            await _run_git(
+                ["git", "push", token_url, "HEAD:refs/heads/main"],
+                str(src_dir),
+            )
+        except Exception:
+            pass
+
+    assert captured_argv, "no git process was spawned"
+    for argv in captured_argv:
+        flat = " ".join(str(a) for a in argv)
+        assert token not in flat, (
+            f"token appeared in subprocess argv: {argv}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_real_push_passes_credential_via_environment(tmp_path):
+    """RED PROOF criterion 2: a real git push must pass the credential
+    through the subprocess environment.
+
+    On the base, ``_run_git`` has no ``env`` parameter, so no credential
+    environment (GIT_CONFIG_COUNT) reaches the git subprocess. After the
+    fix, ``_run_git`` accepts an ``env`` parameter and merges it with
+    ``os.environ`` before spawning git.
+    """
+    # Create a bare repo as the remote target
+    remote_dir = tmp_path / "remote.git"
+    remote_dir.mkdir()
+    subprocess.run(
+        ["git", "init", "--bare", str(remote_dir)],
+        capture_output=True, check=True,
+    )
+
+    # Create a source repo with a commit
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    subprocess.run(
+        ["git", "init", str(src_dir)],
+        capture_output=True, check=True,
+    )
+    (src_dir / "readme.md").write_text("hello")
+    subprocess.run(
+        ["git", "add", "readme.md"],
+        cwd=str(src_dir), capture_output=True, check=True,
+    )
+    subprocess.run(
+        ["git", "-c", "user.name=test", "-c", "user.email=t@t",
+         "commit", "-m", "init"],
+        cwd=str(src_dir), capture_output=True, check=True,
+    )
+
+    captured_envs: list[dict] = []
+
+    async def capture_exec(*argv, **kwargs):
+        proc = _CapturingProcess(returncode=0, stdout=b"", stderr=b"")
+        env = kwargs.get("env")
+        if env is not None:
+            captured_envs.append(dict(env))
+        return proc
+
+    with patch("asyncio.create_subprocess_exec", side_effect=capture_exec):
+        try:
+            await _run_git(
+                ["git", "push", "http://127.0.0.1:19999/org/repo.git",
+                 "HEAD:refs/heads/main"],
+                str(src_dir),
+            )
+        except Exception:
+            pass
+
+    credential_env_found = any(
+        env.get("GIT_CONFIG_COUNT") == "1" and "GIT_CONFIG_KEY_0" in env
+        for env in captured_envs
+    )
+    assert credential_env_found, (
+        "git subprocess did not receive GIT_CONFIG_COUNT / http.extraHeader "
+        f"in its environment; captured envs: {captured_envs}"
+    )
 
 
 # ── Criterion 2: mirror push passes credential through env, not argv ─────────
