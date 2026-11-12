@@ -102,6 +102,7 @@ from ops_engine.config_loader import (
     OpsEngineConfig,
     VALID_DESTINATION_VISIBILITIES,
 )
+from ops_engine.modules.tag_identity import _credential_env
 
 logger = logging.getLogger(__name__)
 
@@ -1178,18 +1179,23 @@ class MirrorHandler:
           authenticated token is true, i.e. we may write to it. Reachability
           alone is not ownership.
 
+        The credential reaches git through the environment (GIT_CONFIG_COUNT +
+        http.extraHeader), never in the URL or process argument list, so a
+        process listing of a running push contains no token (P36-002).
+
         Raises:
             MirrorDestinationError: either proof fails, naming the destination
                 and how to fix it. No push has happened and nothing was created.
         """
         remote = f"https://github.com/{destination}.git"
+        env: Optional[dict] = None
         if token:
-            remote = f"https://x-access-token:{token}@github.com/{destination}.git"
+            env = _credential_env(remote, token)
 
         # EXISTS: real git ls-remote, the same proof as the accepted SW152-024
         # preflight. Read-only; a missing repo exits non-zero the same way an
         # unset variable does.
-        exists = await MirrorHandler._repo_exists(remote)
+        exists = await MirrorHandler._repo_exists(remote, env=env)
         if not exists:
             raise MirrorDestinationError(
                 f"cannot vouch for mirror destination '{destination}': it is "
@@ -1464,15 +1470,24 @@ class MirrorHandler:
         return False
 
     @staticmethod
-    async def _repo_exists(remote: str) -> bool:
-        """EXISTS proof: ``git ls-remote <url> HEAD`` exits 0 iff readable."""
+    async def _repo_exists(remote: str, *, env: Optional[dict] = None) -> bool:
+        """EXISTS proof: ``git ls-remote <url> HEAD`` exits 0 iff readable.
+
+        When ``env`` is given, it is passed to the subprocess so the credential
+        reaches git through the environment, never in the URL or argv (P36-002).
+        """
+        kwargs: dict[str, Any] = {
+            "stdout": asyncio.subprocess.DEVNULL,
+            "stderr": asyncio.subprocess.DEVNULL,
+        }
+        if env is not None:
+            kwargs["env"] = {**os.environ, **env}
         proc = await asyncio.create_subprocess_exec(
             "git",
             "ls-remote",
             remote,
             "HEAD",
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
+            **kwargs,
         )
         return await proc.wait() == 0
 

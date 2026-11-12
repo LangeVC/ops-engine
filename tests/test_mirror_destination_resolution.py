@@ -208,7 +208,7 @@ def test_no_config_and_no_variables_refuses_naming_variable():
 
 @pytest.mark.asyncio
 async def test_prove_not_reachable_names_variable(monkeypatch):
-    async def fake_exists(remote):
+    async def fake_exists(remote, *, env=None):
         return False
 
     monkeypatch.setattr(MirrorHandler, "_repo_exists", staticmethod(fake_exists))
@@ -225,7 +225,7 @@ async def test_prove_not_reachable_names_variable(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_prove_exists_but_not_ours_fails(monkeypatch):
-    async def fake_exists(remote):
+    async def fake_exists(remote, *, env=None):
         return True
 
     async def fake_is_ours(destination, *, token, api_base):
@@ -246,7 +246,7 @@ async def test_prove_exists_but_not_ours_fails(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_prove_exists_and_ours_passes(monkeypatch):
-    async def fake_exists(remote):
+    async def fake_exists(remote, *, env=None):
         return True
 
     async def fake_is_ours(destination, *, token, api_base):

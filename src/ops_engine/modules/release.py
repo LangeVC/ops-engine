@@ -11,7 +11,7 @@ from typing import Any, Iterable, Optional
 import httpx
 
 from ops_engine.adapters.base import ForgeAdapter
-from ops_engine.adapters.factory import adapters_for
+from ops_engine.adapters.factory import Credential, adapters_for
 from ops_engine.config_loader import Destination, OpsEngineConfig, ReleaseConfig
 from ops_engine.modules.mirror import resolve_destinations
 from ops_engine.modules.notification import NotificationHandler
@@ -297,6 +297,7 @@ class ReleaseHandler:
         roles: Iterable[str] | None = None,
         skip_existing: bool = False,
         audit: Optional[list[str]] = None,
+        credentials: dict[str, Credential] | None = None,
     ) -> "PublicationReport":
         """Publish a built release to every destination resolved from config.
 
@@ -354,6 +355,12 @@ class ReleaseHandler:
         Files already attached are untouched; nothing is re-created or deleted. When any destination failed, one warning line is logged for
         the whole call (the engine has no event log, D20).
 
+        ``credentials`` is a per-destination credential mapping (ADP-011):
+        each destination's forge value maps to its own :class:`Credential`,
+        so a Forgejo destination never receives the GitHub token and vice
+        versa (P36-002). Omitted or ``None`` falls back to the legacy shared
+        ``token``/``webhook_secret`` pair.
+
         Raises:
             ValueError: a supplied ``adapters`` list does not match the resolved
                 destination count.
@@ -366,6 +373,7 @@ class ReleaseHandler:
                 token=token,
                 webhook_secret=webhook_secret,
                 base_url=base_url,
+                credentials=credentials,
             )
         if len(adapters) != len(destinations):
             raise ValueError(
