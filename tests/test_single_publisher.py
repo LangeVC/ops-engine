@@ -354,6 +354,17 @@ async def test_release_context_publisher_login_reaches_publish_release(
 
     monkeypatch.setattr(release_module, "push_canonical_tag", AsyncMock())
 
+    # Intercept publish_release to capture the report it returns.
+    captured = {}
+    real_publish = ReleaseHandler.publish_release
+
+    async def intercept_publish(*args, **kwargs):
+        result = await real_publish(*args, **kwargs)
+        captured["report"] = result
+        return result
+
+    monkeypatch.setattr(ReleaseHandler, "publish_release", intercept_publish)
+
     context = ReleaseContext(
         ops_config=_config("forgejo"),
         artifact_dir=tmp_path / "dist",
@@ -384,5 +395,9 @@ async def test_release_context_publisher_login_reaches_publish_release(
 
     # The foreign-authored release was NOT written to — no create, no upload, no PATCH.
     assert dest.writes() == []
-    # And it was NOT failed: it was recorded as up-to-date.
     assert dest.creates() == 0
+    # And it was NOT failed: it was recorded as up-to-date with the publisher named.
+    report = captured["report"]
+    label = f"forgejo:{REPO}"
+    assert report.up_to_date == [label]
+    assert report.publisher == "other"
