@@ -133,6 +133,8 @@ class PublicationReport:
             "tag_name": self.tag_name,
             "published_destinations": list(self.published),
             "failed_destinations": list(self.failed),
+            "up_to_date_destinations": list(self.up_to_date),
+            "publishers": dict(self.publishers),
             "partial": self.partial,
         }
 
