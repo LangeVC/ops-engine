@@ -205,7 +205,7 @@ class ReleaseContext:
     adapters: Optional[list[ForgeAdapter]] = None
     credentials: Optional[dict[str, Credential]] = None
     audit: Optional[list[str]] = None
-    publisher_login: str = ""
+    publisher_login: str | dict[str, str] = ""
 
 
 def _resolve_artifact_dir(root: str | Path, configured: Optional[str]) -> Path:
@@ -322,7 +322,7 @@ class ReleaseHandler:
         skip_existing: bool = False,
         audit: Optional[list[str]] = None,
         credentials: dict[str, Credential] | None = None,
-        publisher_login: str = "",
+        publisher_login: str | dict[str, str] = "",
     ) -> "PublicationReport":
         """Publish a built release to every destination resolved from config.
 
@@ -391,6 +391,13 @@ class ReleaseHandler:
         is judged as before. An undeterminable author degrades to ``other``,
         never to a false ``engine``.
 
+        A ``dict[str, str]`` maps credential-variable names to logins (one
+        login per destination, P36-003 design C1). An empty dict means no
+        per-destination mode. A non-empty dict where a destination's
+        credential_variable is absent or maps to an empty string means the
+        derivation failed for that destination: it is failed by name and
+        nothing is supplemented, edited or duplicated (fail closed).
+
         ``credentials`` is a per-destination credential mapping (ADP-011):
         each destination's forge value maps to its own :class:`Credential`,
         so a Forgejo destination never receives the GitHub token and vice
@@ -458,13 +465,30 @@ class ReleaseHandler:
 
         for destination, adapter in paired:
             label = _destination_label(destination)
+            per_dest_login = _resolve_publisher_login(publisher_login, destination)
+            if per_dest_login is None:
+                # Per-destination mode and the login is unavailable: fail
+                # this destination by name, fail closed (P36-003 design C1).
+                logger.error(
+                    f"partial publication: {label} failed: no publisher_login "
+                    f"for credential_variable {destination.credential_variable!r}"
+                )
+                report.failed.append(label)
+                report.failure_details[label] = (
+                    f"publisher_login unavailable for credential_variable "
+                    f"{destination.credential_variable!r}"
+                )
+                _audit_destination(audit, tag_name, label, "failed",
+                                  f"publisher_login unavailable for "
+                                  f"credential_variable {destination.credential_variable!r}")
+                continue
             try:
                 if skip_existing and await adapter.release_exists(
                     destination.repo, tag_name
                 ):
                     await _judge_existing_release(
                         adapter, destination, report, audit, tag_name, label,
-                        release_name, release_notes, artifacts, publisher_login,
+                        release_name, release_notes, artifacts, per_dest_login,
                     )
                     continue
                 created = await _publish_to_destination(
@@ -484,7 +508,7 @@ class ReleaseHandler:
                     # for a release the lookup showed (OE-042a).
                     await _judge_existing_release(
                         adapter, destination, report, audit, tag_name, label,
-                        release_name, release_notes, artifacts, publisher_login,
+                        release_name, release_notes, artifacts, per_dest_login,
                     )
                     continue
             except Exception as exc:  # noqa: BLE001 (record — the report, not abort)
@@ -496,7 +520,7 @@ class ReleaseHandler:
                 _audit_destination(audit, tag_name, label, "failed", detail)
             else:
                 report.published.append(label)
-                if publisher_login:
+                if per_dest_login:
                     # The release this call created is the engine's own.
                     report.publishers[label] = "engine"
                 _audit_destination(audit, tag_name, label, "published")
@@ -643,6 +667,28 @@ def _publisher_of(release: dict, publisher_login: str) -> str:
     if publisher_login and _release_author(release) == publisher_login:
         return "engine"
     return "other"
+
+
+def _resolve_publisher_login(
+    publisher_login: str | dict[str, str],
+    destination: Destination,
+) -> str | None:
+    """Return the publisher login for *destination*, or ``None`` when the
+    caller explicitly signalled per-destination attribution but this
+    destination's login is unavailable (fail closed, P36-003 design C1).
+
+    ``publisher_login`` as a plain ``str`` is used for every destination
+    (the pre-P36-003 call shape).  As a ``dict`` it maps credential-variable
+    names to logins; an empty dict means no per-destination mode (backward
+    compat), a non-empty dict with a missing or empty entry for
+    *destination* means the derivation failed for that destination.
+    """
+    if isinstance(publisher_login, dict):
+        if not publisher_login:
+            return ""
+        cred = destination.credential_variable or ""
+        return publisher_login.get(cred) or None
+    return publisher_login
 
 
 async def _judge_existing_release(

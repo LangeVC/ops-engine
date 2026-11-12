@@ -31,13 +31,3 @@ tracker_prefixes: [LVC, OME, CORE, LNF, DST, REL, CFG, FFR, ADP]
 # dotless entry is refused by the gate by name; nothing here is restated as a
 # literal in .forgejo/.
 forge_hosts: [git.langevc.com]
-
-# The login the engine publishes as (P36-003). A repository can have two
-# publishers — the engine and a repository-local workflow — so a release that
-# already exists on a destination is only the engine's to touch when the release
-# object's author.login names this account. The release workflow reads it from
-# here and passes it to publish_release as publisher_login. Without it (empty
-# string) the engine cannot attribute a release and falls back to the
-# pre-P36-003 behaviour: a pre-existing release from any author is judged as
-# before and may be edited, supplemented or failed.
-publisher_login: dev.bot_langevc

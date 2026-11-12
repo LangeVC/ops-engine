@@ -562,31 +562,64 @@ jobs:
           FORGEJO_WEBHOOK_SECRET: "${{ secrets.FORGEJO_WEBHOOK_SECRET }}"
           GH_MIRROR_TOKEN: "${{ secrets.GH_MIRROR_TOKEN }}"
           GH_MIRROR_WEBHOOK_SECRET: "${{ secrets.GH_MIRROR_WEBHOOK_SECRET }}"
-          PUBLISHER_LOGIN: ""  # derived from the Forgejo API below, never a secret
+          PUBLISHER_LOGIN: ""  # derived per credential below, never a secret
         run: |
           set -euo pipefail
 
-          # P36-003 — derive the publisher login from the authenticated identity
-          # of the engine's own token (GET /api/v1/user), so the workflow never
-          # depends on an operator-provisioned secret. The Forgejo API returns
-          # the login of the token's owning account; that login is the one the
-          # engine publishes as.
+          # P36-003 — derive the publisher login from each credential's own
+          # forge identity, per destination (design C1). A Forgejo token's login
+          # is derived from GET /api/v1/user; a GitHub token's from GET /user.
+          # The result is a JSON dict mapping credential_variable names to
+          # logins. If any destination's login cannot be derived, that
+          # destination fails by name — fail closed.
+          PUBLISHER_LOGIN_JSON='{}'
+          FORGEJO_LOGIN=''
           if [[ -n "${FORGEJO_TOKEN:-}" ]]; then
             LOGIN_RESP="$(curl -sSf -H "Authorization: token ${FORGEJO_TOKEN}" \
               "${FORGEJO_BASE_URL}/api/v1/user")" || true
-            PUBLISHER_LOGIN="$(echo "$LOGIN_RESP" | python3 -c "
+            FORGEJO_LOGIN="$(echo "$LOGIN_RESP" | python3 -c "
           import json, sys
           try:
               data = json.load(sys.stdin)
               print(data.get('login', ''))
           except (json.JSONDecodeError, ValueError):
               print('')
-          " 2>/dev/null)" || PUBLISHER_LOGIN=""
-          else
-            PUBLISHER_LOGIN=""
+          " 2>/dev/null)" || FORGEJO_LOGIN=""
           fi
-          export PUBLISHER_LOGIN
-          echo "publisher_login derived from token identity: '${PUBLISHER_LOGIN}'"
+          if [[ -n "${FORGEJO_LOGIN:-}" ]]; then
+            PUBLISHER_LOGIN_JSON="$(python3 -c "
+          import json, sys
+          d = json.loads(sys.argv[1])
+          d['FORGEJO_TOKEN'] = sys.argv[2]
+          print(json.dumps(d))
+          " "$PUBLISHER_LOGIN_JSON" "$FORGEJO_LOGIN")"
+          fi
+          GITHUB_LOGIN=''
+          if [[ -n "${GH_MIRROR_TOKEN:-}" && -n "${GITHUB_API_BASE:-}" ]]; then
+            LOGIN_RESP="$(curl -sSf -H "Authorization: token ${GH_MIRROR_TOKEN}" \
+              "${GITHUB_API_BASE}/user")" || true
+            GITHUB_LOGIN="$(echo "$LOGIN_RESP" | python3 -c "
+          import json, sys
+          try:
+              data = json.load(sys.stdin)
+              print(data.get('login', ''))
+          except (json.JSONDecodeError, ValueError):
+              print('')
+          " 2>/dev/null)" || GITHUB_LOGIN=""
+          fi
+          if [[ -n "${GITHUB_LOGIN:-}" ]]; then
+            PUBLISHER_LOGIN_JSON="$(python3 -c "
+          import json, sys
+          d = json.loads(sys.argv[1])
+          d['GH_MIRROR_TOKEN'] = sys.argv[2]
+          print(json.dumps(d))
+          " "$PUBLISHER_LOGIN_JSON" "$GITHUB_LOGIN")"
+          fi
+          echo "publisher_logins derived from token identities: ${PUBLISHER_LOGIN_JSON}"
+          # Export the raw JSON; the Python block below parses it into a dict
+          # for publish_release. Empty entries mean the derivation failed;
+          # publish_release fails those destinations by name (fail closed).
+          export PUBLISHER_LOGIN_JSON
 
           # The four assets live split across the repository (dist/*.whl and
           # dist/*.tar.gz) and the workspace root (SHA256SUMS and
@@ -617,6 +650,28 @@ jobs:
               load_ops_yaml,
           )
           from ops_engine.modules.release import ReleaseHandler
+
+          def _publisher_login_dict():
+              """Parse PUBLISHER_LOGIN_JSON into a dict[str, str] mapping
+              credential_variable names to logins. An empty string means the
+              derivation was never attempted (no token for that destination),
+              which publish_release treats as backward-compat mode.
+              Only a non-empty dict with a missing key for a credential_variable
+              signals fail-closed.  A malformed JSON is a hard failure."""
+              import json as _json
+              raw = os.environ.get("PUBLISHER_LOGIN_JSON", "{}")
+              try:
+                  data = _json.loads(raw)
+              except _json.JSONDecodeError as exc:
+                  print(
+                      f"::error::PublisherLoginJsonError: cannot parse "
+                      f"PUBLISHER_LOGIN_JSON as JSON: {exc}",
+                      file=sys.stderr,
+                  )
+                  sys.exit(2)
+              if not isinstance(data, dict):
+                  return {}
+              return {k: v for k, v in data.items() if isinstance(v, str)}
 
           # The release destinations come from the committed .ops.yaml at the
           # repository root (Layer 3), loaded through config_loader.load_ops_yaml.
@@ -851,7 +906,7 @@ jobs:
                   # files) when its notes are this build's, and fails the
                   # destination naming the difference when they are not.
                   skip_existing=True,
-                  publisher_login=os.environ.get("PUBLISHER_LOGIN", ""),
+                  publisher_login=_publisher_login_dict(),
               )
 
               if mirror_failed:

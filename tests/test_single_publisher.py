@@ -401,3 +401,126 @@ async def test_release_context_publisher_login_reaches_publish_release(
     label = f"forgejo:{REPO}"
     assert report.up_to_date == [label]
     assert report.publisher == "other"
+
+
+# --- Per-destination publisher_login (P36-003 design C1) ---------------------
+
+
+def _two_dest_config() -> OpsEngineConfig:
+    """A config with a forgejo and a github destination, each with its own
+    credential_variable."""
+    return OpsEngineConfig.load(
+        {
+            "orgs": {
+                "langevc": {
+                    "repositories": {
+                        "ops-engine": {
+                            "destinations": [
+                                {
+                                    "forge": "forgejo",
+                                    "repo": REPO,
+                                    "role": "release",
+                                    "credential_variable": "FORGEJO_TOKEN",
+                                },
+                                {
+                                    "forge": "github",
+                                    "repo": REPO,
+                                    "role": "release",
+                                    "credential_variable": "GH_MIRROR_TOKEN",
+                                },
+                            ]
+                        }
+                    }
+                }
+            }
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_per_destination_publisher_login_splits_across_forges(tmp_path):
+    """F2c: the engine's own GitHub release (created with GH_MIRROR_TOKEN)
+    is recognised as its own because the publisher login for the github
+    destination is the GitHub account, not the Forgejo one.
+
+    Two destinations, each with its own login. The Forgejo release was made
+    by dev.bot_langevc; the GitHub release by dev-bot-langevc. Each
+    destination is attributed to the engine."""
+    art = tmp_path / "dist"
+    art.mkdir(exist_ok=True)
+    for name in FILES:
+        (art / name).write_bytes(name.encode())
+
+    forgejo_dest = FakeDestination(
+        _release(author=ENGINE_LOGIN, name=TITLE, body="\n" + NOTES + "\n\n", assets=[])
+    )
+    github_dest = FakeDestination(
+        _release(author="dev-bot-langevc", name=TITLE, body="\n" + NOTES + "\n\n", assets=[])
+    )
+    forgejo_adapter = _forgejo(forgejo_dest)
+    github_adapter = _github(github_dest)
+
+    report, audit = await _publish_multi(
+        _two_dest_config(),
+        [forgejo_adapter, github_adapter],
+        tmp_path,
+        publisher_login={"FORGEJO_TOKEN": ENGINE_LOGIN, "GH_MIRROR_TOKEN": "dev-bot-langevc"},
+    )
+
+    # Both are the engine's own releases.
+    assert report.publishers == {
+        f"forgejo:{REPO}": "engine",
+        f"github:{REPO}": "engine",
+    }
+    assert report.publisher == "engine"
+    assert report.failed == []
+    assert report.up_to_date == []
+    # Both supplemented (title already matches, assets missing).
+    assert sorted(report.supplemented) == sorted([f"forgejo:{REPO}", f"github:{REPO}"])
+    assert sorted(forgejo_dest.uploads) == sorted(FILES)
+    assert sorted(github_dest.uploads) == sorted(FILES)
+
+
+@pytest.mark.asyncio
+async def test_per_destination_publisher_login_empty_entry_fails_destination(tmp_path):
+    """F2b: with per-destination mode (non-empty dict), a missing login for
+    a destination fails that destination by name — fail closed."""
+    art = tmp_path / "dist"
+    art.mkdir(exist_ok=True)
+    for name in FILES:
+        (art / name).write_bytes(name.encode())
+
+    forgejo_dest = FakeDestination(
+        _release(author=OTHER_LOGIN, name=TITLE, body="\n" + NOTES + "\n\n", assets=[])
+    )
+    github_dest = FakeDestination()
+    forgejo_adapter = _forgejo(forgejo_dest)
+    github_adapter = _github(github_dest)
+
+    report, _ = await _publish_multi(
+        _two_dest_config(),
+        [forgejo_adapter, github_adapter],
+        tmp_path,
+        # Forgejo login available, GitHub login empty — fail closed.
+        publisher_login={"FORGEJO_TOKEN": ENGINE_LOGIN, "GH_MIRROR_TOKEN": ""},
+    )
+
+    # The forgejo destination is attributed (foreign release -> up_to_date).
+    assert report.publishers.get(f"forgejo:{REPO}") == "other"
+    # The github destination failed by name.
+    assert f"github:{REPO}" in report.failed
+    assert "publisher_login unavailable" in report.failure_details.get(f"github:{REPO}", "")
+    # github was never touched.
+    assert github_dest.creates() == 0
+    assert github_dest.uploads == []
+    assert report.publisher == "other"
+
+
+async def _publish_multi(config, adapters, tmp_path, **over):
+    art = tmp_path / "dist"
+    audit: list[str] = []
+    report = await ReleaseHandler.publish_release(
+        config, REPO, TAG, NOTES, art,
+        adapters=adapters, skip_existing=True, audit=audit, **over,
+    )
+    return report, audit
