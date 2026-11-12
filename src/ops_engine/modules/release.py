@@ -103,6 +103,24 @@ class PublicationReport:
     # destination's existing release id (409/422), or what differs on an
     # existing release (incomplete). Both labels are also in ``failed``.
     failure_details: dict[str, str] = field(default_factory=dict)
+    # Destinations whose release for the tag already exists from ANOTHER
+    # publisher: recorded as up to date, never edited and never duplicated.
+    # Not failures: they are not in ``failed``.
+    up_to_date: list[str] = field(default_factory=list)
+    # destination label -> who made the release found for the tag there:
+    # ``engine`` (the account named by ``publisher_login``) or ``other``.
+    publishers: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def publisher(self) -> str:
+        """Who made the release found for this tag, when that is one answer.
+
+        A tag-level report names ``engine`` or ``other`` only when every
+        attributed destination agrees; no attribution (or a disagreement
+        between destinations) is the empty string, never a guess.
+        """
+        values = set(self.publishers.values())
+        return values.pop() if len(values) == 1 else ""
 
     @property
     def partial(self) -> bool:
@@ -298,6 +316,7 @@ class ReleaseHandler:
         skip_existing: bool = False,
         audit: Optional[list[str]] = None,
         credentials: dict[str, Credential] | None = None,
+        publisher_login: str = "",
     ) -> "PublicationReport":
         """Publish a built release to every destination resolved from config.
 
@@ -355,6 +374,17 @@ class ReleaseHandler:
         Files already attached are untouched; nothing is re-created or deleted. When any destination failed, one warning line is logged for
         the whole call (the engine has no event log, D20).
 
+        ``publisher_login`` is the login the engine publishes as (P36-003). A
+        repository can have two publishers — the engine and a repository-local
+        workflow — so a release that already exists on a destination is only
+        the engine's to touch when the release object's own ``author.login``
+        names that account. When it names another account the release is
+        recorded in ``up_to_date`` and neither edited nor duplicated; the
+        report's ``publisher`` says ``engine`` or ``other``. Without the
+        parameter the engine cannot attribute a release and every release found
+        is judged as before. An undeterminable author degrades to ``other``,
+        never to a false ``engine``.
+
         ``credentials`` is a per-destination credential mapping (ADP-011):
         each destination's forge value maps to its own :class:`Credential`,
         so a Forgejo destination never receives the GitHub token and vice
@@ -393,21 +423,10 @@ class ReleaseHandler:
                 if skip_existing and await adapter.release_exists(
                     destination.repo, tag_name
                 ):
-                    if await _try_supplement(
+                    await _judge_existing_release(
                         adapter, destination, report, audit, tag_name, label,
-                        release_name, release_notes, artifacts,
-                    ):
-                        continue
-                    problems = await _existing_release_problems(
-                        adapter, destination, tag_name, release_name, artifacts,
-                        release_notes,
+                        release_name, release_notes, artifacts, publisher_login,
                     )
-                    if problems:
-                        _record_incomplete(report, audit, tag_name, label, problems)
-                        continue
-                    logger.info(f"Release {tag_name} already exists on {label}, skipping")
-                    report.skipped.append(label)
-                    _audit_destination(audit, tag_name, label, "skipped")
                     continue
                 created = await _publish_to_destination(
                     adapter,
@@ -424,24 +443,10 @@ class ReleaseHandler:
                     # The create call answered a duplicate: the release was
                     # created between the lookup and the create. Same rule as
                     # for a release the lookup showed (OE-042a).
-                    if await _try_supplement(
+                    await _judge_existing_release(
                         adapter, destination, report, audit, tag_name, label,
-                        release_name, release_notes, artifacts,
-                    ):
-                        continue
-                    problems = await _existing_release_problems(
-                        adapter, destination, tag_name, release_name, artifacts,
-                        release_notes,
+                        release_name, release_notes, artifacts, publisher_login,
                     )
-                    if problems:
-                        _record_incomplete(report, audit, tag_name, label, problems)
-                        continue
-                    logger.info(
-                        f"Release {tag_name} already exists on {label} "
-                        "(create answered a duplicate), skipping"
-                    )
-                    report.skipped.append(label)
-                    _audit_destination(audit, tag_name, label, "skipped")
                     continue
             except Exception as exc:  # noqa: BLE001 (record — the report, not abort)
                 logger.error(f"partial publication: {label} failed: {exc}")
@@ -452,6 +457,9 @@ class ReleaseHandler:
                 _audit_destination(audit, tag_name, label, "failed", detail)
             else:
                 report.published.append(label)
+                if publisher_login:
+                    # The release this call created is the engine's own.
+                    report.publishers[label] = "engine"
                 _audit_destination(audit, tag_name, label, "published")
 
         if report.partial:
@@ -571,6 +579,85 @@ def _title_key(title: str) -> str:
 def _same_title(a: object, b: str) -> bool:
     """Titles equal ignoring case and whitespace (see :func:`_title_key`)."""
     return isinstance(a, str) and _title_key(a) == _title_key(b)
+
+
+def _release_author(release: dict) -> str:
+    """The login of the account that created ``release``, or ``""``.
+
+    Both forges carry the creating account on the release object itself
+    (Forgejo/Gitea ``Release.author``, GitHub ``author``); a release without
+    one gives no proof of who made it.
+    """
+    author = release.get("author")
+    if not isinstance(author, dict):
+        return ""
+    login = author.get("login")
+    return login if isinstance(login, str) else ""
+
+
+def _publisher_of(release: dict, publisher_login: str) -> str:
+    """``engine`` only when the release names the caller's account; else ``other``.
+
+    An author that cannot be read never counts as the engine: the engine must
+    not touch a release it cannot prove is its own.
+    """
+    if publisher_login and _release_author(release) == publisher_login:
+        return "engine"
+    return "other"
+
+
+async def _judge_existing_release(
+    adapter: ForgeAdapter,
+    destination: Destination,
+    report: "PublicationReport",
+    audit: Optional[list[str]],
+    tag_name: str,
+    label: str,
+    release_name: str,
+    release_notes: str,
+    artifacts: list[tuple[str, bytes]],
+    publisher_login: str = "",
+) -> None:
+    """Record what ``destination`` already holds for ``tag_name``.
+
+    With ``publisher_login`` given, a release the destination already holds and
+    that names ANOTHER account as its author is one publisher's release per
+    repository (P36-003): recorded in ``up_to_date``, neither edited nor
+    duplicated, and the publisher is named per destination. Any other release
+    is judged as before — supplemented, incomplete, or skipped.
+    """
+    if publisher_login:
+        found = await adapter.find_release(destination.repo, tag_name)
+        if isinstance(found, dict) and found:
+            publisher = _publisher_of(found, publisher_login)
+            report.publishers[label] = publisher
+            # Only a release that NAMES another account is someone else's; one
+            # without an author proves nothing and is judged as before.
+            if publisher == "other" and _release_author(found):
+                logger.info(
+                    f"Release {tag_name} on {label} was published by another "
+                    "publisher, leaving it untouched"
+                )
+                report.up_to_date.append(label)
+                _audit_destination(
+                    audit, tag_name, label, "up-to-date", f"publisher={publisher}"
+                )
+                return
+    if await _try_supplement(
+        adapter, destination, report, audit, tag_name, label,
+        release_name, release_notes, artifacts,
+    ):
+        return
+    problems = await _existing_release_problems(
+        adapter, destination, tag_name, release_name, artifacts,
+        release_notes,
+    )
+    if problems:
+        _record_incomplete(report, audit, tag_name, label, problems)
+        return
+    logger.info(f"Release {tag_name} already exists on {label}, skipping")
+    report.skipped.append(label)
+    _audit_destination(audit, tag_name, label, "skipped")
 
 
 async def _try_supplement(
