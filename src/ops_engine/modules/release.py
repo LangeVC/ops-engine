@@ -205,6 +205,7 @@ class ReleaseContext:
     adapters: Optional[list[ForgeAdapter]] = None
     credentials: Optional[dict[str, Credential]] = None
     audit: Optional[list[str]] = None
+    publisher_login: str = ""
 
 
 def _resolve_artifact_dir(root: str | Path, configured: Optional[str]) -> Path:
@@ -1020,6 +1021,7 @@ async def _release_tag(
             roles=("release",),
             skip_existing=True,
             audit=context.audit,
+            publisher_login=context.publisher_login,
         )
     if report.partial:
         await _notify_partial(context.ops_config, repo, tag_name, report)

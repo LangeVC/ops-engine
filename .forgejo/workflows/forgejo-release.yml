@@ -562,6 +562,7 @@ jobs:
           FORGEJO_WEBHOOK_SECRET: "${{ secrets.FORGEJO_WEBHOOK_SECRET }}"
           GH_MIRROR_TOKEN: "${{ secrets.GH_MIRROR_TOKEN }}"
           GH_MIRROR_WEBHOOK_SECRET: "${{ secrets.GH_MIRROR_WEBHOOK_SECRET }}"
+          PUBLISHER_LOGIN: "${{ secrets.PUBLISHER_LOGIN }}"
         run: |
           set -euo pipefail
 
@@ -828,6 +829,7 @@ jobs:
                   # files) when its notes are this build's, and fails the
                   # destination naming the difference when they are not.
                   skip_existing=True,
+                  publisher_login=os.environ.get("PUBLISHER_LOGIN", ""),
               )
 
               if mirror_failed:
@@ -837,10 +839,13 @@ jobs:
               supplemented = ", ".join(report.supplemented) or "(none)"
               skipped = ", ".join(report.skipped) or "(none)"
               failed = ", ".join(report.failed) or "(none)"
+              up_to_date = ", ".join(report.up_to_date) or "(none)"
               print(f"published destinations:    {published}")
               print(f"supplemented destinations: {supplemented}")
               print(f"skipped destinations:      {skipped}")
+              print(f"up-to-date destinations:   {up_to_date}")
               print(f"failed destinations:       {failed}")
+              print(f"publisher: {report.publisher}")
               for label in report.failed:
                   print(f"  {label}: {report.failure_details.get(label) or '(no detail)'}")
               if report.failed or mirror_failed:

@@ -315,3 +315,74 @@ async def test_legacy_call_shape_still_fails_a_foreign_release_and_the_new_one_d
     assert new_report.failed == []
     assert new_report.up_to_date == [f"forgejo:{REPO}"]
     assert "result=up-to-date" in new_audit[0]
+
+
+# --- Production call shape: publisher_login through ReleaseContext → _release_tag ---
+
+
+@pytest.mark.asyncio
+async def test_release_context_publisher_login_reaches_publish_release(
+    tmp_path, monkeypatch,
+):
+    """A ReleaseContext with publisher_login set wires it through to
+    publish_release, so the production webhook path (process_event →
+    _release_tag) records a foreign-authored release as up to date without
+    the caller passing publisher_login explicitly."""
+    from unittest.mock import AsyncMock
+
+    from ops_engine.config_loader import ReleaseConfig
+    from ops_engine.modules import release as release_module
+    from ops_engine.modules.release import (
+        ReleaseContext,
+        ReleaseHandler,
+        TagIdentitySpec,
+    )
+
+    dest = FakeDestination(_release(author=OTHER_LOGIN))
+    adapter = _forgejo(dest)
+
+    source = AsyncMock()
+    async def get_file_content(repo, path, ref="main"):
+        return {
+            "CHANGELOG.md": "# Changes\n\n## v3.5.1\n\n- Release.\n",
+            ".ops.yaml": (
+                "destinations:\n"
+                "  - {forge: forgejo, repo: langevc/ops-engine, role: release, credential_variable: OPS_TOKEN}\n"
+            ),
+        }[path]
+    source.get_file_content = get_file_content
+
+    monkeypatch.setattr(release_module, "push_canonical_tag", AsyncMock())
+
+    context = ReleaseContext(
+        ops_config=_config("forgejo"),
+        artifact_dir=tmp_path / "dist",
+        identity=TagIdentitySpec(
+            repo_dir=str(tmp_path),
+            canonical_url="https://forge.example/langevc/ops-engine.git",
+            canonical_token="tok",
+            mirror_remote="https://mirror.example/langevc/ops-engine.git",
+        ),
+        adapters=[adapter],
+        publisher_login=ENGINE_LOGIN,
+    )
+    (tmp_path / "dist").mkdir()
+    for name in FILES:
+        (tmp_path / "dist" / name).write_bytes(name.encode())
+
+    await ReleaseHandler.process_event(
+        source,
+        {
+            "event_type": "push",
+            "action": None,
+            "repo": REPO,
+            "raw": {"ref": f"refs/tags/{TAG}"},
+        },
+        ReleaseConfig(enabled=True, trigger="tag_push", tag_pattern="v*"),
+        context,
+    )
+
+    # The foreign-authored release was NOT written to — no create, no upload, no PATCH.
+    assert dest.writes() == []
+    # And it was NOT failed: it was recorded as up-to-date.
+    assert dest.creates() == 0
