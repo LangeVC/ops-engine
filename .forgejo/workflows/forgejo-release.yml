@@ -562,9 +562,31 @@ jobs:
           FORGEJO_WEBHOOK_SECRET: "${{ secrets.FORGEJO_WEBHOOK_SECRET }}"
           GH_MIRROR_TOKEN: "${{ secrets.GH_MIRROR_TOKEN }}"
           GH_MIRROR_WEBHOOK_SECRET: "${{ secrets.GH_MIRROR_WEBHOOK_SECRET }}"
-          PUBLISHER_LOGIN: "${{ secrets.PUBLISHER_LOGIN }}"
+          PUBLISHER_LOGIN: ""  # derived from the Forgejo API below, never a secret
         run: |
           set -euo pipefail
+
+          # P36-003 — derive the publisher login from the authenticated identity
+          # of the engine's own token (GET /api/v1/user), so the workflow never
+          # depends on an operator-provisioned secret. The Forgejo API returns
+          # the login of the token's owning account; that login is the one the
+          # engine publishes as.
+          if [[ -n "${FORGEJO_TOKEN:-}" ]]; then
+            LOGIN_RESP="$(curl -sSf -H "Authorization: token ${FORGEJO_TOKEN}" \
+              "${FORGEJO_BASE_URL}/api/v1/user")" || true
+            PUBLISHER_LOGIN="$(echo "$LOGIN_RESP" | python3 -c "
+          import json, sys
+          try:
+              data = json.load(sys.stdin)
+              print(data.get('login', ''))
+          except (json.JSONDecodeError, ValueError):
+              print('')
+          " 2>/dev/null)" || PUBLISHER_LOGIN=""
+          else
+            PUBLISHER_LOGIN=""
+          fi
+          export PUBLISHER_LOGIN
+          echo "publisher_login derived from token identity: '${PUBLISHER_LOGIN}'"
 
           # The four assets live split across the repository (dist/*.whl and
           # dist/*.tar.gz) and the workspace root (SHA256SUMS and
