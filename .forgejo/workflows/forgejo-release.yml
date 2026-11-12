@@ -689,11 +689,23 @@ jobs:
 
           import base64
 
+          class MirrorCredentialError(RuntimeError):
+              """The mirror credential is missing or empty. Caught per-destination
+              so publish_release and other destinations still run (P36-002)."""
+              pass
+
           def _mirror_credential_env() -> dict:
               """The GIT_CONFIG_COUNT / http.extraHeader env for the mirror push.
               The token travels through the environment, never in the URL or argv
               (P36-002 criterion 2)."""
-              token = os.environ["GH_MIRROR_TOKEN"]
+              token = os.environ.get("GH_MIRROR_TOKEN", "")
+              if not token:
+                  raise MirrorCredentialError(
+                      "destination 'github:"
+                      + (mirror_dest.repo if mirror_dest else "unknown")
+                      + "' has no credential; variable 'GH_MIRROR_TOKEN' "
+                      "not found in environment"
+                  )
               basic = base64.b64encode(
                   f"x-access-token:{token}".encode()
               ).decode()
@@ -771,8 +783,15 @@ jobs:
           async def main():
               # REL-020 — push the canonical tag object onto the mirror BEFORE the
               # engine publishes, so the github create_release cannot invent a tag.
+              # P36-002 criterion 3: a missing or empty mirror credential fails
+              # that destination by name and leaves publish_release and the other
+              # destinations running.
+              mirror_failed = None
               if mirror_dest is not None:
-                  _push_mirror_tag(_mirror_remote(mirror_dest.repo))
+                  try:
+                      _push_mirror_tag(_mirror_remote(mirror_dest.repo))
+                  except MirrorCredentialError as exc:
+                      mirror_failed = f"github:{mirror_dest.repo}: {exc}"
 
               # ADP-011 / P36-002 criterion 3 — credentials are passed per
               # destination so a missing credential fails only that destination
@@ -811,6 +830,9 @@ jobs:
                   skip_existing=True,
               )
 
+              if mirror_failed:
+                  print(f"mirror push failed: {mirror_failed}")
+
               published = ", ".join(report.published) or "(none)"
               supplemented = ", ".join(report.supplemented) or "(none)"
               skipped = ", ".join(report.skipped) or "(none)"
@@ -821,7 +843,7 @@ jobs:
               print(f"failed destinations:       {failed}")
               for label in report.failed:
                   print(f"  {label}: {report.failure_details.get(label) or '(no detail)'}")
-              if report.failed:
+              if report.failed or mirror_failed:
                   # A partial publication is a REPORTED failure, never a silent
                   # success: the run goes red so the operator sees the drift.
                   print(
@@ -832,7 +854,7 @@ jobs:
 
               # REL-020 — after publication, refuse by name if the mirror tag does
               # not target the same commit the canonical tag does.
-              if mirror_dest is not None:
+              if mirror_dest is not None and not mirror_failed:
                   _verify_mirror_tag(
                       tag_name,
                       _canonical_tag_target(),

@@ -339,8 +339,9 @@ ref `refs/tags/<tag_name>` in `repo_dir` to that object, pushes the object
 (`<sha>:refs/tags/<tag_name>`) to `mirror_remote`, and reads the mirror back,
 comparing object and peel. An annotated canonical tag arrives as the same
 annotated object on the mirror, never as a lightweight tag; a lightweight
-canonical tag stays lightweight. `mirror_remote` is used as given, so a
-credential for the mirror travels inside it. `runner` is
+canonical tag stays lightweight. `mirror_remote` is used token-free; the mirror credential (`mirror_token`)
+travels through the environment (GIT_CONFIG_COUNT / http.extraHeader), never
+in the URL or argv (P36-002). `runner` is
 `await runner(argv, cwd) -> (exit_code, output)` and defaults to real git.
 
 `MirrorTagIdentity` carries `tag_name`, `object`, `peel` and `annotated`. Every

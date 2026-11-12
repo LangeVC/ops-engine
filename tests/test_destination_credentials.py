@@ -17,6 +17,7 @@ argv; the credential travels through GIT_CONFIG_COUNT / http.extraHeader.
 import asyncio
 import os
 import subprocess
+import sys
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -662,4 +663,159 @@ async def test_token_in_env_not_in_git_process_argv(tmp_path):
     assert credential_env_found, (
         "git subprocess did not receive GIT_CONFIG_COUNT / http.extraHeader "
         f"in its environment; captured envs: {captured_envs}"
+    )
+
+
+# ── Criterion 3: RED/GREEN PROOF — workflow main() with missing mirror secret ──
+
+def _extract_workflow_mirror_functions() -> str:
+    """Extract the mirror credential and push functions from the shipped
+    workflow's PUBLISH_PY block. Returns only the ``import base64`` line,
+    ``MirrorCredentialError`` class, ``_mirror_credential_env()``,
+    ``_mirror_remote()``, ``_push_mirror_tag()``, and ``_verify_mirror_tag()``
+    — skipping the top-level config loading that accesses ``os.environ`` keys
+    and ``load_ops_yaml``. The caller must define ``mirror_dest`` (a fake with
+    a ``.repo`` attribute) and set ``os.environ["TAG_NAME"]`` before the
+    extracted code."""
+    import textwrap
+    from pathlib import Path
+    forgejo_release = (
+        Path(__file__).resolve().parents[1]
+        / ".forgejo" / "workflows" / "forgejo-release.yml"
+    )
+    lines = forgejo_release.read_text(encoding="utf-8").splitlines()
+    # Find the "import base64" line (start of mirror functions) and the
+    # closing line of _verify_mirror_tag (end of mirror functions).
+    start = end = None
+    for i, line in enumerate(lines):
+        if start is None and line.strip() == "import base64":
+            start = i
+        if start is not None and line.strip() == "asyncio.run(main())":
+            end = i
+            break
+    assert start is not None and end is not None, (
+        "mirror function block not found in PUBLISH_PY"
+    )
+    # Include the asyncio.run(main()) line so we can strip it predictably.
+    block = textwrap.dedent("\n".join(lines[start:end + 1]) + "\n")
+    # Strip from "asyncio.run(main())" to the end (it is the last non-blank line).
+    idx = block.rindex("asyncio.run(main())")
+    block = block[:idx].rstrip()
+    return block + "\n"
+
+
+def test_missing_mirror_secret_aborts_with_keyerror_on_base():
+    """RED PROOF criterion 3: When GH_MIRROR_TOKEN is missing, the workflow's
+    ``_mirror_credential_env()`` aborts with KeyError on the base before
+    ``publish_release`` can run.
+
+    Extracts ``_mirror_credential_env`` from the shipped workflow's PUBLISH_PY
+    block and runs it without ``GH_MIRROR_TOKEN``. On the base, the subscript
+    ``os.environ["GH_MIRROR_TOKEN"]`` raises KeyError — the entire Create
+    Release step aborts before ``publish_release`` is reached. On the tip,
+    ``os.environ.get(…)`` returns an empty string and ``MirrorCredentialError``
+    is raised instead — a catchable, named error that the workflow catches
+    per-destination.
+
+    This test PASSES on the base (the harm exists: the workflow aborts
+    wholesale on a missing mirror secret) and FAILS on the tip (the harm is
+    fixed: the error is catchable and per-destination).
+    """
+    from pathlib import Path
+
+    mirror_functions = _extract_workflow_mirror_functions()
+    driver = (
+        mirror_functions
+        + "\n"
+        + "import os, sys\n"
+        + "for k in list(os.environ):\n"
+        + "    if k == 'GH_MIRROR_TOKEN':\n"
+        + "        del os.environ[k]\n"
+        + "class _FakeDest:\n"
+        + "    repo = 'exampleorg/engine'\n"
+        + "mirror_dest = _FakeDest()\n"
+        + "try:\n"
+        + "    _mirror_credential_env()\n"
+        + "    print('no error — mirror credential env returned without token')\n"
+        + "    sys.exit(1)\n"
+        + "except KeyError:\n"
+        + "    print('KeyError — mirror secret missing, workflow aborts')\n"
+        + "    sys.exit(0)\n"
+        + "except Exception as e:\n"
+        + "    print(f'{type(e).__name__}: {e}')\n"
+        + "    sys.exit(1)\n"
+    )
+    env = {
+        k: v for k, v in os.environ.items() if k != "GH_MIRROR_TOKEN"
+    }
+    result = subprocess.run(
+        [sys.executable, "-c", driver],
+        capture_output=True, text=True,
+        env=env,
+    )
+    # RED PROOF: on base, KeyError → exit 0 (the harm exists).
+    # On tip, MirrorCredentialError → exit 1 (the harm is fixed).
+    assert result.returncode == 0, (
+        f"RED PROOF: missing mirror secret should abort before publish_release "
+        f"(KeyError on base); got exit {result.returncode}, "
+        f"stdout={result.stdout.strip()!r}, stderr={result.stderr.strip()!r}"
+    )
+
+
+def test_missing_mirror_secret_caught_per_destination_on_tip():
+    """GREEN PROOF criterion 3: When GH_MIRROR_TOKEN is missing, the workflow's
+    ``_push_mirror_tag`` raises ``MirrorCredentialError`` naming the
+    destination, and the error is catchable so ``publish_release`` and other
+    destinations still run.
+
+    Extracts ``_push_mirror_tag`` and helpers from the shipped workflow's
+    PUBLISH_PY block, runs it without ``GH_MIRROR_TOKEN``, and asserts the
+    error names the destination.
+
+    On the base, ``_mirror_credential_env`` uses
+    ``os.environ["GH_MIRROR_TOKEN"]`` → KeyError, so this test FAILS. On the
+    tip, ``os.environ.get(…)`` returns an empty string and
+    ``MirrorCredentialError`` is raised naming the destination — a catchable
+    error — so this test PASSES.
+    """
+    mirror_functions = _extract_workflow_mirror_functions()
+    driver = (
+        mirror_functions
+        + "\n"
+        + "import os, subprocess, sys\n"
+        + "os.environ['TAG_NAME'] = os.environ.get('TAG_NAME', 'v1.0.0')\n"
+        + "tag_name = os.environ['TAG_NAME']\n"
+        + "for k in list(os.environ):\n"
+        + "    if k == 'GH_MIRROR_TOKEN':\n"
+        + "        del os.environ[k]\n"
+        + "class _FakeDest:\n"
+        + "    repo = 'exampleorg/engine'\n"
+        + "mirror_dest = _FakeDest()\n"
+        + "try:\n"
+        + "    _push_mirror_tag('https://github.com/exampleorg/engine.git')\n"
+        + "    print('push succeeded without credential — unexpected')\n"
+        + "    sys.exit(1)\n"
+        + "except Exception as e:\n"
+        + "    name = type(e).__name__\n"
+        + "    msg = str(e)\n"
+        + "    if name == 'MirrorCredentialError' and 'github:exampleorg/engine' in msg:\n"
+        + "        print(f'GREEN: {name} names destination: {msg}')\n"
+        + "        sys.exit(0)\n"
+        + "    print(f'unexpected error: {name}: {msg}')\n"
+        + "    sys.exit(1)\n"
+    )
+    env = {
+        k: v for k, v in os.environ.items() if k != "GH_MIRROR_TOKEN"
+    }
+    result = subprocess.run(
+        [sys.executable, "-c", driver],
+        capture_output=True, text=True,
+        env=env,
+    )
+    # GREEN PROOF: on tip, MirrorCredentialError → exit 0.
+    # On base, KeyError or other → exit 1.
+    assert result.returncode == 0, (
+        f"GREEN PROOF: missing mirror secret should raise MirrorCredentialError "
+        f"naming the destination; got exit {result.returncode}, "
+        f"stdout={result.stdout.strip()!r}, stderr={result.stderr.strip()!r}"
     )

@@ -102,7 +102,7 @@ from ops_engine.config_loader import (
     OpsEngineConfig,
     VALID_DESTINATION_VISIBILITIES,
 )
-from ops_engine.modules.tag_identity import _credential_env
+from ops_engine.modules.tag_identity import credential_env
 
 logger = logging.getLogger(__name__)
 
@@ -1241,7 +1241,7 @@ class MirrorHandler:
         remote = f"https://github.com/{destination}.git"
         env: Optional[dict] = None
         if token:
-            env = _credential_env(remote, token)
+            env = credential_env(remote, token)
 
         # EXISTS: real git ls-remote, the same proof as the accepted SW152-024
         # preflight. Read-only; a missing repo exits non-zero the same way an
@@ -1596,7 +1596,7 @@ def _push_credential_env(
     token = credentials.get(key)
     if not token:
         return {}
-    return _credential_env(remote, token)
+    return credential_env(remote, token)
 
 
 async def _run_git(
@@ -1611,11 +1611,11 @@ async def _run_git(
     the credential reaches the subprocess through the environment and never
     through the URL or argv (P36-002).
 
-    P36-002: Any URL in ``argv`` that carries an embedded token
-    (``x-access-token:TOKEN@host``) is stripped of its userinfo before the
-    subprocess is spawned, and the token is handed to git through
-    ``GIT_CONFIG_COUNT`` / ``http.extraHeader`` instead. The process argument
-    list of the push never contains the token.
+    P36-002: Any URL in ``argv`` that carries an embedded
+    ``x-access-token:`` credential (``x-access-token:TOKEN@host``) is stripped
+    of its userinfo before the subprocess is spawned, and the token is handed
+    to git through ``GIT_CONFIG_COUNT`` / ``http.extraHeader`` instead. The
+    process argument list of the push never contains the token.
     """
     auto_env: dict = {}
     clean_argv = list(argv)
@@ -1626,10 +1626,10 @@ async def _run_git(
                 continue
             authority, slash, tail = rest.partition("/")
             userinfo, _, host = authority.rpartition("@")
-            if ":" in userinfo:
+            if ":" in userinfo and userinfo.startswith("x-access-token:"):
                 _user, _, token = userinfo.partition(":")
                 if token:
-                    auto_env = _credential_env(arg, token)
+                    auto_env = credential_env(arg, token)
                     clean_argv[i] = f"{scheme}://{host}/{tail}"
     kwargs: dict[str, Any] = {
         "cwd": cwd,
