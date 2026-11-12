@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Awaitable, Callable, Iterable, Optional, Sequence
 
 from ops_engine.adapters.base import ForgeAdapter
-from ops_engine.adapters.factory import adapters_for
+from ops_engine.adapters.factory import MissingCredentialError, adapters_for
 from ops_engine.config_loader import Destination, ReconcileConfig, ReleaseConfig
 from ops_engine.modules.mirror import MirrorHandler, resolve_destinations
 from ops_engine.modules.release import (
@@ -303,7 +303,7 @@ class ReconcileHandler:
                             base_url=context.base_url,
                             credentials=context.credentials,
                         )
-                    except Exception:
+                    except MissingCredentialError:
                         return True
                     if not await dest_adapters[0].release_exists(
                         destination.repo, tag_name

@@ -625,7 +625,7 @@ class MirrorHandler:
                 continue
             remote = f"https://{host}/{dest.repo}.git"
             push_env = _push_credential_env(dest, remote, credentials)
-            if runner is not None:
+            if runner is not None and not push_env:
                 code, _stderr = await runner(["git", "push", remote, refspec], repo_dir)
             else:
                 code, _stderr = await _run_git(
@@ -792,7 +792,7 @@ class MirrorHandler:
                         if not refspecs:
                             continue
                 push_env = _push_credential_env(dest, remote, credentials)
-                if runner is not None:
+                if runner is not None and not push_env:
                     pcode, _perr = await runner(["git", "push", remote, *refspecs], clone)
                 else:
                     pcode, _perr = await _run_git(
@@ -987,7 +987,7 @@ class MirrorHandler:
                         record(f"mirror-ref-kept ref={ref} dest={dest.forge}:{dest.repo}")
                         continue
                     push_env = _push_credential_env(dest, remote, credentials)
-                    if runner is not None:
+                    if runner is not None and not push_env:
                         dcode, _derr = await runner(
                             ["git", "push", remote, f":{ref}"], clone,
                         )

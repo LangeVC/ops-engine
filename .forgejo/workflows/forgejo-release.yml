@@ -780,16 +780,19 @@ jobs:
               # builds each adapter individually and catches
               # MissingCredentialError per destination, so the production
               # release workflow isolates the failure instead of aborting.
-              credentials = {
-                  "FORGEJO_TOKEN": Credential(
-                      token=os.environ["FORGEJO_TOKEN"],
-                      webhook_secret=os.environ["FORGEJO_WEBHOOK_SECRET"],
-                  ),
-                  "GH_MIRROR_TOKEN": Credential(
-                      token=os.environ["GH_MIRROR_TOKEN"],
-                      webhook_secret=os.environ["GH_MIRROR_WEBHOOK_SECRET"],
-                  ),
-              }
+              credentials = {}
+              forgejo_token = os.environ.get("FORGEJO_TOKEN", "")
+              if forgejo_token:
+                  credentials["FORGEJO_TOKEN"] = Credential(
+                      token=forgejo_token,
+                      webhook_secret=os.environ.get("FORGEJO_WEBHOOK_SECRET", ""),
+                  )
+              gh_token = os.environ.get("GH_MIRROR_TOKEN", "")
+              if gh_token:
+                  credentials["GH_MIRROR_TOKEN"] = Credential(
+                      token=gh_token,
+                      webhook_secret=os.environ.get("GH_MIRROR_WEBHOOK_SECRET", ""),
+                  )
 
               report = await ReleaseHandler.publish_release(
                   config,

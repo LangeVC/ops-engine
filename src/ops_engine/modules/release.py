@@ -403,9 +403,11 @@ class ReleaseHandler:
                         )
                     )
                 except MissingCredentialError as exc:
-                    report.failed.append(_destination_label(destination))
+                    label = _destination_label(destination)
+                    report.failed.append(label)
+                    report.failure_details[label] = str(exc)
                     logger.error(
-                        f"partial publication: {_destination_label(destination)} "
+                        f"partial publication: {label} "
                         f"failed: {exc}"
                     )
         else:
