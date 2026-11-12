@@ -112,12 +112,15 @@ def adapters_for(
 
     Two credential shapes are accepted:
 
-    * **Per-destination** (``credentials``): a mapping from forge value
-      (``"github"`` / ``"forgejo"``) to a :class:`Credential`. Each destination
-      is served only its own forge's credential, so two destinations carrying
-      two distinct tokens are constructed in one call. A destination whose forge
-      is absent from the mapping raises :class:`MissingCredentialError` — a
-      named refusal, never a silent unauthenticated call.
+    * **Per-destination** (``credentials``): each destination resolves its own
+      credential by its ``credential_variable`` field when set; otherwise the
+      destination's ``forge`` value is used as the key. Two destinations on the
+      same forge carrying distinct ``credential_variable`` values receive
+      different tokens, so a Forgejo destination never receives the GitHub token
+      (P36-002). A destination whose key is absent from the mapping raises
+      :class:`MissingCredentialError` — a named refusal that names the
+      destination's forge, repo and variable, never a silent unauthenticated
+      call.
     * **Shared** (the legacy ``token``/``webhook_secret`` keywords, used when
       ``credentials`` is omitted): every destination receives the same
       credential.
@@ -141,12 +144,15 @@ def adapters_for(
 
     adapters: list[ForgeAdapter] = []
     for destination in destinations:
-        forge = destination.forge.strip().lower()
-        credential = credentials.get(forge)
+        key = destination.credential_variable or destination.forge.strip().lower()
+        credential = credentials.get(key)
         if credential is None:
             raise MissingCredentialError(
-                f"destination {destination.forge!r} has no credential; "
-                f"supplied credentials cover: {', '.join(sorted(credentials)) or '(none)'}"
+                f"destination {destination.forge!r}:{destination.repo} "
+                f"has no credential; variable "
+                f"{destination.credential_variable or destination.forge!r} "
+                f"not found in supplied credentials "
+                f"({', '.join(sorted(credentials)) or '(none)'})"
             )
         adapters.append(
             adapter_for(

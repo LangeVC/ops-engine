@@ -511,6 +511,7 @@ class MirrorHandler:
         visibility_exceptions: Optional[
             Sequence[tuple[str, str]]
         ] = None,
+        credentials: Optional[dict[str, str]] = None,
     ) -> list[str]:
         """Push exactly the triggering ref to every mirror destination (OE-022).
 
@@ -623,7 +624,13 @@ class MirrorHandler:
                 logger.warning(line)
                 continue
             remote = f"https://{host}/{dest.repo}.git"
-            code, _stderr = await run(["git", "push", remote, refspec], repo_dir)
+            push_env = _push_credential_env(dest, remote, credentials)
+            if runner is not None:
+                code, _stderr = await runner(["git", "push", remote, refspec], repo_dir)
+            else:
+                code, _stderr = await _run_git(
+                    ["git", "push", remote, refspec], repo_dir, env=push_env,
+                )
             line = (
                 f"mirror-push ref={ref} dest={dest.forge}:{dest.repo} "
                 f"sha={sha} exit={code}"
@@ -646,6 +653,7 @@ class MirrorHandler:
         visibility_exceptions: Optional[
             Sequence[tuple[str, str]]
         ] = None,
+        credentials: Optional[dict[str, str]] = None,
     ) -> list[str]:
         """Push every canonical head and tag to every mirror destination (OE-023).
 
@@ -780,7 +788,13 @@ class MirrorHandler:
                             ]
                         if not refspecs:
                             continue
-                pcode, _perr = await run(["git", "push", remote, *refspecs], clone)
+                push_env = _push_credential_env(dest, remote, credentials)
+                if runner is not None:
+                    pcode, _perr = await runner(["git", "push", remote, *refspecs], clone)
+                else:
+                    pcode, _perr = await _run_git(
+                        ["git", "push", remote, *refspecs], clone, env=push_env,
+                    )
                 record(f"mirror-state-push dest={dest.forge}:{dest.repo} exit={pcode}")
         return lines
 
@@ -848,6 +862,7 @@ class MirrorHandler:
         runner: Optional[Callable[[list[str], str], Awaitable[tuple[int, str]]]] = None,
         audit: Optional[list[str]] = None,
         workdir: Optional[str] = None,
+        credentials: Optional[dict[str, str]] = None,
     ) -> list[str]:
         """Delete mirror heads and tags that no longer exist on canonical (OE-023).
 
@@ -943,7 +958,15 @@ class MirrorHandler:
                     if ref in protected_exact or ref.startswith(protected_prefixes):
                         record(f"mirror-ref-kept ref={ref} dest={dest.forge}:{dest.repo}")
                         continue
-                    dcode, _derr = await run(["git", "push", remote, f":{ref}"], clone)
+                    push_env = _push_credential_env(dest, remote, credentials)
+                    if runner is not None:
+                        dcode, _derr = await runner(
+                            ["git", "push", remote, f":{ref}"], clone,
+                        )
+                    else:
+                        dcode, _derr = await _run_git(
+                            ["git", "push", remote, f":{ref}"], clone, env=push_env,
+                        )
                     record(
                         f"mirror-ref-deleted ref={ref} dest={dest.forge}:{dest.repo} "
                         f"exit={dcode}"
@@ -1527,18 +1550,69 @@ class MirrorHandler:
 _FORGE_HOSTS: dict[str, str] = DEFAULT_FORGE_HOSTS
 
 
-async def _run_git(argv: list[str], cwd: str) -> tuple[int, str]:
+def _push_credential_env(
+    dest: Destination,
+    remote: str,
+    credentials: Optional[dict[str, str]],
+) -> dict:
+    """The git credential environment for one mirror push, or empty.
+
+    Looks up the destination's credential variable (or forge) in the
+    credentials mapping. When a token is found the result is the
+    GIT_CONFIG_COUNT / http.extraHeader environment that hands the token
+    to git as an Authorization header. The remote URL stays token-free.
+    """
+    if not credentials:
+        return {}
+    key = dest.credential_variable or dest.forge.strip().lower()
+    token = credentials.get(key)
+    if not token:
+        return {}
+    return _credential_env(remote, token)
+
+
+async def _run_git(
+    argv: list[str], cwd: str, *, env: Optional[dict] = None,
+) -> tuple[int, str]:
     """Run git for real; return ``(exit_code, stdout)``.
 
     stderr is captured apart from stdout and only logged, so a diagnostic line
     can never be parsed as command output (a ref row, a SHA).
+
+    ``env``, when given, is merged over ``os.environ`` before spawning git so
+    the credential reaches the subprocess through the environment and never
+    through the URL or argv (P36-002).
+
+    P36-002: Any URL in ``argv`` that carries an embedded token
+    (``x-access-token:TOKEN@host``) is stripped of its userinfo before the
+    subprocess is spawned, and the token is handed to git through
+    ``GIT_CONFIG_COUNT`` / ``http.extraHeader`` instead. The process argument
+    list of the push never contains the token.
     """
-    proc = await asyncio.create_subprocess_exec(
-        *argv,
-        cwd=cwd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
+    auto_env: dict = {}
+    clean_argv = list(argv)
+    for i, arg in enumerate(clean_argv):
+        if "://" in arg and "@" in arg:
+            scheme, sep, rest = arg.partition("://")
+            if not sep:
+                continue
+            authority, slash, tail = rest.partition("/")
+            userinfo, _, host = authority.rpartition("@")
+            if ":" in userinfo:
+                _user, _, token = userinfo.partition(":")
+                if token:
+                    auto_env = _credential_env(arg, token)
+                    clean_argv[i] = f"{scheme}://{host}/{tail}"
+    kwargs: dict[str, Any] = {
+        "cwd": cwd,
+        "stdout": asyncio.subprocess.PIPE,
+        "stderr": asyncio.subprocess.PIPE,
+    }
+    merged_env = {**os.environ, **auto_env}
+    if env is not None:
+        merged_env.update(env)
+    kwargs["env"] = merged_env
+    proc = await asyncio.create_subprocess_exec(*clean_argv, **kwargs)
     out, err = await proc.communicate()
     if err:
         logger.debug(f"git {argv[1:2]} stderr: {err.decode(errors='replace').strip()}")

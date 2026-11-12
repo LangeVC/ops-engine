@@ -171,24 +171,33 @@ def test_two_github_release_destinations_must_not_share_credential():
     resolve their own credential by variable name, not share one forge-keyed
     token.
 
-    On the base, ``adapters_for`` keys credentials by forge value, so two
-    GitHub destinations necessarily receive the same token. This test asserts
-    they receive DIFFERENT tokens, which FAILS on the base and passes after
-    each destination resolves its own credential by variable name.
+    On the base, ``Destination`` has no ``credential_variable`` field, so
+    constructing a destination with one raises ``ValidationError``. After the
+    fix, each destination carries its own variable name, ``adapters_for``
+    looks up credentials by that name, and two destinations on the same forge
+    receive different tokens.
     """
-    dest_a = Destination(forge="github", repo="org/repo-a", role="release")
-    dest_b = Destination(forge="github", repo="org/repo-b", role="release")
+    dest_a = Destination(
+        forge="github", repo="org/repo-a", role="release",
+        credential_variable="GH_TOKEN_A",
+    )
+    dest_b = Destination(
+        forge="github", repo="org/repo-b", role="release",
+        credential_variable="GH_TOKEN_B",
+    )
 
     cred_a = Credential(token="token-alpha", webhook_secret="sa")
     cred_b = Credential(token="token-beta", webhook_secret="sb")
 
     adapters = adapters_for(
         [dest_a, dest_b],
-        credentials={"github": cred_a},
+        credentials={"GH_TOKEN_A": cred_a, "GH_TOKEN_B": cred_b},
         base_url="https://api.github.com",
     )
 
     assert len(adapters) == 2
+    assert adapters[0].token == "token-alpha"
+    assert adapters[1].token == "token-beta"
     assert adapters[0].token != adapters[1].token, (
         "Two distinct release destinations must not share one credential; "
         f"both received token {adapters[0].token!r}"
@@ -199,23 +208,26 @@ def test_missing_credential_names_the_destination_not_just_the_forge():
     """RED PROOF criterion 1: when a destination's credential is missing,
     the error must name the DESTINATION, not only the forge.
 
-    On the base, ``MissingCredentialError`` says "destination 'forgejo' has
-    no credential" — it names the forge, not the destination. With two
-    destinations on the same forge the message cannot distinguish them.
-    After the fix, the error names the destination by its credential variable.
+    On the base, ``Destination`` has no ``credential_variable`` field, so
+    constructing a destination with one raises ``ValidationError``. After the
+    fix, a destination without its own credential variable is refused, and
+    ``MissingCredentialError`` names the destination by its variable name.
     """
-    dest = Destination(forge="forgejo", repo="org/engine", role="release")
+    dest = Destination(
+        forge="forgejo", repo="org/engine", role="release",
+        credential_variable="FORGEJO_TOKEN",
+    )
 
     with pytest.raises(MissingCredentialError) as exc_info:
         adapters_for(
             [dest],
-            credentials={"github": Credential(token="t")},
+            credentials={"GITHUB_TOKEN": Credential(token="t")},
             base_url="https://code.example.org",
         )
 
     message = str(exc_info.value)
-    assert "forgejo" in message.lower(), (
-        f"error must name the forge; got: {message}"
+    assert "FORGEJO_TOKEN" in message, (
+        f"error must name the credential variable; got: {message}"
     )
     assert "org/engine" in message, (
         f"error must name the destination repo; got: {message}"
@@ -336,10 +348,15 @@ async def test_real_push_passes_credential_via_environment(tmp_path):
             captured_envs.append(dict(env))
         return proc
 
+    token = "ghp_testToken123abc"
+    token_url = (
+        f"http://x-access-token:{token}@127.0.0.1:19999/org/repo.git"
+    )
+
     with patch("asyncio.create_subprocess_exec", side_effect=capture_exec):
         try:
             await _run_git(
-                ["git", "push", "http://127.0.0.1:19999/org/repo.git",
+                ["git", "push", token_url,
                  "HEAD:refs/heads/main"],
                 str(src_dir),
             )

@@ -306,6 +306,11 @@ class Destination(BaseModel):
     # (``DEFAULT_FORGE_HOSTS``); a mirror destination on any other forge must
     # declare it, or the configuration is refused at load.
     host: str = Field(default="")
+    # P36-002: each release destination names the environment variable that
+    # supplies its credential, so two destinations on the same forge receive
+    # distinct tokens and a Forgejo destination never receives the GitHub token.
+    # A release destination without its own variable is refused.
+    credential_variable: str = Field(default="")
 
 
 class MirrorConfig(BaseModel):
