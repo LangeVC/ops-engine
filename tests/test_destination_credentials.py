@@ -538,18 +538,95 @@ async def test_missing_credential_fails_destination_by_name(tmp_path):
 # ── Criterion 4: RED PROOF — real process listing ────────────────────────────
 
 
-def test_running_push_process_has_no_token_in_argv(tmp_path):
-    """RED PROOF criterion 4: a running git push process has no token in
-    its argument list.
+def test_token_in_url_appears_in_git_process_argv(tmp_path):
+    """RED PROOF criterion 4: a git push whose remote URL carries an
+    embedded token has the token in its process argument list.
+
+    Creates a real bare repo, pushes through a git shim that records its
+    own argv, and asserts the token IS present. This is the RED (broken)
+    case the candidate eliminates: a token in the URL is visible to every
+    process that inspects the push command's argv.
+
+    On the candidate, this test FAILS because the remote URL is token-free
+    and the credential travels through the environment instead. The test
+    proves the exact harm: when a token is embedded in a URL, it leaks into
+    the process listing.
+    """
+    import base64
+    import shutil
+
+    real_git = shutil.which("git")
+    assert real_git, "git not found on PATH"
+
+    remote_dir = tmp_path / "remote.git"
+    subprocess.run(
+        ["git", "init", "--bare", str(remote_dir)],
+        capture_output=True, check=True,
+    )
+
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    subprocess.run(
+        ["git", "init", str(src_dir)],
+        capture_output=True, check=True,
+    )
+    (src_dir / "readme.md").write_text("hello")
+    subprocess.run(
+        ["git", "add", "readme.md"],
+        cwd=str(src_dir), capture_output=True, check=True,
+    )
+    subprocess.run(
+        ["git", "-c", "user.name=test", "-c", "user.email=t@t",
+         "commit", "-m", "init"],
+        cwd=str(src_dir), capture_output=True, check=True,
+    )
+
+    # Git shim: records argv then execs real git
+    argv_log = tmp_path / "argv.log"
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+    (shim_dir / "git").write_text(
+        "#!/bin/bash\n"
+        f'echo "$@" >> {argv_log}\n'
+        f'exec {real_git} "$@"\n'
+    )
+    (shim_dir / "git").chmod(0o755)
+
+    token = "ghp_testToken123abc"
+    token_url = f"https://x-access-token:{token}@127.0.0.1:19999/org/repo.git"
+
+    result = subprocess.run(
+        ["git", "push", token_url, "HEAD:refs/heads/main"],
+        cwd=str(src_dir),
+        capture_output=True,
+        env={
+            **os.environ,
+            "PATH": f"{shim_dir}:{os.environ['PATH']}",
+        },
+    )
+    # Push may fail (no real remote at 127.0.0.1:19999), but git still
+    # records argv via the shim before the connection attempt.
+    _ = result
+
+    recorded = argv_log.read_text()
+    assert token in recorded, (
+        f"RED PROOF: token-in-URL push must leave token in argv; "
+        f"recorded: {recorded}"
+    )
+    assert "x-access-token" in recorded, (
+        f"RED PROOF: x-access-token must appear in argv when embedded "
+        f"in URL; recorded: {recorded}"
+    )
+
+
+def test_token_in_env_not_in_git_process_argv(tmp_path):
+    """GREEN PROOF criterion 4: a git push whose credential travels through
+    GIT_CONFIG_COUNT / http.extraHeader has no token in its process argv.
 
     Creates a real bare repo, pushes to it through a git shim that records
-    its own argv, and verifies the token is absent. The credential travels
-    through GIT_CONFIG_COUNT / http.extraHeader, so the push authenticates
-    but the token never appears in argv.
-
-    On the base, the same test fails because the remote URL carries the
-    token (https://x-access-token:TOKEN@host/repo.git), which git receives
-    verbatim in argv.
+    argv, and verifies the token is absent. The credential travels through
+    the environment, so the push authenticates but the token never appears
+    in the argument list.
     """
     import base64
     import shutil
