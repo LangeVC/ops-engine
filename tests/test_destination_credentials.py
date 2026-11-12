@@ -535,167 +535,131 @@ async def test_missing_credential_fails_destination_by_name(tmp_path):
     )
 
 
-# ── Criterion 4: RED PROOF — real process listing ────────────────────────────
+# ── Criterion 4: RED/GREEN PROOF — _run_git argv scrubbing ──────────────────
 
 
-def test_token_in_url_appears_in_git_process_argv(tmp_path):
-    """RED PROOF criterion 4: a git push whose remote URL carries an
-    embedded token has the token in its process argument list.
+@pytest.mark.asyncio
+async def test_token_in_url_appears_in_git_process_argv(tmp_path):
+    """RED PROOF criterion 4: ``_run_git`` called with a token-embedded URL
+    leaves the token visible in the subprocess argument list.
 
-    Creates a real bare repo, pushes through a git shim that records its
-    own argv, and asserts the token IS present. This is the RED (broken)
-    case the candidate eliminates: a token in the URL is visible to every
-    process that inspects the push command's argv.
+    Patches ``asyncio.create_subprocess_exec``, calls the product's own
+    ``_run_git`` with a token-in-URL, and asserts the token IS present in
+    the spawned argv. This is the RED (broken) case the candidate eliminates:
+    a token in the URL is visible to every process that inspects the push
+    command's argv.
 
-    On the candidate, this test FAILS because the remote URL is token-free
-    and the credential travels through the environment instead. The test
-    proves the exact harm: when a token is embedded in a URL, it leaks into
-    the process listing.
+    On the base, ``_run_git`` has no scrubbing, so the token appears in argv
+    and this test PASSES. On the candidate, ``_run_git`` scrubs the token
+    into the environment, so this test FAILS — proving the exact harm is
+    eliminated.
     """
-    import base64
-    import shutil
-
-    real_git = shutil.which("git")
-    assert real_git, "git not found on PATH"
-
-    remote_dir = tmp_path / "remote.git"
-    subprocess.run(
-        ["git", "init", "--bare", str(remote_dir)],
-        capture_output=True, check=True,
-    )
-
-    src_dir = tmp_path / "src"
-    src_dir.mkdir()
-    subprocess.run(
-        ["git", "init", str(src_dir)],
-        capture_output=True, check=True,
-    )
-    (src_dir / "readme.md").write_text("hello")
-    subprocess.run(
-        ["git", "add", "readme.md"],
-        cwd=str(src_dir), capture_output=True, check=True,
-    )
-    subprocess.run(
-        ["git", "-c", "user.name=test", "-c", "user.email=t@t",
-         "commit", "-m", "init"],
-        cwd=str(src_dir), capture_output=True, check=True,
-    )
-
-    # Git shim: records argv then execs real git
-    argv_log = tmp_path / "argv.log"
-    shim_dir = tmp_path / "shim"
-    shim_dir.mkdir()
-    (shim_dir / "git").write_text(
-        "#!/bin/bash\n"
-        f'echo "$@" >> {argv_log}\n'
-        f'exec {real_git} "$@"\n'
-    )
-    (shim_dir / "git").chmod(0o755)
-
     token = "ghp_testToken123abc"
-    token_url = f"https://x-access-token:{token}@127.0.0.1:19999/org/repo.git"
-
-    result = subprocess.run(
-        ["git", "push", token_url, "HEAD:refs/heads/main"],
-        cwd=str(src_dir),
-        capture_output=True,
-        env={
-            **os.environ,
-            "PATH": f"{shim_dir}:{os.environ['PATH']}",
-        },
+    token_url = (
+        f"http://x-access-token:{token}@127.0.0.1:19999/org/repo.git"
     )
-    # Push may fail (no real remote at 127.0.0.1:19999), but git still
-    # records argv via the shim before the connection attempt.
-    _ = result
 
-    recorded = argv_log.read_text()
-    assert token in recorded, (
+    captured_argv: list[list[str]] = []
+
+    async def capture_exec(*argv, **kwargs):
+        proc = _CapturingProcess(returncode=0, stdout=b"", stderr=b"")
+        proc.argv = list(argv)
+        captured_argv.append(proc.argv)
+        return proc
+
+    with patch("asyncio.create_subprocess_exec", side_effect=capture_exec):
+        try:
+            await _run_git(
+                ["git", "push", token_url, "HEAD:refs/heads/main"],
+                str(tmp_path),
+            )
+        except Exception:
+            pass
+
+    assert captured_argv, "RED PROOF: no git process was spawned"
+    token_found = False
+    for argv in captured_argv:
+        flat = " ".join(str(a) for a in argv)
+        if token in flat:
+            token_found = True
+            break
+    assert token_found, (
         f"RED PROOF: token-in-URL push must leave token in argv; "
-        f"recorded: {recorded}"
-    )
-    assert "x-access-token" in recorded, (
-        f"RED PROOF: x-access-token must appear in argv when embedded "
-        f"in URL; recorded: {recorded}"
+        f"captured argv: {captured_argv}"
     )
 
 
-def test_token_in_env_not_in_git_process_argv(tmp_path):
-    """GREEN PROOF criterion 4: a git push whose credential travels through
-    GIT_CONFIG_COUNT / http.extraHeader has no token in its process argv.
+@pytest.mark.asyncio
+async def test_token_in_env_not_in_git_process_argv(tmp_path):
+    """GREEN PROOF criterion 4: ``_run_git`` called with a clean URL and an
+    ``env`` parameter containing the credential passes the credential through
+    the subprocess environment, never through argv.
 
-    Creates a real bare repo, pushes to it through a git shim that records
-    argv, and verifies the token is absent. The credential travels through
-    the environment, so the push authenticates but the token never appears
-    in the argument list.
+    Patches ``asyncio.create_subprocess_exec``, calls the product's own
+    ``_run_git`` with a credential in the ``env`` dict, and asserts the
+    token is absent from argv and the credential environment reaches the
+    subprocess.
+
+    On the base, ``_run_git`` has no ``env`` parameter, so this test FAILS
+    (TypeError). On the candidate, ``_run_git`` accepts ``env`` and merges
+    it, so this test PASSES — proving the credential reaches git through
+    the environment alone.
     """
     import base64
-    import shutil
-
-    real_git = shutil.which("git")
-    assert real_git, "git not found on PATH"
-
-    # Bare remote
-    remote_dir = tmp_path / "remote.git"
-    subprocess.run(
-        ["git", "init", "--bare", str(remote_dir)],
-        capture_output=True, check=True,
-    )
-
-    # Source repo with a commit
-    src_dir = tmp_path / "src"
-    src_dir.mkdir()
-    subprocess.run(
-        ["git", "init", str(src_dir)],
-        capture_output=True, check=True,
-    )
-    (src_dir / "readme.md").write_text("hello")
-    subprocess.run(
-        ["git", "add", "readme.md"],
-        cwd=str(src_dir), capture_output=True, check=True,
-    )
-    subprocess.run(
-        ["git", "-c", "user.name=test", "-c", "user.email=t@t",
-         "commit", "-m", "init"],
-        cwd=str(src_dir), capture_output=True, check=True,
-    )
-
-    # Git shim: records argv then execs real git
-    argv_log = tmp_path / "argv.log"
-    shim_dir = tmp_path / "shim"
-    shim_dir.mkdir()
-    (shim_dir / "git").write_text(
-        "#!/bin/bash\n"
-        f'echo "$@" >> {argv_log}\n'
-        f'exec {real_git} "$@"\n'
-    )
-    (shim_dir / "git").chmod(0o755)
 
     token = "ghp_testToken123abc"
     basic = base64.b64encode(
         f"x-access-token:{token}".encode()
     ).decode()
 
-    result = subprocess.run(
-        ["git", "push", str(remote_dir), "HEAD:refs/heads/main"],
-        cwd=str(src_dir),
-        capture_output=True,
-        env={
-            **os.environ,
-            "PATH": f"{shim_dir}:{os.environ['PATH']}",
-            "GIT_CONFIG_COUNT": "1",
-            "GIT_CONFIG_KEY_0": "http.extraHeader",
-            "GIT_CONFIG_VALUE_0": f"Authorization: Basic {basic}",
-            "GIT_TERMINAL_PROMPT": "0",
-        },
-    )
-    assert result.returncode == 0, (
-        f"push failed: {result.stderr.decode()}"
-    )
+    credential_env = {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "http.extraHeader",
+        "GIT_CONFIG_VALUE_0": f"Authorization: Basic {basic}",
+    }
 
-    recorded = argv_log.read_text()
-    assert token not in recorded, (
-        f"token appeared in git process argv: {recorded}"
+    captured_argv: list[list[str]] = []
+    captured_envs: list[dict] = []
+
+    async def capture_exec(*argv, **kwargs):
+        proc = _CapturingProcess(returncode=0, stdout=b"", stderr=b"")
+        proc.argv = list(argv)
+        captured_argv.append(proc.argv)
+        env = kwargs.get("env")
+        if env is not None:
+            captured_envs.append(dict(env))
+        return proc
+
+    remote_dir = tmp_path / "remote.git"
+    remote_dir.mkdir()
+
+    with patch("asyncio.create_subprocess_exec", side_effect=capture_exec):
+        try:
+            await _run_git(
+                ["git", "push", str(remote_dir),
+                 "HEAD:refs/heads/main"],
+                str(tmp_path),
+                env=credential_env,
+            )
+        except Exception:
+            pass
+
+    # Assert token never appears in argv
+    for argv in captured_argv:
+        flat = " ".join(str(a) for a in argv)
+        assert token not in flat, (
+            f"token appeared in subprocess argv: {argv}"
+        )
+        assert "x-access-token" not in flat, (
+            f"x-access-token appeared in subprocess argv: {argv}"
+        )
+
+    # Assert credential environment reached the subprocess
+    credential_env_found = any(
+        env.get("GIT_CONFIG_COUNT") == "1" and "GIT_CONFIG_KEY_0" in env
+        for env in captured_envs
     )
-    assert "x-access-token" not in recorded, (
-        f"x-access-token appeared in git process argv: {recorded}"
+    assert credential_env_found, (
+        "git subprocess did not receive GIT_CONFIG_COUNT / http.extraHeader "
+        f"in its environment; captured envs: {captured_envs}"
     )
