@@ -19,6 +19,7 @@ from config (not a literal), and that the literal-laden publication path is
 gone.
 """
 
+import os
 import re
 import subprocess
 import sys
@@ -294,15 +295,20 @@ def _extract_toplevel_def(name: str) -> str:
 def _run_verify(tag, canonical_sha, remote_path):
     """Run the extracted ``_verify_mirror_tag`` against a LOCAL bare mirror repo,
     exercising the exact git commands the workflow runs."""
-    fn = _extract_toplevel_def("_verify_mirror_tag")
+    verify_fn = _extract_toplevel_def("_verify_mirror_tag")
+    cred_fn = _extract_toplevel_def("_mirror_credential_env")
     driver = (
-        "import subprocess, sys\n"
+        "import base64, os, subprocess, sys\n"
         "import sys as _sys\n"
-        + fn
+        + cred_fn
+        + verify_fn
         + f"_verify_mirror_tag({tag!r}, {canonical_sha!r}, {remote_path!r})\n"
     )
     return subprocess.run(
-        [sys.executable, "-c", driver], capture_output=True, text=True
+        [sys.executable, "-c", driver],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "GH_MIRROR_TOKEN": "test-dummy-token"},
     )
 
 
