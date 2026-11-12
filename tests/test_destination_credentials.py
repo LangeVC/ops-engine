@@ -10,8 +10,10 @@ a credential helper; the process argument list of the push contains no token
 Criterion 3: A missing credential for one destination fails that destination
 by name and leaves the others running.
 
-Criterion 4: RED PROOF — a running git push process listing shows no token in
-argv; the credential travels through GIT_CONFIG_COUNT / http.extraHeader.
+Criterion 4: A running git push process listing shows no token in argv; the
+credential travels through GIT_CONFIG_COUNT / http.extraHeader. The RED half of
+this proof asserts the 3.5.2 harm and therefore can never pass at the tip; it
+ships in ``scripts/prove_mirror_token_harms.py`` instead of this suite.
 """
 
 import asyncio
@@ -536,58 +538,7 @@ async def test_missing_credential_fails_destination_by_name(tmp_path):
     )
 
 
-# ── Criterion 4: RED/GREEN PROOF — _run_git argv scrubbing ──────────────────
-
-
-@pytest.mark.asyncio
-async def test_token_in_url_appears_in_git_process_argv(tmp_path):
-    """RED PROOF criterion 4: ``_run_git`` called with a token-embedded URL
-    leaves the token visible in the subprocess argument list.
-
-    Patches ``asyncio.create_subprocess_exec``, calls the product's own
-    ``_run_git`` with a token-in-URL, and asserts the token IS present in
-    the spawned argv. This is the RED (broken) case the candidate eliminates:
-    a token in the URL is visible to every process that inspects the push
-    command's argv.
-
-    On the base, ``_run_git`` has no scrubbing, so the token appears in argv
-    and this test PASSES. On the candidate, ``_run_git`` scrubs the token
-    into the environment, so this test FAILS — proving the exact harm is
-    eliminated.
-    """
-    token = "ghp_testToken123abc"
-    token_url = (
-        f"http://x-access-token:{token}@127.0.0.1:19999/org/repo.git"
-    )
-
-    captured_argv: list[list[str]] = []
-
-    async def capture_exec(*argv, **kwargs):
-        proc = _CapturingProcess(returncode=0, stdout=b"", stderr=b"")
-        proc.argv = list(argv)
-        captured_argv.append(proc.argv)
-        return proc
-
-    with patch("asyncio.create_subprocess_exec", side_effect=capture_exec):
-        try:
-            await _run_git(
-                ["git", "push", token_url, "HEAD:refs/heads/main"],
-                str(tmp_path),
-            )
-        except Exception:
-            pass
-
-    assert captured_argv, "RED PROOF: no git process was spawned"
-    token_found = False
-    for argv in captured_argv:
-        flat = " ".join(str(a) for a in argv)
-        if token in flat:
-            token_found = True
-            break
-    assert token_found, (
-        f"RED PROOF: token-in-URL push must leave token in argv; "
-        f"captured argv: {captured_argv}"
-    )
+# ── Criterion 4: GREEN PROOF — _run_git argv scrubbing ──────────────────────
 
 
 @pytest.mark.asyncio
@@ -702,64 +653,6 @@ def _extract_workflow_mirror_functions() -> str:
     idx = block.rindex("asyncio.run(main())")
     block = block[:idx].rstrip()
     return block + "\n"
-
-
-def test_missing_mirror_secret_aborts_with_keyerror_on_base():
-    """RED PROOF criterion 3: When GH_MIRROR_TOKEN is missing, the workflow's
-    ``_mirror_credential_env()`` aborts with KeyError on the base before
-    ``publish_release`` can run.
-
-    Extracts ``_mirror_credential_env`` from the shipped workflow's PUBLISH_PY
-    block and runs it without ``GH_MIRROR_TOKEN``. On the base, the subscript
-    ``os.environ["GH_MIRROR_TOKEN"]`` raises KeyError — the entire Create
-    Release step aborts before ``publish_release`` is reached. On the tip,
-    ``os.environ.get(…)`` returns an empty string and ``MirrorCredentialError``
-    is raised instead — a catchable, named error that the workflow catches
-    per-destination.
-
-    This test PASSES on the base (the harm exists: the workflow aborts
-    wholesale on a missing mirror secret) and FAILS on the tip (the harm is
-    fixed: the error is catchable and per-destination).
-    """
-    from pathlib import Path
-
-    mirror_functions = _extract_workflow_mirror_functions()
-    driver = (
-        mirror_functions
-        + "\n"
-        + "import os, sys\n"
-        + "for k in list(os.environ):\n"
-        + "    if k == 'GH_MIRROR_TOKEN':\n"
-        + "        del os.environ[k]\n"
-        + "class _FakeDest:\n"
-        + "    repo = 'exampleorg/engine'\n"
-        + "mirror_dest = _FakeDest()\n"
-        + "try:\n"
-        + "    _mirror_credential_env()\n"
-        + "    print('no error — mirror credential env returned without token')\n"
-        + "    sys.exit(1)\n"
-        + "except KeyError:\n"
-        + "    print('KeyError — mirror secret missing, workflow aborts')\n"
-        + "    sys.exit(0)\n"
-        + "except Exception as e:\n"
-        + "    print(f'{type(e).__name__}: {e}')\n"
-        + "    sys.exit(1)\n"
-    )
-    env = {
-        k: v for k, v in os.environ.items() if k != "GH_MIRROR_TOKEN"
-    }
-    result = subprocess.run(
-        [sys.executable, "-c", driver],
-        capture_output=True, text=True,
-        env=env,
-    )
-    # RED PROOF: on base, KeyError → exit 0 (the harm exists).
-    # On tip, MirrorCredentialError → exit 1 (the harm is fixed).
-    assert result.returncode == 0, (
-        f"RED PROOF: missing mirror secret should abort before publish_release "
-        f"(KeyError on base); got exit {result.returncode}, "
-        f"stdout={result.stdout.strip()!r}, stderr={result.stderr.strip()!r}"
-    )
 
 
 def test_missing_mirror_secret_caught_per_destination_on_tip():
