@@ -35,7 +35,7 @@ def _run_cli(*args, cwd=None):
     env["PYTHONPATH"] = str(SRC) + (os.pathsep + previous if previous else "")
     return subprocess.run(
         [sys.executable, "-m", "ops_engine.modules.visibility_report", *args],
-        cwd=cwd, capture_output=True, text=True, env=env,
+        cwd=cwd, capture_output=True, text=True, env=env, check=False,
     )
 
 
@@ -90,7 +90,32 @@ def world(tmp_path):
 
 
 def _entries(output):
-    return [line for line in output.splitlines() if line.strip().startswith("- path:")]
+    """The ``- path:`` entry lines of the paste block, stripped."""
+    return [
+        line.strip()
+        for line in output.splitlines()
+        if line.strip().startswith("- path: ")
+    ]
+
+
+def _blobs(output):
+    """The ``blob:`` entry lines of the paste block, stripped."""
+    return [
+        line.strip()
+        for line in output.splitlines()
+        if line.strip().startswith("blob: ")
+    ]
+
+
+def _pairs(output):
+    """The pasted ``(path, blob)`` pairs, read back as YAML scalars."""
+    entries = _entries(output)
+    blobs = _blobs(output)
+    assert len(entries) == len(blobs), output
+    return [
+        (yaml.safe_load(entry[len("- path: "):]), yaml.safe_load(blob[len("blob: "):]))
+        for entry, blob in zip(entries, blobs)
+    ]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -140,8 +165,10 @@ def test_one_command_prints_each_refused_commit_with_path_and_blob(world):
     assert "# commits_refused=2" in result.stdout
     for commit in (first, second):
         assert f"# commit {commit}" in result.stdout
-    assert f"{CANDIDATE} {world.blob(CANDIDATE, first)}" in result.stdout
-    assert f"{CANDIDATE} {world.blob(CANDIDATE, second)}" in result.stdout
+    assert sorted(_pairs(result.stdout)) == sorted([
+        (CANDIDATE, world.blob(CANDIDATE, first)),
+        (CANDIDATE, world.blob(CANDIDATE, second)),
+    ])
     # The paste block names each distinct (path, blob) pair once.
     assert len(_entries(result.stdout)) == 2
 
@@ -157,9 +184,10 @@ def test_commits_refused_counts_every_refused_commit_over_all_refs(world):
     tagged = world.commit({CANDIDATE: '{"v": 2}\n'})
     world.tag("kept", tagged)
     world.checkout("main")
-    newest = world.commit({CANDIDATE: "{}\n"})
+    newest = world.commit({CANDIDATE: "{}\n", "src/main.py": "ok\n"})
     world._git("branch", "-D", "side")
 
+    assert len({oldest, tagged, newest}) == 3
     result = world.report()
 
     assert result.returncode == 0, result.stderr
@@ -168,6 +196,7 @@ def test_commits_refused_counts_every_refused_commit_over_all_refs(world):
         assert f"# commit {commit}" in result.stdout
     blobs = {world.blob(CANDIDATE, oldest), world.blob(CANDIDATE, tagged)}
     assert len(blobs) == 2
+    assert world.blob(CANDIDATE, newest) == world.blob(CANDIDATE, oldest)
     for blob in blobs:
         assert blob in result.stdout
     # Two distinct pairs, three refused commits.
@@ -259,4 +288,4 @@ def test_a_directory_that_is_not_a_git_repository_is_an_error(tmp_path, world):
 
     assert result.returncode != 0
     assert "visibility_exceptions:" not in result.stdout
-    assert "not a git repository" in result.stderr
+    assert "not a git repository" in result.stderr.lower()
