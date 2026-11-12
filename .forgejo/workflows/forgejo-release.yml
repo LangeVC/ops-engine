@@ -636,6 +636,19 @@ jobs:
           # that ReleaseHandler.publish_release (whose internal
           # resolve_destinations takes no repo_dir) re-resolves the same list.
           org, _, repo_name = repo.partition("/")
+          def _destination_dict(d):
+              entry = {
+                  "forge": d.forge,
+                  "repo": d.repo,
+                  "role": d.role,
+                  "visibility": d.visibility,
+              }
+              if d.credential_variable:
+                  entry["credential_variable"] = d.credential_variable
+              if d.host:
+                  entry["host"] = d.host
+              return entry
+
           config = OpsEngineConfig.load(
               {
                   "orgs": {
@@ -643,13 +656,7 @@ jobs:
                           "repositories": {
                               repo_name: {
                                   "destinations": [
-                                      {
-                                          "forge": d.forge,
-                                          "repo": d.repo,
-                                          "role": d.role,
-                                          "visibility": d.visibility,
-                                      }
-                                      for d in destinations
+                                      _destination_dict(d) for d in destinations
                                   ]
                               }
                           }
@@ -680,12 +687,40 @@ jobs:
               (d for d in destinations if d.forge.strip().lower() == "github"), None
           )
 
+          import base64
+
+          class MirrorCredentialError(RuntimeError):
+              """The mirror credential is missing or empty. Caught per-destination
+              so publish_release and other destinations still run (P36-002)."""
+              pass
+
+          def _mirror_credential_env() -> dict:
+              """The GIT_CONFIG_COUNT / http.extraHeader env for the mirror push.
+              The token travels through the environment, never in the URL or argv
+              (P36-002 criterion 2)."""
+              token = os.environ.get("GH_MIRROR_TOKEN", "")
+              if not token:
+                  raise MirrorCredentialError(
+                      "destination 'github:"
+                      + (mirror_dest.repo if mirror_dest else "unknown")
+                      + "' has no credential; variable 'GH_MIRROR_TOKEN' "
+                      "not found in environment"
+                  )
+              basic = base64.b64encode(
+                  f"x-access-token:{token}".encode()
+              ).decode()
+              return {
+                  "GIT_CONFIG_COUNT": "1",
+                  "GIT_CONFIG_KEY_0": "http.extraHeader",
+                  "GIT_CONFIG_VALUE_0": f"Authorization: Basic {basic}",
+                  "GIT_TERMINAL_PROMPT": "0",
+              }
+
           def _mirror_remote(github_repo: str) -> str:
               """The github destination's push remote, built from the repo value the
-              config layer resolved plus the mirror credential. github.com is the
-              forge the mirror belongs to; the repository itself is never a literal
-              (its value came from load_ops_yaml above)."""
-              return f"https://x-access-token:{os.environ['GH_MIRROR_TOKEN']}@github.com/{github_repo}.git"
+              config layer resolved. Token-free; the credential travels through
+              the environment (P36-002)."""
+              return f"https://github.com/{github_repo}.git"
 
           def _canonical_tag_target() -> str:
               """The commit the canonical tag peels to (``refs/tags/<tag>^{}``). The
@@ -698,14 +733,15 @@ jobs:
 
           def _push_mirror_tag(remote: str) -> None:
               """Push the canonical tag ref verbatim onto the mirror, before the API
-              creates a release there. A missing mirror tag would otherwise make the
-              API invent one at the mirror's default-branch head."""
+              creates a release there. The credential travels through the environment,
+              never the URL or argv (P36-002)."""
               subprocess.run(
                   [
                       "git", "push", "--force", remote,
                       f"refs/tags/{tag_name}:refs/tags/{tag_name}",
                   ],
                   check=True,
+                  env={**os.environ, **_mirror_credential_env()},
               )
 
           def _verify_mirror_tag(tag_name: str, canonical: str, remote: str) -> None:
@@ -723,6 +759,7 @@ jobs:
                   ],
                   capture_output=True,
                   text=True,
+                  env={**os.environ, **_mirror_credential_env()},
               )
               targets = {}
               for line in ls.stdout.splitlines():
@@ -746,28 +783,35 @@ jobs:
           async def main():
               # REL-020 — push the canonical tag object onto the mirror BEFORE the
               # engine publishes, so the github create_release cannot invent a tag.
+              # P36-002 criterion 3: a missing or empty mirror credential fails
+              # that destination by name and leaves publish_release and the other
+              # destinations running.
+              mirror_failed = None
               if mirror_dest is not None:
-                  _push_mirror_tag(_mirror_remote(mirror_dest.repo))
+                  try:
+                      _push_mirror_tag(_mirror_remote(mirror_dest.repo))
+                  except MirrorCredentialError as exc:
+                      mirror_failed = f"github:{mirror_dest.repo}: {exc}"
 
-              # ADP-011 — the factory serves the credential each destination's
-              # forge declares, so the two forges' distinct tokens are mapped
-              # in one call. A destination whose forge has no credential here
-              # is a named refusal, not a silent unauthenticated publication.
-              credentials = {
-                  "forgejo": Credential(
-                      token=os.environ["FORGEJO_TOKEN"],
-                      webhook_secret=os.environ["FORGEJO_WEBHOOK_SECRET"],
-                  ),
-                  "github": Credential(
-                      token=os.environ["GH_MIRROR_TOKEN"],
-                      webhook_secret=os.environ["GH_MIRROR_WEBHOOK_SECRET"],
-                  ),
-              }
-              adapters = adapters_for(
-                  destinations,
-                  credentials=credentials,
-                  base_url=forgejo_base_url,
-              )
+              # ADP-011 / P36-002 criterion 3 — credentials are passed per
+              # destination so a missing credential fails only that destination
+              # by name and leaves the others running. ``publish_release``
+              # builds each adapter individually and catches
+              # MissingCredentialError per destination, so the production
+              # release workflow isolates the failure instead of aborting.
+              credentials = {}
+              forgejo_token = os.environ.get("FORGEJO_TOKEN", "")
+              if forgejo_token:
+                  credentials["FORGEJO_TOKEN"] = Credential(
+                      token=forgejo_token,
+                      webhook_secret=os.environ.get("FORGEJO_WEBHOOK_SECRET", ""),
+                  )
+              gh_token = os.environ.get("GH_MIRROR_TOKEN", "")
+              if gh_token:
+                  credentials["GH_MIRROR_TOKEN"] = Credential(
+                      token=gh_token,
+                      webhook_secret=os.environ.get("GH_MIRROR_WEBHOOK_SECRET", ""),
+                  )
 
               report = await ReleaseHandler.publish_release(
                   config,
@@ -776,7 +820,8 @@ jobs:
                   release_notes,
                   "release-assets",
                   name_template=name_template,
-                  adapters=adapters,
+                  credentials=credentials,
+                  base_url=forgejo_base_url,
                   # OE-042b — a release that already exists on a destination
                   # (made by the layover ops bot before this run) is not an
                   # error: the engine supplements it (corrected title, missing
@@ -784,6 +829,9 @@ jobs:
                   # destination naming the difference when they are not.
                   skip_existing=True,
               )
+
+              if mirror_failed:
+                  print(f"mirror push failed: {mirror_failed}")
 
               published = ", ".join(report.published) or "(none)"
               supplemented = ", ".join(report.supplemented) or "(none)"
@@ -795,7 +843,7 @@ jobs:
               print(f"failed destinations:       {failed}")
               for label in report.failed:
                   print(f"  {label}: {report.failure_details.get(label) or '(no detail)'}")
-              if report.failed:
+              if report.failed or mirror_failed:
                   # A partial publication is a REPORTED failure, never a silent
                   # success: the run goes red so the operator sees the drift.
                   print(
@@ -806,7 +854,7 @@ jobs:
 
               # REL-020 — after publication, refuse by name if the mirror tag does
               # not target the same commit the canonical tag does.
-              if mirror_dest is not None:
+              if mirror_dest is not None and not mirror_failed:
                   _verify_mirror_tag(
                       tag_name,
                       _canonical_tag_target(),

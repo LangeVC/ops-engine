@@ -131,7 +131,7 @@ of scope for this revision.
       "kind": "async_staticmethod",
       "args": ["event", "destinations"],
       "required_args": ["event", "destinations"],
-      "kwargs": ["repo_dir", "runner", "audit", "candidate_globs", "visibility_exceptions"],
+      "kwargs": ["repo_dir", "runner", "audit", "candidate_globs", "visibility_exceptions", "credentials"],
       "required_kwargs": ["repo_dir"]
     },
     {
@@ -141,7 +141,7 @@ of scope for this revision.
       "kind": "async_staticmethod",
       "args": ["canonical_url", "destinations"],
       "required_args": ["canonical_url", "destinations"],
-      "kwargs": ["runner", "audit", "workdir", "candidate_globs", "visibility_exceptions"],
+      "kwargs": ["runner", "audit", "workdir", "candidate_globs", "visibility_exceptions", "credentials"],
       "required_kwargs": []
     },
     {
@@ -151,7 +151,7 @@ of scope for this revision.
       "kind": "async_staticmethod",
       "args": ["canonical_url", "destinations"],
       "required_args": ["canonical_url", "destinations"],
-      "kwargs": ["runner", "audit", "workdir"],
+      "kwargs": ["runner", "audit", "workdir", "credentials"],
       "required_kwargs": []
     },
     {
@@ -171,7 +171,7 @@ of scope for this revision.
       "kind": "async_staticmethod",
       "args": ["primary", "primary_repo", "mirror", "mirror_repo", "canonical_url", "destinations"],
       "required_args": ["primary", "primary_repo", "mirror", "mirror_repo", "canonical_url", "destinations"],
-      "kwargs": ["runner", "audit", "workdir", "measure_destinations", "candidate_globs"],
+      "kwargs": ["runner", "audit", "workdir", "measure_destinations", "candidate_globs", "credentials"],
       "required_kwargs": []
     }
   ],
@@ -239,11 +239,11 @@ declaration block with their parameters, and three configuration fields in its
 `fields` array. All five methods are `async` static methods.
 
 ```python
-MirrorHandler.push_event(event, destinations, *, repo_dir, runner=None, audit=None, candidate_globs=None, visibility_exceptions=None) -> list[str]
-MirrorHandler.sync_state(canonical_url, destinations, *, runner=None, audit=None, workdir=None, candidate_globs=None, visibility_exceptions=None) -> list[str]
-MirrorHandler.sweep_deleted_refs(canonical_url, destinations, *, runner=None, audit=None, workdir=None) -> list[str]
+MirrorHandler.push_event(event, destinations, *, repo_dir, runner=None, audit=None, candidate_globs=None, visibility_exceptions=None, credentials=None) -> list[str]
+MirrorHandler.sync_state(canonical_url, destinations, *, runner=None, audit=None, workdir=None, candidate_globs=None, visibility_exceptions=None, credentials=None) -> list[str]
+MirrorHandler.sweep_deleted_refs(canonical_url, destinations, *, runner=None, audit=None, workdir=None, credentials=None) -> list[str]
 ReconcileHandler.measure_drift(primary, primary_repo, mirror, mirror_repo) -> DriftReport
-ReconcileHandler.reconcile_mirror(primary, primary_repo, mirror, mirror_repo, canonical_url, destinations, *, runner=None, audit=None, workdir=None, measure_destinations=None, candidate_globs=None) -> DriftReport
+ReconcileHandler.reconcile_mirror(primary, primary_repo, mirror, mirror_repo, canonical_url, destinations, *, runner=None, audit=None, workdir=None, measure_destinations=None, candidate_globs=None, credentials=None) -> DriftReport
 ```
 
 `push_event` pushes exactly the ref a push event names to every `mirror`
@@ -339,8 +339,9 @@ ref `refs/tags/<tag_name>` in `repo_dir` to that object, pushes the object
 (`<sha>:refs/tags/<tag_name>`) to `mirror_remote`, and reads the mirror back,
 comparing object and peel. An annotated canonical tag arrives as the same
 annotated object on the mirror, never as a lightweight tag; a lightweight
-canonical tag stays lightweight. `mirror_remote` is used as given, so a
-credential for the mirror travels inside it. `runner` is
+canonical tag stays lightweight. `mirror_remote` is used token-free; the mirror credential (`mirror_token`)
+travels through the environment (GIT_CONFIG_COUNT / http.extraHeader), never
+in the URL or argv (P36-002). `runner` is
 `await runner(argv, cwd) -> (exit_code, output)` and defaults to real git.
 
 `MirrorTagIdentity` carries `tag_name`, `object`, `peel` and `annotated`. Every

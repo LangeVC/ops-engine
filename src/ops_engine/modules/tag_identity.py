@@ -29,10 +29,11 @@ travels as ``http.extraHeader`` through ``GIT_CONFIG_COUNT`` /
 ``GIT_CONFIG_KEY_0`` / ``GIT_CONFIG_VALUE_0``: it is in no argv, in no URL and
 in no file, and nothing is persisted (no ``remote add``).
 
-The mirror credential is NOT handled here. ``mirror_remote`` is the caller's
-remote URL, used exactly as given, as in ``mirror.py``; this function does not
-hide, strip or rewrite it. The event path passes a credential-free mirror URL
-and relies on git's ambient credentials.
+The mirror credential IS handled here. ``mirror_token``, when given, is
+passed through the environment (GIT_CONFIG_COUNT / http.extraHeader), never in
+argv or the URL (P36-002). The mirror remote URL stays token-free. The
+canonical credential travels the same way: ``canonical_token`` is passed to
+``git ls-remote`` through the environment, never the URL.
 
 No credential appears in any message: errors name the credential-free URL.
 """
@@ -129,10 +130,16 @@ def _redact(url: str) -> str:
     return "%s://%s%s%s" % (scheme, authority.rpartition("@")[2], slash, tail)
 
 
-def _credential_env(url: str, token: str) -> dict:
+def credential_env(url: str, token: str) -> dict:
     """The environment that hands the credential to one git invocation as an
     ``Authorization`` header. Only an http(s) URL is authenticated; for a local
-    path or other scheme the result is empty."""
+    path or other scheme the result is empty.
+
+    This is a public helper used by ``tag_identity.push_canonical_tag`` (for
+    both the canonical and mirror credentials), by ``mirror._push_credential_env``
+    (for mirror-push credential isolation), and by ``mirror._run_git`` (for
+    auto-scrubbing of token-in-URL remotes). Every caller passes the token
+    through the environment, never in argv or the URL."""
     if url.partition("://")[0] not in ("http", "https"):
         return {}
     basic = base64.b64encode(("x-access-token:%s" % token).encode()).decode()
@@ -179,16 +186,19 @@ async def push_canonical_tag(
     canonical_token: str,
     mirror_remote: str,
     runner: Optional[Runner] = None,
+    mirror_token: str = "",
 ) -> MirrorTagIdentity:
     """Push the canonical tag object to the mirror and verify object and peel.
 
     ``repo_dir`` is the local clone (it must hold the canonical tag object; a
     checkout that degraded the ref still does). ``canonical_url`` is read with
     ``canonical_token`` through the environment, never argv; ``mirror_remote`` is
-    used exactly as given (the mirror credential is the caller's remote URL). ``runner`` defaults
-    to real git. Returns the verified :class:`MirrorTagIdentity`; every refusal
-    is a subclass of :class:`MirrorTagIdentityError` and nothing is pushed
-    before the canonical identity is established.
+    the mirror URL, used token-free; ``mirror_token``, when given, is passed
+    through the environment (GIT_CONFIG_COUNT / http.extraHeader), never in
+    argv or the URL (P36-002). ``runner`` defaults to real git. Returns the
+    verified :class:`MirrorTagIdentity`; every refusal is a subclass of
+    :class:`MirrorTagIdentityError` and nothing is pushed before the canonical
+    identity is established.
     """
     run = runner or _run_git
     canonical_name = _redact(canonical_url)
@@ -207,7 +217,7 @@ async def push_canonical_tag(
         canonical_url,
         tag_name,
         repo_dir,
-        _credential_env(canonical_url, canonical_token.strip()),
+        credential_env(canonical_url, canonical_token.strip()),
     )
     if code != 0:
         raise CanonicalTagUnreadableError(
@@ -248,9 +258,15 @@ async def push_canonical_tag(
         )
 
     # 3. Push the OBJECT, not the ref name.
-    code, _ = await run(
-        ["git", "push", "--force", mirror_remote, "%s:refs/tags/%s" % (obj, tag_name)],
-        repo_dir,
+    mirror_env = credential_env(mirror_remote, mirror_token) if mirror_token else None
+    push_argv = [
+        "git", "push", "--force", mirror_remote,
+        "%s:refs/tags/%s" % (obj, tag_name),
+    ]
+    code, _ = await (
+        run(push_argv, repo_dir, env=mirror_env)
+        if mirror_env
+        else run(push_argv, repo_dir)
     )
     if code != 0:
         raise MirrorPushError(

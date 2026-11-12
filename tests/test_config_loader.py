@@ -227,7 +227,7 @@ def test_destinations_list_is_preserved():
     resolved = _repo_with_destinations(
         [
             Destination(forge="gitlab", repo="langevc/ops-engine", role="mirror", visibility="private"),
-            Destination(forge="forgejo", repo="langevc/ops-engine", role="release", visibility="public"),
+            Destination(forge="forgejo", repo="langevc/ops-engine", role="release", visibility="public", credential_variable="FORGEJO_TOKEN"),
         ]
     ).get_repo_config("langevc", "ops-engine")
     with warnings.catch_warnings():

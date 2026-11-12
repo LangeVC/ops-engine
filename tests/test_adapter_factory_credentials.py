@@ -62,11 +62,13 @@ def _both_forge_config() -> OpsEngineConfig:
                                     "forge": "forgejo",
                                     "repo": "exampleorg/engine",
                                     "role": "release",
+                                    "credential_variable": "FORGEJO_TOKEN",
                                 },
                                 {
                                     "forge": "github",
                                     "repo": "exampleorg/engine",
                                     "role": "release",
+                                    "credential_variable": "GITHUB_TOKEN",
                                 },
                             ]
                         }
@@ -130,7 +132,7 @@ async def test_one_publication_uses_each_destination_its_own_credential(tmp_path
 
     adapters = adapters_for(
         destinations,
-        credentials={"forgejo": cred_forgejo, "github": cred_github},
+        credentials={"FORGEJO_TOKEN": cred_forgejo, "GITHUB_TOKEN": cred_github},
         base_url="https://code.example.org",
     )
 

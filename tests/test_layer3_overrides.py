@@ -61,6 +61,7 @@ def test_layer3_merges_over_layer2(tmp_path):
             repo: langevc/ops-engine
             role: release
             visibility: private
+            credential_variable: GITLAB_TOKEN
     """)
     layer3 = load_ops_yaml(tmp_path)
     assert layer3 is not None

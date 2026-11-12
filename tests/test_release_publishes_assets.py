@@ -45,11 +45,13 @@ def _two_destination_config() -> OpsEngineConfig:
                                     "forge": "github",
                                     "repo": "exampleorg/engine",
                                     "role": "release",
+                                    "credential_variable": "GITHUB_TOKEN",
                                 },
                                 {
                                     "forge": "forgejo",
                                     "repo": "exampleorg/engine",
                                     "role": "release",
+                                    "credential_variable": "FORGEJO_TOKEN",
                                 },
                             ]
                         }

@@ -22,13 +22,13 @@ CHANGELOG = (
 )
 OPS_YAML_ONE = """\
 destinations:
-  - {forge: forgejo, repo: exampleorg/engine, role: release}
+  - {forge: forgejo, repo: exampleorg/engine, role: release, credential_variable: FORGEJO_TOKEN}
   - {forge: github, repo: exampleorg/mirror-only, role: mirror, visibility: private}
 """
 OPS_YAML_TWO = """\
 destinations:
-  - {forge: forgejo, repo: exampleorg/engine, role: release}
-  - {forge: github, repo: exampleorg/engine-pub, role: release, visibility: public}
+  - {forge: forgejo, repo: exampleorg/engine, role: release, credential_variable: FORGEJO_TOKEN}
+  - {forge: github, repo: exampleorg/engine-pub, role: release, visibility: public, credential_variable: GITHUB_TOKEN}
 """
 CONFIG = ReleaseConfig(enabled=True, trigger="tag_push", tag_pattern="v*")
 SINCE = ReconcileConfig(since="v1.0.0")
