@@ -149,8 +149,9 @@ class TagIdentitySpec:
     """Inputs of the OE-008 tag identity step (:func:`push_canonical_tag`).
 
     ``canonical_token`` reaches git through the environment, never argv or a
-    URL; ``mirror_remote`` is used exactly as given. ``runner`` is the git
-    runner injection point (real git when ``None``).
+    URL; ``mirror_remote`` is used token-free; ``mirror_token``, when given,
+    is passed through the environment, never argv or URL (P36-002). ``runner``
+    is the git runner injection point (real git when ``None``).
     """
 
     repo_dir: str
@@ -158,6 +159,7 @@ class TagIdentitySpec:
     canonical_token: str
     mirror_remote: str
     runner: Optional[Runner] = None
+    mirror_token: str = ""
 
 
 @dataclass
@@ -905,6 +907,7 @@ async def _release_tag(
             identity.canonical_token,
             identity.mirror_remote,
             identity.runner,
+            mirror_token=identity.mirror_token,
         )
 
         logger.info(f"Publishing release {tag_name} of {repo}")

@@ -179,16 +179,19 @@ async def push_canonical_tag(
     canonical_token: str,
     mirror_remote: str,
     runner: Optional[Runner] = None,
+    mirror_token: str = "",
 ) -> MirrorTagIdentity:
     """Push the canonical tag object to the mirror and verify object and peel.
 
     ``repo_dir`` is the local clone (it must hold the canonical tag object; a
     checkout that degraded the ref still does). ``canonical_url`` is read with
     ``canonical_token`` through the environment, never argv; ``mirror_remote`` is
-    used exactly as given (the mirror credential is the caller's remote URL). ``runner`` defaults
-    to real git. Returns the verified :class:`MirrorTagIdentity`; every refusal
-    is a subclass of :class:`MirrorTagIdentityError` and nothing is pushed
-    before the canonical identity is established.
+    the mirror URL, used token-free; ``mirror_token``, when given, is passed
+    through the environment (GIT_CONFIG_COUNT / http.extraHeader), never in
+    argv or the URL (P36-002). ``runner`` defaults to real git. Returns the
+    verified :class:`MirrorTagIdentity`; every refusal is a subclass of
+    :class:`MirrorTagIdentityError` and nothing is pushed before the canonical
+    identity is established.
     """
     run = runner or _run_git
     canonical_name = _redact(canonical_url)
@@ -248,9 +251,15 @@ async def push_canonical_tag(
         )
 
     # 3. Push the OBJECT, not the ref name.
-    code, _ = await run(
-        ["git", "push", "--force", mirror_remote, "%s:refs/tags/%s" % (obj, tag_name)],
-        repo_dir,
+    mirror_env = _credential_env(mirror_remote, mirror_token) if mirror_token else None
+    push_argv = [
+        "git", "push", "--force", mirror_remote,
+        "%s:refs/tags/%s" % (obj, tag_name),
+    ]
+    code, _ = await (
+        run(push_argv, repo_dir, env=mirror_env)
+        if mirror_env
+        else run(push_argv, repo_dir)
     )
     if code != 0:
         raise MirrorPushError(

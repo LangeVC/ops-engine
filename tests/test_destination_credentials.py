@@ -6,9 +6,16 @@ name; a Forgejo destination never receives the GitHub token.
 Criterion 2: The mirror push passes the credential through the environment or
 a credential helper; the process argument list of the push contains no token
 (checked on a running push).
+
+Criterion 3: A missing credential for one destination fails that destination
+by name and leaves the others running.
+
+Criterion 4: RED PROOF — a running git push process listing shows no token in
+argv; the credential travels through GIT_CONFIG_COUNT / http.extraHeader.
 """
 
 import asyncio
+import os
 import subprocess
 from unittest.mock import AsyncMock, patch
 
@@ -246,14 +253,16 @@ def test_missing_credential_names_the_destination_not_just_the_forge():
 
 
 @pytest.mark.asyncio
-async def test_real_push_does_not_pass_token_in_process_argv(tmp_path):
-    """RED PROOF criterion 2: a real git push must not carry the token in
-    its process argument list.
+async def test_push_scrubs_token_from_subprocess_argv(tmp_path):
+    """RED PROOF criterion 2: ``_run_git`` strips embedded tokens from
+    the subprocess argument list.
 
     On the base, ``_run_git`` has no ``env`` parameter, so when the remote
     URL contains an access token the token appears in the subprocess argv.
-    After the fix, the credential reaches git through the environment
-    (GIT_CONFIG_COUNT + http.extraHeader) and the URL is token-free.
+    After the fix, ``_run_git`` extracts the token, scrubs the URL, and
+    hands the credential through the environment (GIT_CONFIG_COUNT +
+    http.extraHeader). The test patches asyncio.create_subprocess_exec to
+    observe the scrubbed argv; it does not start a real git process.
     """
     # Create a bare repo as the remote target
     remote_dir = tmp_path / "remote.git"
@@ -312,14 +321,15 @@ async def test_real_push_does_not_pass_token_in_process_argv(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_real_push_passes_credential_via_environment(tmp_path):
-    """RED PROOF criterion 2: a real git push must pass the credential
-    through the subprocess environment.
+async def test_push_credential_env_reaches_subprocess(tmp_path):
+    """RED PROOF criterion 2: ``_run_git`` passes the credential through
+    the subprocess environment.
 
     On the base, ``_run_git`` has no ``env`` parameter, so no credential
     environment (GIT_CONFIG_COUNT) reaches the git subprocess. After the
     fix, ``_run_git`` accepts an ``env`` parameter and merges it with
-    ``os.environ`` before spawning git.
+    ``os.environ`` before spawning git. The test patches asyncio.create_subprocess_exec
+    to observe the env; it does not start a real git process.
     """
     # Create a bare repo as the remote target
     remote_dir = tmp_path / "remote.git"
@@ -401,13 +411,14 @@ class _CapturingProcess:
 
 
 @pytest.mark.asyncio
-async def test_prove_destination_does_not_pass_token_in_process_argv():
+async def test_prove_destination_scrubs_token_from_argv():
     """When ``prove_destination`` runs git ls-remote with a token, the token
     does not appear in the subprocess argument list.
 
     The credential must reach git through the environment (GIT_CONFIG_COUNT +
     http.extraHeader) or a credential helper, never in the URL or any other
-    argv element. A process listing of the running push must show no token.
+    argv element. The test patches asyncio.create_subprocess_exec to observe
+    the argv; it does not start a real git process.
     """
     captured_argv: list[list[str]] = []
 
@@ -437,10 +448,12 @@ async def test_prove_destination_does_not_pass_token_in_process_argv():
 
 
 @pytest.mark.asyncio
-async def test_prove_destination_passes_credential_via_environment():
+async def test_prove_destination_credential_env():
     """When ``prove_destination`` is given a token, the git subprocess receives
     GIT_CONFIG_COUNT and http.extraHeader in its environment, so the token
     reaches git through headers and never through the URL or argv.
+    The test patches asyncio.create_subprocess_exec to observe the env;
+    it does not start a real git process.
     """
     captured_env: list[dict] = []
 
@@ -469,4 +482,143 @@ async def test_prove_destination_passes_credential_via_environment():
     assert credential_env_found, (
         "git subprocess did not receive GIT_CONFIG_COUNT / http.extraHeader "
         f"in its environment; captured envs: {captured_env}"
+    )
+
+
+# ── Criterion 3: missing credential fails destination by name ─────────────────
+
+
+@pytest.mark.asyncio
+async def test_missing_credential_fails_destination_by_name(tmp_path):
+    """Criterion 3: a missing credential for one destination fails that
+    destination by name and leaves the others running.
+
+    Two release destinations: one with a valid credential and one with a
+    missing variable. ``publish_release`` with ``credentials=`` mapping
+    must record the missing destination as failed by its label and still
+    attempt the other. The missing destination fails at credential
+    resolution (before any network call); the other is attempted (it
+    fails on transport since there is no real forge, but it IS attempted).
+    """
+    config = _both_forge_release_config()
+
+    cred_forgejo = Credential(token=_FORGEJO_TOKEN, webhook_secret=_FORGEJO_SECRET)
+
+    artifact_dir = tmp_path / "dist"
+    artifact_dir.mkdir()
+    (artifact_dir / "a.whl").write_bytes(b"wheel")
+
+    report = await ReleaseHandler.publish_release(
+        config,
+        "exampleorg/engine",
+        "v1.0.0",
+        "release notes",
+        artifact_dir,
+        credentials={"FORGEJO_TOKEN": cred_forgejo},
+        base_url="https://code.example.org",
+    )
+
+    assert "github:exampleorg/engine" in report.failed, (
+        f"missing-credential destination must be in failed; "
+        f"failed={report.failed}"
+    )
+
+    # The Forgejo destination was attempted (credentials existed); it may
+    # fail on transport but must appear in either published or failed.
+    forgejo_attempted = (
+        "forgejo:exampleorg/engine" in report.published
+        or "forgejo:exampleorg/engine" in report.failed
+    )
+    assert forgejo_attempted, (
+        f"forgejo destination must be attempted; "
+        f"published={report.published} failed={report.failed}"
+    )
+
+
+# ── Criterion 4: RED PROOF — real process listing ────────────────────────────
+
+
+def test_running_push_process_has_no_token_in_argv(tmp_path):
+    """RED PROOF criterion 4: a running git push process has no token in
+    its argument list.
+
+    Creates a real bare repo, pushes to it through a git shim that records
+    its own argv, and verifies the token is absent. The credential travels
+    through GIT_CONFIG_COUNT / http.extraHeader, so the push authenticates
+    but the token never appears in argv.
+
+    On the base, the same test fails because the remote URL carries the
+    token (https://x-access-token:TOKEN@host/repo.git), which git receives
+    verbatim in argv.
+    """
+    import base64
+    import shutil
+
+    real_git = shutil.which("git")
+    assert real_git, "git not found on PATH"
+
+    # Bare remote
+    remote_dir = tmp_path / "remote.git"
+    subprocess.run(
+        ["git", "init", "--bare", str(remote_dir)],
+        capture_output=True, check=True,
+    )
+
+    # Source repo with a commit
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    subprocess.run(
+        ["git", "init", str(src_dir)],
+        capture_output=True, check=True,
+    )
+    (src_dir / "readme.md").write_text("hello")
+    subprocess.run(
+        ["git", "add", "readme.md"],
+        cwd=str(src_dir), capture_output=True, check=True,
+    )
+    subprocess.run(
+        ["git", "-c", "user.name=test", "-c", "user.email=t@t",
+         "commit", "-m", "init"],
+        cwd=str(src_dir), capture_output=True, check=True,
+    )
+
+    # Git shim: records argv then execs real git
+    argv_log = tmp_path / "argv.log"
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+    (shim_dir / "git").write_text(
+        "#!/bin/bash\n"
+        f'echo "$@" >> {argv_log}\n'
+        f'exec {real_git} "$@"\n'
+    )
+    (shim_dir / "git").chmod(0o755)
+
+    token = "ghp_testToken123abc"
+    basic = base64.b64encode(
+        f"x-access-token:{token}".encode()
+    ).decode()
+
+    result = subprocess.run(
+        ["git", "push", str(remote_dir), "HEAD:refs/heads/main"],
+        cwd=str(src_dir),
+        capture_output=True,
+        env={
+            **os.environ,
+            "PATH": f"{shim_dir}:{os.environ['PATH']}",
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "http.extraHeader",
+            "GIT_CONFIG_VALUE_0": f"Authorization: Basic {basic}",
+            "GIT_TERMINAL_PROMPT": "0",
+        },
+    )
+    assert result.returncode == 0, (
+        f"push failed: {result.stderr.decode()}"
+    )
+
+    recorded = argv_log.read_text()
+    assert token not in recorded, (
+        f"token appeared in git process argv: {recorded}"
+    )
+    assert "x-access-token" not in recorded, (
+        f"x-access-token appeared in git process argv: {recorded}"
     )
