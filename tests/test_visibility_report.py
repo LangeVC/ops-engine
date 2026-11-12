@@ -152,7 +152,11 @@ def test_exception_entries_load_into_config(world):
     from ops_engine.modules.visibility_report import generate_report
     output = generate_report(str(world.work), globs=GLOBS)
 
-    # Build a YAML fragment from the output and verify it loads
+    # Build a YAML fragment from the output and verify it loads.
+    # The report outputs list items with proper YAML indentation:
+    #   - path: <path>
+    #     blob: <sha>
+    # We need blob to be indented 2 more than the dash line.
     yaml_fragment = (
         "orgs:\n"
         "  o:\n"
@@ -164,17 +168,19 @@ def test_exception_entries_load_into_config(world):
         "            role: mirror\n"
         "            visibility: public\n"
         "        visibility_candidate_globs:\n"
-        f"          - {GLOBS[0]}\n"
-        f"          - {GLOBS[1]}\n"
+        f'          - "{GLOBS[0]}"\n'
+        f'          - "{GLOBS[1]}"\n'
         "        visibility_exceptions:\n"
     )
-    # Extract the pasteable lines from the output
+    # Extract pasteable lines from the output.
+    # The report lines use 2-space indent for the list dash and 4-space for blob.
+    # Convert to the config's 10-space base + 2/4 offset.
     for line in output.splitlines():
         stripped = line.strip()
-        if stripped.startswith("- path:") or stripped.startswith("path:"):
+        if stripped.startswith("- path:"):
             yaml_fragment += f"          {stripped}\n"
         elif stripped.startswith("blob:"):
-            yaml_fragment += f"          {stripped}\n"
+            yaml_fragment += f"            {stripped}\n"
 
     import yaml
     raw = yaml.safe_load(yaml_fragment)
