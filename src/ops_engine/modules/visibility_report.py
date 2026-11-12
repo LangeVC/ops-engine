@@ -7,7 +7,7 @@ pasted as exception entries of P36-001 without editing.
 Usage::
 
     python -m ops_engine.modules.visibility_report REPO_DIR [REPO_DIR ...] \
-        --glob '.skillweave/**' --glob '**/prd*.json'
+        --glob 'docs/plans/**' --glob '**/*.plan.json'
 
 For each repository the command prints one section::
 
@@ -16,7 +16,7 @@ For each repository the command prints one section::
     # commit 8f8a1cb...
     # commit 2d0f44e...
             visibility_exceptions:
-              - path: '.skillweave/prd.json'
+              - path: 'docs/plans/roadmap.json'
                 blob: '0967ef424bce6791893e9a57bb952f80fd536e93'
 
 The ``visibility_exceptions:`` block is printed with the indentation a Layover
@@ -190,7 +190,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("repo_dir", nargs="+", metavar="REPO_DIR")
     parser.add_argument(
         "--glob", dest="globs", action="append", required=True, metavar="GLOB",
-        help="candidate path glob (repeatable; e.g. '.skillweave/**')",
+        help="candidate path glob (repeatable; e.g. 'docs/plans/**')",
     )
     parser.add_argument(
         "--indent", type=int, default=8, metavar="N",
