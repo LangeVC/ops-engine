@@ -119,6 +119,9 @@ class PublicationReport:
     # P36-017 criterion 5: destinations skipped because the tag is an RC
     # tag that must not reach a public destination.
     rc_skipped: list[str] = field(default_factory=list)
+    # P36-018 criterion 1: body state per destination (written, supplemented,
+    # already_equal, or failed with the named difference).
+    body_states: dict[str, str] = field(default_factory=dict)
 
     @property
     def publisher(self) -> dict[str, str]:
@@ -145,6 +148,7 @@ class PublicationReport:
             "publishers": dict(self.publishers),
             "partial": self.partial,
             "rc_skipped_destinations": list(self.rc_skipped),
+            "body_states": dict(self.body_states),
         }
 
 
@@ -567,6 +571,7 @@ class ReleaseHandler:
                 _audit_destination(audit, tag_name, label, "failed", detail)
             else:
                 report.published.append(label)
+                report.body_states[label] = "written"
                 if per_dest_login:
                     # The release this call created is the engine's own.
                     report.publishers[label] = "engine"
@@ -845,6 +850,7 @@ async def _try_supplement_body(
             f"(was empty)"
         )
         report.supplemented.append(label)
+        report.body_states[label] = "supplemented"
         _audit_destination(
             audit, tag_name, label, "supplemented",
             f"existing_release_id={found['id']} body supplemented (was empty)"
@@ -863,9 +869,12 @@ async def _try_supplement_body(
         logger.error(f"partial publication: {label} failed: {detail}")
         report.failed.append(label)
         report.failure_details[label] = detail
+        report.body_states[label] = f"failed: {detail}"
         _audit_destination(audit, tag_name, label, "failed", detail)
         return True
 
+    # Body already contains the CHANGELOG section: already equal.
+    report.body_states[label] = "already_equal"
     return False
 
 
