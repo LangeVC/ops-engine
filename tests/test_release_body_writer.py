@@ -52,12 +52,12 @@ def _full_body():
 FULL_BODY = _full_body()
 
 
-def _config(*, install_block="", assets_line=""):
+def _config(*, install_block="", assets_line="", forge="forgejo"):
     repos = {
         "ops-engine": {
             "destinations": [
                 {
-                    "forge": "forgejo",
+                    "forge": forge,
                     "repo": REPO,
                     "role": "release",
                     "credential_variable": "OPS_TOKEN",
@@ -163,7 +163,7 @@ async def _publish(forge, adapter, tmp_path, *, release_body=None, **over):
     audit = []
     kwargs = {"release_body": release_body, **over} if release_body else over
     report = await ReleaseHandler.publish_release(
-        _config(), REPO, TAG, NOTES, art,
+        _config(forge=forge), REPO, TAG, NOTES, art,
         adapters=[adapter], skip_existing=True, audit=audit, **kwargs,
     )
     return report, audit
@@ -314,4 +314,105 @@ async def test_empty_body_supplemented_on_both_forges(forge, make, tmp_path):
     label = f"{forge}:{REPO}"
     assert len(dest.patched_bodies) >= 1
     assert report.supplemented == [label]
+    assert report.failed == []
+
+
+# ---------------------------------------------------------------------------
+# Production call shape: ReleaseContext body fields → _release_tag → body
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_release_context_body_fields_reach_publish_release(tmp_path, monkeypatch):
+    """The ReleaseContext install block and assets line are composed into the
+    full body by _release_tag and passed to publish_release, so the production
+    webhook path (process_event → _release_tag) writes the full body without
+    the caller passing release_body explicitly."""
+    from unittest.mock import AsyncMock
+
+    from ops_engine.config_loader import ReleaseConfig
+    from ops_engine.modules import release as release_module
+    from ops_engine.modules.release import (
+        ReleaseContext,
+        ReleaseHandler,
+        TagIdentitySpec,
+    )
+
+    dest = FakeDestination()
+    adapter = _forgejo(dest)
+
+    source = AsyncMock()
+    async def get_file_content(repo, path, ref="main"):
+        return {
+            "CHANGELOG.md": f"# Changes\n\n## {TAG}\n\n{NOTES}",
+            ".ops.yaml": (
+                "destinations:\n"
+                "  - {forge: forgejo, repo: langevc/ops-engine, role: release, credential_variable: OPS_TOKEN}\n"
+            ),
+        }[path]
+    source.get_file_content = get_file_content
+
+    monkeypatch.setattr(release_module, "push_canonical_tag", AsyncMock())
+
+    # Intercept publish_release to capture the release_body it receives.
+    captured = {}
+    real_publish = ReleaseHandler.publish_release
+
+    async def intercept_publish(*args, **kwargs):
+        captured["release_body"] = kwargs.get("release_body")
+        captured["release_notes"] = args[3] if len(args) > 3 else kwargs.get("release_notes")
+        result = await real_publish(*args, **kwargs)
+        captured["report"] = result
+        return result
+
+    monkeypatch.setattr(ReleaseHandler, "publish_release", intercept_publish)
+
+    context = ReleaseContext(
+        ops_config=_config(forge="forgejo"),
+        artifact_dir=tmp_path / "dist",
+        identity=TagIdentitySpec(
+            repo_dir=str(tmp_path),
+            canonical_url="https://forge.example/langevc/ops-engine.git",
+            canonical_token="tok",
+            mirror_remote="https://mirror.example/langevc/ops-engine.git",
+        ),
+        adapters=[adapter],
+        release_body_install_block=INSTALL_BLOCK,
+        release_body_assets_line=ASSETS_LINE,
+    )
+
+    (tmp_path / "dist").mkdir()
+    for name in FILES:
+        (tmp_path / "dist" / name).write_bytes(name.encode())
+
+    await ReleaseHandler.process_event(
+        source,
+        {
+            "event_type": "push",
+            "action": None,
+            "repo": REPO,
+            "raw": {"ref": f"refs/tags/{TAG}"},
+        },
+        ReleaseConfig(enabled=True, trigger="tag_push", tag_pattern="v*"),
+        context,
+    )
+
+    # The composed body was passed to publish_release.
+    body = captured["release_body"]
+    assert body is not None, "release_body was not passed to publish_release"
+    assert f"## {TITLE}" in body
+    assert NOTES.strip() in body
+    assert "### Install" in body
+    assert INSTALL_BLOCK in body
+    assert ASSETS_LINE in body
+    assert CHANGELOG_PATH in body
+
+    # The destination release was created with the full body.
+    assert dest.created_body is not None
+    assert INSTALL_BLOCK in dest.created_body
+    assert ASSETS_LINE in dest.created_body
+
+    report = captured["report"]
+    label = f"forgejo:{REPO}"
+    assert report.published == [label]
     assert report.failed == []

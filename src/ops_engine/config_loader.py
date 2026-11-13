@@ -458,6 +458,11 @@ class RepoConfig(BaseModel):
     # P36-001: exact ``(path, blob)`` pairs the visibility gate excuses. Empty
     # by default: without an explicit exception the gate refuses as before.
     visibility_exceptions: list[VisibilityException] = Field(default_factory=list)
+    # P36-017: per-repository release body parts. The install block and assets
+    # line come from a per-repository declaration (business data, for example a
+    # key in the repository's .ops.yaml), never from engine defaults.
+    release_body_install_block: str = Field(default="")
+    release_body_assets_line: str = Field(default="")
 
     @field_validator("mirror")
     @classmethod
@@ -826,6 +831,8 @@ class OpsEngineConfig(BaseModel):
             destinations=repo_specific.destinations,  # no org default (repo-specific only)
             visibility_candidate_globs=repo_specific.visibility_candidate_globs,
             visibility_exceptions=repo_specific.visibility_exceptions,
+            release_body_install_block=repo_specific.release_body_install_block,
+            release_body_assets_line=repo_specific.release_body_assets_line,
         )
         _assert_typed_sections(resolved, org_name, repo_name)
         return resolved

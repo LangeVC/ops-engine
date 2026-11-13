@@ -205,6 +205,11 @@ class ReleaseContext:
     credentials: Optional[dict[str, Credential]] = None
     audit: Optional[list[str]] = None
     publisher_login: str | dict[str, str] = ""
+    # P36-017: per-repository release body parts. The install block and assets
+    # line come from a per-repository declaration (business data, for example a
+    # key in the repository's .ops.yaml), never from engine defaults.
+    release_body_install_block: str = ""
+    release_body_assets_line: str = ""
 
 
 def _resolve_artifact_dir(root: str | Path, configured: Optional[str]) -> Path:
@@ -322,6 +327,7 @@ class ReleaseHandler:
         audit: Optional[list[str]] = None,
         credentials: dict[str, Credential] | None = None,
         publisher_login: str | dict[str, str] = "",
+        release_body: str | None = None,
     ) -> "PublicationReport":
         """Publish a built release to every destination resolved from config.
 
@@ -488,6 +494,7 @@ class ReleaseHandler:
                     await _judge_existing_release(
                         adapter, destination, report, audit, tag_name, label,
                         release_name, release_notes, artifacts, per_dest_login,
+                        release_body=release_body,
                     )
                     continue
                 created = await _publish_to_destination(
@@ -500,6 +507,7 @@ class ReleaseHandler:
                     draft=draft,
                     prerelease=prerelease,
                     tolerate_existing=skip_existing,
+                    body_override=release_body,
                 )
                 if not created:
                     # The create call answered a duplicate: the release was
@@ -508,6 +516,7 @@ class ReleaseHandler:
                     await _judge_existing_release(
                         adapter, destination, report, audit, tag_name, label,
                         release_name, release_notes, artifacts, per_dest_login,
+                        release_body=release_body,
                     )
                     continue
             except Exception as exc:  # noqa: BLE001 (record — the report, not abort)
@@ -700,6 +709,7 @@ async def _judge_existing_release(
     release_notes: str,
     artifacts: list[tuple[str, bytes]],
     publisher_login: str = "",
+    release_body: str | None = None,
 ) -> None:
     """Record what ``destination`` already holds for ``tag_name``.
 
@@ -708,6 +718,11 @@ async def _judge_existing_release(
     repository (P36-003): recorded in ``up_to_date``, neither edited nor
     duplicated, and the publisher is named per destination. Any other release
     is judged as before — supplemented, incomplete, or skipped.
+
+    With ``release_body`` given (P36-017), an existing release whose body is
+    empty gets the body supplemented (patched in), and one whose body does not
+    contain the tag's CHANGELOG section is left untouched and fails that
+    destination with a named error.
     """
     if publisher_login:
         found = await adapter.find_release(destination.repo, tag_name)
@@ -726,6 +741,12 @@ async def _judge_existing_release(
                     audit, tag_name, label, "up-to-date", f"publisher={publisher}"
                 )
                 return
+    if release_body is not None:
+        if await _try_supplement_body(
+            adapter, destination, report, audit, tag_name, label,
+            release_body, release_notes, artifacts,
+        ):
+            return
     if await _try_supplement(
         adapter, destination, report, audit, tag_name, label,
         release_name, release_notes, artifacts,
@@ -741,6 +762,69 @@ async def _judge_existing_release(
     logger.info(f"Release {tag_name} already exists on {label}, skipping")
     report.skipped.append(label)
     _audit_destination(audit, tag_name, label, "skipped")
+
+
+async def _try_supplement_body(
+    adapter: ForgeAdapter,
+    destination: Destination,
+    report: "PublicationReport",
+    audit: Optional[list[str]],
+    tag_name: str,
+    label: str,
+    release_body: str,
+    release_notes: str,
+    artifacts: list[tuple[str, bytes]],
+) -> bool:
+    """Judge an existing release with the body-writer rule (P36-017).
+
+    Returns True when the destination was handled (body supplemented or
+    failed); False means the caller should continue with the existing
+    supplement/title/asset logic.
+
+    Rule: when the existing release has an empty body, the full body is
+    patched in and the destination is recorded as supplemented. When the
+    body does not contain the tag's CHANGELOG section, the destination is
+    failed with a named error that names the difference. Otherwise
+    (body already contains the CHANGELOG), the caller keeps judging as
+    before.
+    """
+    found = await adapter.find_release(destination.repo, tag_name)
+    if not isinstance(found, dict) or found.get("id") is None:
+        return False
+    existing_body = (found.get("body") or "").strip()
+
+    if not existing_body:
+        # Empty body: supplement with the full body.
+        try:
+            await adapter.update_release_body(
+                destination.repo, found["id"], release_body
+            )
+        except NotImplementedError:
+            return False
+        logger.info(
+            f"Release {tag_name} on {label} body supplemented "
+            f"(was empty)"
+        )
+        report.supplemented.append(label)
+        _audit_destination(
+            audit, tag_name, label, "supplemented",
+            f"existing_release_id={found['id']} body supplemented (was empty)"
+        )
+        return True
+
+    if release_notes.strip() not in existing_body:
+        # Body does not contain the CHANGELOG section: fail by name.
+        detail = (
+            f"existing release body does not contain the CHANGELOG section "
+            f"for {tag_name}"
+        )
+        logger.error(f"partial publication: {label} failed: {detail}")
+        report.failed.append(label)
+        report.failure_details[label] = detail
+        _audit_destination(audit, tag_name, label, "failed", detail)
+        return True
+
+    return False
 
 
 async def _try_supplement(
@@ -899,6 +983,7 @@ async def _publish_to_destination(
     draft: bool,
     prerelease: bool,
     tolerate_existing: bool = False,
+    body_override: str | None = None,
 ) -> bool:
     """Create the release on one destination and attach every artifact to it.
 
@@ -909,17 +994,22 @@ async def _publish_to_destination(
     not show: nothing is attached and False is returned. Only the create call
     is read this way; an upload error stays a failure.
 
+    ``body_override``, when given, is used as the release body instead of
+    ``release_notes``, so a release created here carries the full body with
+    install block and assets line (P36-017).
+
     The release id comes from ``create_release``'s return value, so the uploads
     target the release object just created — no second lookup and no
     re-download. An exception anywhere in the create-or-attach sequence fails
     the whole destination, which the caller records as a partial publication.
     """
+    body = body_override if body_override is not None else release_notes
     try:
         created = await adapter.create_release(
             repo_full_name=destination.repo,
             tag_name=tag_name,
             name=release_name,
-            body=release_notes,
+            body=body,
             draft=draft,
             prerelease=prerelease,
         )
@@ -1046,6 +1136,24 @@ async def _release_tag(
             mirror_token=identity.mirror_token,
         )
 
+        # Compose the full release body (P36-017).  The install block and
+        # assets line come from the per-repository declaration (the caller
+        # sets them on the ReleaseContext from the layover config), never
+        # from engine defaults.
+        canonical_url = identity.canonical_url.removesuffix(".git")
+        changelog_url = (
+            f"{canonical_url}/src/tag/{tag_name}/{config.changelog_path}"
+        )
+        body = f"## {render_release_name(name_template, repo, tag_name)}\n\n{notes}\n"
+        if context.release_body_install_block:
+            body += f"### Install\n{context.release_body_install_block}\n\n"
+        if context.release_body_assets_line:
+            body += f"{context.release_body_assets_line}\n\n"
+        body += (
+            f"See [{config.changelog_path}]({changelog_url})"
+            f" for all changes.\n"
+        )
+
         logger.info(f"Publishing release {tag_name} of {repo}")
         report = await ReleaseHandler.publish_release(
             context.ops_config,
@@ -1066,6 +1174,7 @@ async def _release_tag(
             skip_existing=True,
             audit=context.audit,
             publisher_login=context.publisher_login,
+            release_body=body,
         )
     if report.partial:
         await _notify_partial(context.ops_config, repo, tag_name, report)
