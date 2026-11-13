@@ -11,7 +11,7 @@ from typing import Any, Iterable, Optional
 import httpx
 
 from ops_engine.adapters.base import ForgeAdapter
-from ops_engine.adapters.factory import adapters_for
+from ops_engine.adapters.factory import Credential, MissingCredentialError, adapters_for
 from ops_engine.config_loader import Destination, OpsEngineConfig, ReleaseConfig
 from ops_engine.modules.mirror import resolve_destinations
 from ops_engine.modules.notification import NotificationHandler
@@ -149,8 +149,9 @@ class TagIdentitySpec:
     """Inputs of the OE-008 tag identity step (:func:`push_canonical_tag`).
 
     ``canonical_token`` reaches git through the environment, never argv or a
-    URL; ``mirror_remote`` is used exactly as given. ``runner`` is the git
-    runner injection point (real git when ``None``).
+    URL; ``mirror_remote`` is used token-free; ``mirror_token``, when given,
+    is passed through the environment, never argv or URL (P36-002). ``runner``
+    is the git runner injection point (real git when ``None``).
     """
 
     repo_dir: str
@@ -158,6 +159,7 @@ class TagIdentitySpec:
     canonical_token: str
     mirror_remote: str
     runner: Optional[Runner] = None
+    mirror_token: str = ""
 
 
 @dataclass
@@ -181,6 +183,7 @@ class ReleaseContext:
     ticket_prefixes: Iterable[str] = ()
     prerelease: bool = False
     adapters: Optional[list[ForgeAdapter]] = None
+    credentials: Optional[dict[str, Credential]] = None
     audit: Optional[list[str]] = None
 
 
@@ -297,6 +300,7 @@ class ReleaseHandler:
         roles: Iterable[str] | None = None,
         skip_existing: bool = False,
         audit: Optional[list[str]] = None,
+        credentials: dict[str, Credential] | None = None,
     ) -> "PublicationReport":
         """Publish a built release to every destination resolved from config.
 
@@ -354,24 +358,17 @@ class ReleaseHandler:
         Files already attached are untouched; nothing is re-created or deleted. When any destination failed, one warning line is logged for
         the whole call (the engine has no event log, D20).
 
+        ``credentials`` is a per-destination credential mapping (ADP-011):
+        each destination's forge value maps to its own :class:`Credential`,
+        so a Forgejo destination never receives the GitHub token and vice
+        versa (P36-002). Omitted or ``None`` falls back to the legacy shared
+        ``token``/``webhook_secret`` pair.
+
         Raises:
             ValueError: a supplied ``adapters`` list does not match the resolved
                 destination count.
         """
         destinations = _resolve_publish_destinations(config, repo, repo_dir, roles)
-
-        if adapters is None:
-            adapters = adapters_for(
-                destinations,
-                token=token,
-                webhook_secret=webhook_secret,
-                base_url=base_url,
-            )
-        if len(adapters) != len(destinations):
-            raise ValueError(
-                f"publish_release resolved {len(destinations)} destinations but "
-                f"received {len(adapters)} adapters"
-            )
 
         release_name = render_release_name(
             name_template or DEFAULT_NAME_TEMPLATE, repo, tag_name
@@ -379,7 +376,54 @@ class ReleaseHandler:
         artifacts = _collect_artifacts(artifact_dir)
 
         report = PublicationReport(repo=repo, tag_name=tag_name)
-        for destination, adapter in zip(destinations, adapters):
+
+        if adapters is not None:
+            if len(adapters) != len(destinations):
+                raise ValueError(
+                    f"publish_release resolved {len(destinations)} destinations but "
+                    f"received {len(adapters)} adapters"
+                )
+            paired: list[tuple[Destination, ForgeAdapter]] = list(
+                zip(destinations, adapters)
+            )
+        elif credentials is not None:
+            # P36-002 criterion 3: build per-destination; a missing credential
+            # fails only that destination and leaves others running.
+            paired = []
+            for destination in destinations:
+                try:
+                    paired.append(
+                        (
+                            destination,
+                            adapters_for(
+                                [destination],
+                                base_url=base_url,
+                                credentials=credentials,
+                            )[0],
+                        )
+                    )
+                except MissingCredentialError as exc:
+                    label = _destination_label(destination)
+                    report.failed.append(label)
+                    report.failure_details[label] = str(exc)
+                    logger.error(
+                        f"partial publication: {label} "
+                        f"failed: {exc}"
+                    )
+        else:
+            paired = list(
+                zip(
+                    destinations,
+                    adapters_for(
+                        destinations,
+                        token=token,
+                        webhook_secret=webhook_secret,
+                        base_url=base_url,
+                    ),
+                )
+            )
+
+        for destination, adapter in paired:
             label = _destination_label(destination)
             try:
                 if skip_existing and await adapter.release_exists(
@@ -865,6 +909,7 @@ async def _release_tag(
             identity.canonical_token,
             identity.mirror_remote,
             identity.runner,
+            mirror_token=identity.mirror_token,
         )
 
         logger.info(f"Publishing release {tag_name} of {repo}")
@@ -881,6 +926,7 @@ async def _release_tag(
             prerelease=context.prerelease,
             name_template=name_template,
             adapters=context.adapters,
+            credentials=context.credentials,
             repo_dir=layer3_dir,
             roles=("release",),
             skip_existing=True,

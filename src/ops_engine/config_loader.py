@@ -306,6 +306,11 @@ class Destination(BaseModel):
     # (``DEFAULT_FORGE_HOSTS``); a mirror destination on any other forge must
     # declare it, or the configuration is refused at load.
     host: str = Field(default="")
+    # P36-002: each release destination names the environment variable that
+    # supplies its credential, so two destinations on the same forge receive
+    # distinct tokens and a Forgejo destination never receives the GitHub token.
+    # A release destination without its own variable is refused.
+    credential_variable: str = Field(default="")
 
 
 class MirrorConfig(BaseModel):
@@ -505,6 +510,26 @@ class RepoConfig(BaseModel):
                     f"destination {dest.forge}:{dest.repo} is on forge "
                     f"{dest.forge!r}, which has no default host; declare "
                     "'host' for it"
+                )
+        return value
+
+    @field_validator("destinations")
+    @classmethod
+    def _release_destinations_declare_credential_variable(
+        cls, value: list[Destination],
+    ) -> list[Destination]:
+        """Refuse a release destination without its own credential variable (P36-002).
+
+        Each release destination must name the environment variable that
+        supplies its credential, so two destinations on the same forge receive
+        distinct tokens and a Forgejo destination never receives the GitHub
+        token. The refusal names the destination, not just the forge.
+        """
+        for dest in value:
+            if dest.role == "release" and not dest.credential_variable.strip():
+                raise ValueError(
+                    f"release destination {dest.forge}:{dest.repo} must "
+                    f"declare 'credential_variable'"
                 )
         return value
 

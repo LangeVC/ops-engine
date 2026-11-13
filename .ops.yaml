@@ -9,10 +9,12 @@ destinations:
     repo: langevc/ops-engine
     role: release
     visibility: public
+    credential_variable: FORGEJO_TOKEN
   - forge: github
     repo: LangeVC/ops-engine
     role: release
     visibility: public
+    credential_variable: GH_MIRROR_TOKEN
 
 # The organisation's tracker prefixes (REL-021). The release workflow reads them
 # from here and hands them to the audience gate, so no workflow carries an

@@ -19,6 +19,7 @@ from config (not a literal), and that the literal-laden publication path is
 gone.
 """
 
+import os
 import re
 import subprocess
 import sys
@@ -220,7 +221,7 @@ def test_config_from_the_workflow_shape_resolves_two_destinations():
     exactly the canonical Forgejo destination plus the configured mirrors — a
     real run of resolve_destinations, not a text read."""
     raw_destinations = yaml.safe_load(
-        "- {forge: github, repo: LangeVC/ops-engine, role: release}\n"
+        "- {forge: github, repo: LangeVC/ops-engine, role: release, credential_variable: GH_MIRROR_TOKEN}\n"
     )
     repo = "langevc/ops-engine"
     org, _, repo_name = repo.partition("/")
@@ -231,7 +232,7 @@ def test_config_from_the_workflow_shape_resolves_two_destinations():
                     "repositories": {
                         repo_name: {
                             "destinations": [
-                                {"forge": "forgejo", "repo": repo, "role": "release"}
+                                {"forge": "forgejo", "repo": repo, "role": "release", "credential_variable": "FORGEJO_TOKEN"}
                             ]
                             + raw_destinations
                         }
@@ -294,15 +295,20 @@ def _extract_toplevel_def(name: str) -> str:
 def _run_verify(tag, canonical_sha, remote_path):
     """Run the extracted ``_verify_mirror_tag`` against a LOCAL bare mirror repo,
     exercising the exact git commands the workflow runs."""
-    fn = _extract_toplevel_def("_verify_mirror_tag")
+    verify_fn = _extract_toplevel_def("_verify_mirror_tag")
+    cred_fn = _extract_toplevel_def("_mirror_credential_env")
     driver = (
-        "import subprocess, sys\n"
+        "import base64, os, subprocess, sys\n"
         "import sys as _sys\n"
-        + fn
+        + cred_fn
+        + verify_fn
         + f"_verify_mirror_tag({tag!r}, {canonical_sha!r}, {remote_path!r})\n"
     )
     return subprocess.run(
-        [sys.executable, "-c", driver], capture_output=True, text=True
+        [sys.executable, "-c", driver],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "GH_MIRROR_TOKEN": "test-dummy-token"},
     )
 
 
