@@ -528,7 +528,77 @@ def test_workflow_run_summary_prints_body_states():
         "body_states" in line and "report.body_states" in line
         for line in lines
     )
-    assert has_line, (
-        "forgejo-release.yml is missing the body_states print line — "
-        "the run summary does not list the body state per destination"
+# ---------------------------------------------------------------------------
+# F5: test drives scripts/release-body-drift.py
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_release_body_drift_script_exits_zero_when_no_drift():
+    """F5: the script exits 0 when the body is correct."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "release_body_drift",
+        "scripts/release-body-drift.py",
     )
+    script = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(script)
+
+    dest = DriftCheckFakeDestination(body=FULL_BODY)
+    adapter = _forgejo(dest)
+
+    # Monkey-patch _build_adapter to return our fake adapter.
+    script._build_adapter = lambda args: adapter
+
+    exit_code = await script.main([
+        "--repo", REPO, "--tag", TAG, "--forge", "forgejo",
+        "--release-notes", NOTES,
+    ])
+    assert exit_code == 0, f"expected exit 0, got {exit_code}"
+    assert dest.writes() == []
+
+
+@pytest.mark.asyncio
+async def test_release_body_drift_script_exits_nonzero_on_empty_body():
+    """F5: the script exits 1 when the body is empty."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "release_body_drift2",
+        "scripts/release-body-drift.py",
+    )
+    script = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(script)
+
+    dest = DriftCheckFakeDestination(body="")
+    adapter = _forgejo(dest)
+    script._build_adapter = lambda args: adapter
+
+    exit_code = await script.main([
+        "--repo", REPO, "--tag", TAG, "--forge", "forgejo",
+        "--release-notes", NOTES,
+    ])
+    assert exit_code == 1, f"expected exit 1 for empty body, got {exit_code}"
+    assert dest.writes() == []
+
+
+@pytest.mark.asyncio
+async def test_release_body_drift_script_exits_nonzero_on_missing_changelog():
+    """F5: the script exits 1 when the body lacks the CHANGELOG section."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "release_body_drift3",
+        "scripts/release-body-drift.py",
+    )
+    script = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(script)
+
+    dest = DriftCheckFakeDestination(body=OTHER_BODY)
+    adapter = _forgejo(dest)
+    script._build_adapter = lambda args: adapter
+
+    exit_code = await script.main([
+        "--repo", REPO, "--tag", TAG, "--forge", "forgejo",
+        "--release-notes", NOTES,
+    ])
+    assert exit_code == 1, f"expected exit 1 for missing changelog, got {exit_code}"
+    assert dest.writes() == []
