@@ -511,6 +511,7 @@ class ReleaseHandler:
                 )
                 logger.info(reason)
                 report.rc_skipped.append(label)
+                report.body_states[label] = "rc_skipped"
                 _audit_destination(audit, tag_name, label, "rc-skipped", reason)
                 continue
             per_dest_login = _resolve_publisher_login(publisher_login, destination)
@@ -522,6 +523,7 @@ class ReleaseHandler:
                     f"for credential_variable {destination.credential_variable!r}"
                 )
                 report.failed.append(label)
+                report.body_states[label] = "failed: publisher_login unavailable"
                 report.failure_details[label] = (
                     f"publisher_login unavailable for credential_variable "
                     f"{destination.credential_variable!r}"
@@ -565,6 +567,7 @@ class ReleaseHandler:
             except Exception as exc:  # noqa: BLE001 (record — the report, not abort)
                 logger.error(f"partial publication: {label} failed: {exc}")
                 report.failed.append(label)
+                report.body_states.setdefault(label, f"failed: {exc}")
                 detail = await _conflict_detail(adapter, destination, tag_name, exc)
                 if detail:
                     report.failure_details[label] = detail
@@ -781,6 +784,7 @@ async def _judge_existing_release(
                     "publisher, leaving it untouched"
                 )
                 report.up_to_date.append(label)
+                report.body_states[label] = "up_to_date"
                 _audit_destination(
                     audit, tag_name, label, "up-to-date", f"publisher={publisher}"
                 )
@@ -805,6 +809,7 @@ async def _judge_existing_release(
         return
     logger.info(f"Release {tag_name} already exists on {label}, skipping")
     report.skipped.append(label)
+    report.body_states.setdefault(label, "skipped")
     _audit_destination(audit, tag_name, label, "skipped")
 
 
@@ -989,6 +994,7 @@ def _record_incomplete(
     logger.error(f"partial publication: {label} holds an incomplete release: {detail}")
     report.failed.append(label)
     report.failure_details[label] = f"incomplete existing release ({detail})"
+    report.body_states[label] = f"incomplete: {detail}"
     _audit_destination(audit, tag_name, label, "incomplete", detail)
 
 
