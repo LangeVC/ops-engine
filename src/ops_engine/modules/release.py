@@ -678,9 +678,10 @@ def _resolve_publisher_login(
 
     ``publisher_login`` as a plain ``str`` is used for every destination
     (the pre-P36-003 call shape).  As a ``dict`` it maps credential-variable
-    names to logins; an empty dict means no per-destination mode (backward
-    compat), a non-empty dict with a missing or empty entry for
-    *destination* means the derivation failed for that destination.
+    names to logins: an empty dict is per-destination mode in which no login
+    was derived, and a missing or empty entry for *destination* is a failed
+    derivation for that destination.  Both return ``None``, and the caller
+    fails that destination by name — fail closed, never a silent fallback.
     """
     if isinstance(publisher_login, dict):
         cred = destination.credential_variable or ""

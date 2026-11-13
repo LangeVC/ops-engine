@@ -1028,18 +1028,25 @@ contract (P36-003):
   duplicated.
 - `publishers` — a `dict[str, str]` mapping each destination label to `"engine"`
   (the release names the engine's own account) or `"other"`.
-- `publisher` — a convenience property: `"engine"` when every destination agrees
-  on the engine, `"other"` when they agree on another, and the empty string when
-  there is no attribution or destinations disagree.
+- `publisher` — a convenience property returning `dict(self.publishers)`: the
+  same per-destination mapping described above, and `{}` when no attribution
+  was possible (no release was found, or no `publisher_login` was supplied).
 
 The engine's own login is `publisher_login`, a keyword-only parameter of
-`publish_release` and a field of `ReleaseContext` (default `""`). When absent
-the engine cannot attribute a release and falls back to the pre-P36-003
-behaviour — a pre-existing release from any author is judged as before and may
-be edited, supplemented or failed. The production workflow derives
-`publisher_login` from the Forgejo API (`GET /api/v1/user`) using the engine's
-own token, so no operator-provisioned secret is required. The derivation is not
-part of the engine's Python surface; it lives in the workflow that consumes it.
+`publish_release` and a field of `ReleaseContext` (default `""`). It is either
+one plain `str` used for every destination, or a `dict[str, str]` mapping
+credential-variable names to logins — the per-destination shape (P36-003 design
+C1). In the dict shape each destination is attributed from its own credential;
+a missing or empty entry fails that destination by name, and nothing there is
+supplemented, edited or duplicated. When `publisher_login` is absent (the empty
+string), the engine cannot attribute a release and falls back to the
+pre-P36-003 behaviour — a pre-existing release from any author is judged as
+before and may be edited, supplemented or failed. The production workflow
+derives one login per destination credential, each from its own forge's
+identity endpoint: `GET /api/v1/user` for the Forgejo token and `GET /user` for
+the GitHub token. No operator-provisioned secret is required. The derivation is
+not part of the engine's Python surface; it lives in the workflow that consumes
+it.
 
 ## What the published artifacts carry (ADP-005 / ADP-012)
 
