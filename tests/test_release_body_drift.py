@@ -243,3 +243,225 @@ async def test_create_race_non_empty_body_fails_for_missing_changelog_forgejo(tm
     assert label in report.failed
     detail = report.failure_details.get(label, "")
     assert "CHANGELOG" in detail or "changelog" in detail.lower()
+
+
+# ---------------------------------------------------------------------------
+# Criterion 1: per-destination run summary lists the body state
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_body_state_written_on_create_success(tmp_path):
+    """Criterion 1: a newly created release records 'written'."""
+    dest = RaceFakeDestination(body="", create_status=0)
+    report, _ = await _publish("forgejo", _forgejo(dest), tmp_path,
+                               release_body=FULL_BODY)
+
+    label = f"forgejo:{REPO}"
+    assert report.published == [label]
+    assert report.body_states.get(label) == "written"
+
+
+@pytest.mark.asyncio
+async def test_body_state_supplemented_when_empty_body_filled(tmp_path):
+    """Criterion 1: an empty body that gets supplemented records 'supplemented'."""
+    dest = RaceFakeDestination(body="", create_status=409)
+    report, _ = await _publish("forgejo", _forgejo(dest), tmp_path,
+                               release_body=FULL_BODY)
+
+    label = f"forgejo:{REPO}"
+    assert report.supplemented == [label]
+    assert report.body_states.get(label) == "supplemented"
+
+
+@pytest.mark.asyncio
+async def test_body_state_failed_when_changelog_missing(tmp_path):
+    """Criterion 1: a body without the CHANGELOG section records 'failed' with
+    the named difference."""
+    dest = RaceFakeDestination(body=OTHER_BODY, create_status=409)
+    report, _ = await _publish("forgejo", _forgejo(dest), tmp_path,
+                               release_body=FULL_BODY)
+
+    label = f"forgejo:{REPO}"
+    state = report.body_states.get(label, "")
+    assert state.startswith("failed:")
+    assert "CHANGELOG" in state or "changelog" in state.lower()
+
+
+class ExistingReleaseDestination:
+    """A destination where the release already exists with a given body and no
+    race occurs (first GET returns 200)."""
+
+    def __init__(self, *, body):
+        self._body = body
+        self.patched_bodies = []
+        self.calls = []
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        self.calls.append((request.method, path))
+        if request.method == "GET" and "/releases/tags/" in path:
+            return httpx.Response(
+                200,
+                json={
+                    "id": RELEASE_ID,
+                    "tag_name": TAG,
+                    "name": TITLE,
+                    "body": self._body,
+                },
+            )
+        if request.method == "GET" and path.endswith("/releases"):
+            return httpx.Response(200, json=[{
+                "id": RELEASE_ID, "tag_name": TAG, "name": TITLE,
+                "body": self._body,
+            }])
+        if request.method == "PATCH" and f"/releases/{RELEASE_ID}" in path:
+            body = json.loads(request.content)
+            if "body" in body:
+                self.patched_bodies.append(body["body"])
+            return httpx.Response(200, json={"id": RELEASE_ID})
+        if request.method == "POST" and f"/releases/{RELEASE_ID}/assets" in path:
+            return httpx.Response(201, json={"name": "asset"})
+        if request.method == "POST" and path.endswith("/releases"):
+            return httpx.Response(409, json={"message": "conflict"})
+        return httpx.Response(500, json={"message": f"unexpected {request.method} {path}"})
+
+    def writes(self):
+        return [(m, p) for m, p in self.calls if m != "GET"]
+
+
+@pytest.mark.asyncio
+async def test_body_state_already_equal_when_changelog_present(tmp_path):
+    """Criterion 1: a release whose body already contains the CHANGELOG section
+    records 'already_equal'."""
+    dest = ExistingReleaseDestination(body=FULL_BODY)
+    report, _ = await _publish("forgejo", _forgejo(dest), tmp_path,
+                               release_body=FULL_BODY)
+
+    label = f"forgejo:{REPO}"
+    assert report.body_states.get(label) == "already_equal"
+    # No body PATCH was issued — the release was left untouched.
+    assert len(dest.patched_bodies) == 0
+
+
+# ---------------------------------------------------------------------------
+# Criterion 2: read-only drift check for release bodies
+# ---------------------------------------------------------------------------
+
+
+class DriftCheckFakeDestination:
+    """Read-only destination for drift check tests — only serves GET."""
+
+    def __init__(self, *, body=None, has_release=True):
+        self._body = body
+        self._has_release = has_release
+        self.calls = []
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        self.calls.append((request.method, path))
+        if request.method == "GET" and "/releases/tags/" in path:
+            if not self._has_release:
+                return httpx.Response(404, json={"message": "not found"})
+            return httpx.Response(
+                200,
+                json={
+                    "id": RELEASE_ID,
+                    "tag_name": TAG,
+                    "name": TITLE,
+                    "body": self._body,
+                },
+            )
+        if request.method == "GET" and path.endswith("/releases"):
+            if not self._has_release:
+                return httpx.Response(200, json=[])
+            return httpx.Response(200, json=[{
+                "id": RELEASE_ID, "tag_name": TAG, "name": TITLE,
+                "body": self._body,
+            }])
+        return httpx.Response(500, json={"message": f"unexpected {request.method} {path}"})
+
+    def writes(self):
+        return [(m, p) for m, p in self.calls if m != "GET"]
+
+
+from ops_engine.modules.reconcile import ReconcileHandler
+
+
+@pytest.mark.asyncio
+async def test_drift_check_reports_empty_body():
+    """Criterion 2: an empty body is reported with empty=True."""
+    dest = DriftCheckFakeDestination(body="")
+    adapter = _forgejo(dest)
+
+    result = await ReconcileHandler.check_release_body(
+        adapter, REPO, TAG, release_notes=NOTES,
+    )
+
+    assert result is not None
+    assert result.empty is True
+    assert result.missing_changelog is False
+    assert result.repo == REPO
+    assert result.tag_name == TAG
+    assert result.release_id == RELEASE_ID
+    # Read-only: no writes occurred.
+    assert dest.writes() == []
+
+
+@pytest.mark.asyncio
+async def test_drift_check_reports_missing_changelog():
+    """Criterion 2: a body without the CHANGELOG section is reported with
+    missing_changelog=True."""
+    dest = DriftCheckFakeDestination(body=OTHER_BODY)
+    adapter = _forgejo(dest)
+
+    result = await ReconcileHandler.check_release_body(
+        adapter, REPO, TAG, release_notes=NOTES,
+    )
+
+    assert result is not None
+    assert result.empty is False
+    assert result.missing_changelog is True
+    assert dest.writes() == []
+
+
+@pytest.mark.asyncio
+async def test_drift_check_returns_none_when_body_ok():
+    """Criterion 2: a body that contains the CHANGELOG returns None (no drift)."""
+    dest = DriftCheckFakeDestination(body=FULL_BODY)
+    adapter = _forgejo(dest)
+
+    result = await ReconcileHandler.check_release_body(
+        adapter, REPO, TAG, release_notes=NOTES,
+    )
+
+    assert result is None
+    assert dest.writes() == []
+
+
+@pytest.mark.asyncio
+async def test_drift_check_returns_none_when_no_release():
+    """Criterion 2: a tag without a release returns None."""
+    dest = DriftCheckFakeDestination(has_release=False)
+    adapter = _forgejo(dest)
+
+    result = await ReconcileHandler.check_release_body(
+        adapter, REPO, TAG, release_notes=NOTES,
+    )
+
+    assert result is None
+    assert dest.writes() == []
+
+
+@pytest.mark.asyncio
+async def test_drift_check_returns_none_when_empty_repo():
+    """Criterion 2: an empty repo string returns None without any calls."""
+    dest = DriftCheckFakeDestination(body="")
+    adapter = _forgejo(dest)
+
+    result = await ReconcileHandler.check_release_body(
+        adapter, "", TAG, release_notes=NOTES,
+    )
+
+    assert result is None
+    assert dest.writes() == []
