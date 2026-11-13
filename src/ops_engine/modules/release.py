@@ -30,6 +30,12 @@ logger = logging.getLogger(__name__)
 # a configured ``name_template``.
 DEFAULT_NAME_TEMPLATE = "{repo_name} {tag_name}"
 
+# P36-017 criterion 5: RC tag guard. A tag matching vX.Y.Z-rc.N (the form
+# _TAG_RE in release_gates.py already accepts) is not created, written or
+# mirrored on any public destination; the destination is skipped with one
+# named log line and the run summary lists the reason.
+_RC_TAG_RE = re.compile(r"^v\d+\.\d+\.\d+-rc\d+$")
+
 
 class _TemplateDict(dict[str, str]):
     """Mapping that leaves unknown placeholders visible instead of dropping them."""
@@ -110,6 +116,9 @@ class PublicationReport:
     # destination label -> who made the release found for the tag there:
     # ``engine`` (the account named by ``publisher_login``) or ``other``.
     publishers: dict[str, str] = field(default_factory=dict)
+    # P36-017 criterion 5: destinations skipped because the tag is an RC
+    # tag that must not reach a public destination.
+    rc_skipped: list[str] = field(default_factory=list)
 
     @property
     def publisher(self) -> dict[str, str]:
@@ -135,6 +144,7 @@ class PublicationReport:
             "up_to_date_destinations": list(self.up_to_date),
             "publishers": dict(self.publishers),
             "partial": self.partial,
+            "rc_skipped_destinations": list(self.rc_skipped),
         }
 
 
@@ -468,8 +478,23 @@ class ReleaseHandler:
                 )
             )
 
+        # P36-017 criterion 5: RC tag guard. A tag matching vX.Y.Z-rc.N
+        # is not created, written or mirrored on any public destination.
+        # The destination is skipped with one named log line and the run
+        # summary lists the reason.
+        _is_rc = _RC_TAG_RE.match(tag_name)
+
         for destination, adapter in paired:
             label = _destination_label(destination)
+            if _is_rc and destination.visibility == "public":
+                reason = (
+                    f"RC tag {tag_name} skipped on public destination "
+                    f"{label} (LVC-305 pending)"
+                )
+                logger.info(reason)
+                report.rc_skipped.append(label)
+                _audit_destination(audit, tag_name, label, "rc-skipped", reason)
+                continue
             per_dest_login = _resolve_publisher_login(publisher_login, destination)
             if per_dest_login is None:
                 # Per-destination mode and the login is unavailable: fail
