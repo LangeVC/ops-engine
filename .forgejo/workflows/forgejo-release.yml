@@ -864,17 +864,31 @@ jobs:
               print(f"mirror tag verified: {tag_name} -> {mirror_target}")
 
           async def main():
+              # P36-017 criterion 5: RC tag guard. A tag matching
+              # vX.Y.Z-rc.N is not created, written or mirrored on any
+              # public destination. Check before the mirror push so the
+              # tag never reaches the mirror.
+              _is_rc = __import__("re").match(r"^v\d+\.\d+\.\d+-rc\d+$", tag_name)
+
               # REL-020 — push the canonical tag object onto the mirror BEFORE the
               # engine publishes, so the github create_release cannot invent a tag.
               # P36-002 criterion 3: a missing or empty mirror credential fails
               # that destination by name and leaves publish_release and the other
               # destinations running.
               mirror_failed = None
+              rc_mirror_skipped = None
               if mirror_dest is not None:
-                  try:
-                      _push_mirror_tag(_mirror_remote(mirror_dest.repo))
-                  except MirrorCredentialError as exc:
-                      mirror_failed = f"github:{mirror_dest.repo}: {exc}"
+                  if _is_rc:
+                      rc_mirror_skipped = (
+                          f"RC tag {tag_name} skipped on public destination "
+                          f"github:{mirror_dest.repo} (LVC-305 pending)"
+                      )
+                      print(rc_mirror_skipped)
+                  else:
+                      try:
+                          _push_mirror_tag(_mirror_remote(mirror_dest.repo))
+                      except MirrorCredentialError as exc:
+                          mirror_failed = f"github:{mirror_dest.repo}: {exc}"
 
               # ADP-011 / P36-002 criterion 3 — credentials are passed per
               # destination so a missing credential fails only that destination
@@ -899,9 +913,8 @@ jobs:
               # P36-017 — compose the full release body from the
               # per-repository declaration in .ops.yaml. The install block
               # and assets line are business data, never engine defaults.
-              # The audience gate (the "Gate the release notes for an
-              # external audience" step above) already ran on the raw notes,
-              # so the gate is the same as it was before the body change.
+              # The audience gate runs on the final body inside
+              # publish_release (P36-017 criterion 3).
               product_heading = render_release_name(
                   name_template, repo, tag_name
               )
@@ -938,6 +951,7 @@ jobs:
                   skip_existing=True,
                   publisher_login=_publisher_login_dict(),
                   release_body=release_body,
+                  ticket_prefixes=getattr(layer3, "tracker_prefixes", []),
               )
 
               if mirror_failed:
@@ -948,14 +962,18 @@ jobs:
               skipped = ", ".join(report.skipped) or "(none)"
               failed = ", ".join(report.failed) or "(none)"
               up_to_date = ", ".join(report.up_to_date) or "(none)"
+              rc_skipped = ", ".join(report.rc_skipped) or "(none)"
               print(f"published destinations:    {published}")
               print(f"supplemented destinations: {supplemented}")
               print(f"skipped destinations:      {skipped}")
               print(f"up-to-date destinations:   {up_to_date}")
+              print(f"rc-skipped destinations:   {rc_skipped}")
               print(f"failed destinations:       {failed}")
               print(f"publisher: {report.publisher}")
               for label in report.failed:
                   print(f"  {label}: {report.failure_details.get(label) or '(no detail)'}")
+              if rc_mirror_skipped:
+                  print(f"rc-skipped (mirror): {rc_mirror_skipped}")
               if report.failed or mirror_failed:
                   # A partial publication is a REPORTED failure, never a silent
                   # success: the run goes red so the operator sees the drift.
@@ -967,7 +985,7 @@ jobs:
 
               # REL-020 — after publication, refuse by name if the mirror tag does
               # not target the same commit the canonical tag does.
-              if mirror_dest is not None and not mirror_failed:
+              if mirror_dest is not None and not mirror_failed and not rc_mirror_skipped:
                   _verify_mirror_tag(
                       tag_name,
                       _canonical_tag_target(),

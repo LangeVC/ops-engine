@@ -170,6 +170,7 @@ async def test_failure_on_second_destination_is_a_reported_partial(tmp_path):
         "up_to_date_destinations": [],
         "publishers": {},
         "partial": True,
+        "rc_skipped_destinations": [],
     }
 
 

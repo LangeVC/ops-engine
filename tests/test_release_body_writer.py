@@ -60,6 +60,7 @@ def _config(*, install_block="", assets_line="", forge="forgejo"):
                     "forge": forge,
                     "repo": REPO,
                     "role": "release",
+                    "visibility": "public",
                     "credential_variable": "OPS_TOKEN",
                 }
             ]
@@ -155,7 +156,7 @@ def _github(dest):
     return adapter
 
 
-async def _publish(forge, adapter, tmp_path, *, release_body=None, **over):
+async def _publish(forge, adapter, tmp_path, *, release_body=None, tag_name=None, **over):
     art = tmp_path / "dist"
     art.mkdir(exist_ok=True)
     for name in FILES:
@@ -163,7 +164,7 @@ async def _publish(forge, adapter, tmp_path, *, release_body=None, **over):
     audit = []
     kwargs = {"release_body": release_body, **over} if release_body else over
     report = await ReleaseHandler.publish_release(
-        _config(forge=forge), REPO, TAG, NOTES, art,
+        _config(forge=forge), REPO, tag_name or TAG, NOTES, art,
         adapters=[adapter], skip_existing=True, audit=audit, **kwargs,
     )
     return report, audit
@@ -226,6 +227,27 @@ async def test_body_without_changelog_fails_destination(tmp_path):
     section is left untouched and fails that destination with a named error
     that names the difference."""
     dest = FakeDestination(_release(body=OTHER_BODY))
+    report, _ = await _publish("forgejo", _forgejo(dest), tmp_path,
+                               release_body=FULL_BODY)
+
+    label = f"forgejo:{REPO}"
+    # No writes — the release is left untouched.
+    assert dest.writes() == []
+    assert dest.creates() == 0
+    # Destination is failed.
+    assert label in report.failed
+    detail = report.failure_details.get(label, "")
+    assert "CHANGELOG" in detail or "changelog" in detail.lower()
+
+
+@pytest.mark.asyncio
+async def test_heading_only_body_fails_for_missing_changelog(tmp_path):
+    """A heading-only body (e.g. '## Ops Engine v3.5.1') that names the tag
+    version but does not contain the actual CHANGELOG section content is left
+    untouched and fails that destination. The heading alone is not enough —
+    the body must contain the CHANGELOG content text (F9 fix)."""
+    heading_only = f"## {TITLE}\n"
+    dest = FakeDestination(_release(body=heading_only))
     report, _ = await _publish("forgejo", _forgejo(dest), tmp_path,
                                release_body=FULL_BODY)
 
@@ -497,3 +519,84 @@ async def test_audience_gate_runs_on_final_body_not_raw_notes(tmp_path, monkeypa
             ReleaseConfig(enabled=True, trigger="tag_push", tag_pattern="v*"),
             context,
         )
+
+
+# ---------------------------------------------------------------------------
+# F3+F4 proof: audience gate through publish_release (the workflow's path)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_audience_gate_runs_through_publish_release_call_shape(tmp_path):
+    """F3+F4 proof: the audience gate on the FINAL body runs through the
+    publish_release call shape (the path the shipped workflow really calls),
+    not only through _release_tag. A tracker reference introduced by the
+    install block in the composed release_body is caught before any
+    destination write."""
+    from ops_engine.modules.release_gates import ReleaseNotesAudienceError
+
+    dest = FakeDestination()
+    body_with_tracker = (
+        f"## {TITLE}\n\n"
+        f"{NOTES}\n"
+        f"### Install\n"
+        f"Fix LVC-999 in installer\n\n"
+        f"See [{CHANGELOG_PATH}](https://example.com/{CHANGELOG_PATH}) for all changes.\n"
+    )
+
+    with pytest.raises(ReleaseNotesAudienceError, match="LVC-999"):
+        await _publish("forgejo", _forgejo(dest), tmp_path,
+                       release_body=body_with_tracker,
+                       ticket_prefixes=["LVC"])
+
+    # No destination write happened — the gate raised before the loop.
+    assert dest.writes() == []
+    assert dest.creates() == 0
+
+
+# ---------------------------------------------------------------------------
+# F8 proof: RC tag skip through publish_release (the workflow's path)
+# ---------------------------------------------------------------------------
+
+RC_TAG = "v3.5.1-rc1"
+
+
+@pytest.mark.asyncio
+async def test_rc_tag_skipped_through_publish_release(tmp_path):
+    """F8 proof: an RC tag (vX.Y.Z-rcN) is not created, written or mirrored
+    on a public destination through the publish_release call shape. The
+    destination is recorded in rc_skipped, not published or failed."""
+    dest = FakeDestination()
+    report, _ = await _publish("forgejo", _forgejo(dest), tmp_path,
+                               release_body=FULL_BODY, tag_name=RC_TAG)
+
+    label = f"forgejo:{REPO}"
+    # No release was created or written.
+    assert dest.writes() == []
+    assert dest.creates() == 0
+    # The destination is rc-skipped, not published or failed.
+    assert report.rc_skipped == [label]
+    assert report.published == []
+    assert report.failed == []
+
+
+@pytest.mark.asyncio
+async def test_rc_tag_skip_mutation_killed(tmp_path, monkeypatch):
+    """F8 mutation proof: disabling the RC guard (is_rc=False) lets the RC
+    tag publish normally. The guard is genuinely killed by this test."""
+    import re as _re
+    from ops_engine.modules import release as release_module
+
+    # Replace the module-level _RC_TAG_RE with one that never matches.
+    _disabled = _re.compile(r"$^")  # matches nothing
+    monkeypatch.setattr(release_module, "_RC_TAG_RE", _disabled)
+
+    dest = FakeDestination()
+    report, _ = await _publish("forgejo", _forgejo(dest), tmp_path,
+                               release_body=FULL_BODY, tag_name=RC_TAG)
+
+    label = f"forgejo:{REPO}"
+    # With the guard disabled, the RC tag publishes normally.
+    assert report.rc_skipped == []
+    assert label in report.published
+    assert report.failed == []

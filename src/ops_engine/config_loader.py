@@ -463,6 +463,11 @@ class RepoConfig(BaseModel):
     # key in the repository's .ops.yaml), never from engine defaults.
     release_body_install_block: str = Field(default="")
     release_body_assets_line: str = Field(default="")
+    # P36-017 criterion 3: the audience gate runs on the final body before
+    # any destination write. The organisation's tracker prefixes come from
+    # the per-repository declaration (Layer 3 .ops.yaml), never from engine
+    # defaults. Empty by default: the gate refuses nothing.
+    tracker_prefixes: list[str] = Field(default_factory=list)
 
     @field_validator("mirror")
     @classmethod
@@ -487,7 +492,9 @@ class RepoConfig(BaseModel):
         """Refuse a mirror destination whose visibility is unset or not public/private (OE-035).
 
         Only ``role: mirror`` destinations are checked: they are the ones the
-        mirror gate pushes to or deletes from.
+        mirror gate pushes to or deletes from. Release destinations without
+        explicit visibility are accepted; the RC guard (P36-017 criterion 5)
+        treats unset visibility as public for release destinations.
         """
         for dest in value:
             if dest.role == "mirror" and dest.visibility not in VALID_DESTINATION_VISIBILITIES:
@@ -833,6 +840,7 @@ class OpsEngineConfig(BaseModel):
             visibility_exceptions=repo_specific.visibility_exceptions,
             release_body_install_block=repo_specific.release_body_install_block,
             release_body_assets_line=repo_specific.release_body_assets_line,
+            tracker_prefixes=repo_specific.tracker_prefixes,
         )
         _assert_typed_sections(resolved, org_name, repo_name)
         return resolved

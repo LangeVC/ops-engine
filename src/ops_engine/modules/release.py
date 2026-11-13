@@ -338,6 +338,7 @@ class ReleaseHandler:
         credentials: dict[str, Credential] | None = None,
         publisher_login: str | dict[str, str] = "",
         release_body: str | None = None,
+        ticket_prefixes: Iterable[str] | None = None,
     ) -> "PublicationReport":
         """Publish a built release to every destination resolved from config.
 
@@ -484,9 +485,22 @@ class ReleaseHandler:
         # summary lists the reason.
         _is_rc = _RC_TAG_RE.match(tag_name)
 
+        # P36-017 criterion 3: the external-audience gate runs on the
+        # FINAL body before any destination write. The gate runs here
+        # because the shipped workflow calls publish_release directly
+        # and composes the body itself — the gate must be in this path.
+        if release_body is not None and ticket_prefixes:
+            check_release_notes_audience(release_body, ticket_prefixes)
+
         for destination, adapter in paired:
             label = _destination_label(destination)
-            if _is_rc and destination.visibility == "public":
+            # A release destination without explicit visibility is public
+            # (the RC guard must not let an undeclared visibility bypass it).
+            _is_public = (
+                destination.visibility == "public"
+                or (destination.visibility == "" and destination.role == "release")
+            )
+            if _is_rc and _is_public:
                 reason = (
                     f"RC tag {tag_name} skipped on public destination "
                     f"{label} (LVC-305 pending)"
@@ -837,15 +851,11 @@ async def _try_supplement_body(
         )
         return True
 
-    # P36-017 F9: verify the tag's CHANGELOG section heading structure
-    # is present, not just the raw notes as a substring. A heading that
-    # names the tag version (## Ops Engine v3.5.1 or ## v3.5.1) proves
-    # the body was structured by the body writer. Old-format bodies
-    # without a heading are still checked via the raw notes substring.
-    _tag_heading = re.compile(
-        rf"^## .*\b{re.escape(tag_name)}\b", re.MULTILINE
-    )
-    if not _tag_heading.search(existing_body) and release_notes.strip() not in existing_body:
+    # P36-017: the tag's CHANGELOG section (the raw notes text) must
+    # appear in the existing body. A heading alone that names the tag
+    # version is not enough — the body must contain the actual
+    # CHANGELOG content.
+    if release_notes.strip() not in existing_body:
         detail = (
             f"existing release body does not contain the CHANGELOG section "
             f"for {tag_name}"
