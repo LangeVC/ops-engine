@@ -196,6 +196,17 @@ class ForgejoAdapter(ForgeAdapter):
         )
         return resp.json()
 
+    async def update_release_body(
+        self, repo_full_name: str, release_id: int, body: str
+    ) -> dict[str, Any]:
+        # PATCH /repos/{repo}/releases/{id} with only ``body``: EditReleaseOption.note (swagger, Forgejo 16 / Gitea 1.22).
+        resp = await self._request(
+            "PATCH",
+            f"/repos/{repo_full_name}/releases/{release_id}",
+            json={"body": body},
+        )
+        return resp.json()
+
     async def create_tag(
         self, repo_full_name: str, tag_name: str, target: str = "main",
         message: Optional[str] = None,

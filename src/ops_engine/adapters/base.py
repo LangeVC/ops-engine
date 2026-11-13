@@ -137,6 +137,20 @@ class ForgeAdapter(ABC):
             f"{type(self).__name__} cannot change the title of a release"
         )
 
+    async def update_release_body(
+        self, repo_full_name: str, release_id: int, body: str
+    ) -> dict[str, Any]:
+        """Change the body of an existing release, by release id.
+
+        Only the body is sent; the title, the state and the assets stay as
+        they are. Not abstract: the default raises ``NotImplementedError``, so
+        an adapter (or fake) that cannot change a body keeps working for every
+        other call and a caller that needs the change fails visibly.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} cannot change the body of a release"
+        )
+
     async def release_conflict(
         self, exc: Exception, repo_full_name: str, tag_name: str
     ) -> bool:

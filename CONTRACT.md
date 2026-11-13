@@ -196,6 +196,20 @@ of scope for this revision.
       "name": "host",
       "type": "str",
       "default": "\"\""
+    },
+    {
+      "class": "RepoConfig",
+      "module": "ops_engine.config_loader",
+      "name": "release_body_install_block",
+      "type": "str",
+      "default": "\"\""
+    },
+    {
+      "class": "RepoConfig",
+      "module": "ops_engine.config_loader",
+      "name": "release_body_assets_line",
+      "type": "str",
+      "default": "\"\""
     }
   ]
 }
@@ -366,11 +380,13 @@ second way to release.
 `ReleaseHandler.publish_release` is described under *Release publication to every
 destination (ADP-003)*. On the webhook path the order is fixed: the gates, the
 destinations read from `.ops.yaml` at the tag (a repository with no `release`
-destination is refused), the mirror tag identity (`push_canonical_tag`), then
-`publish_release`. A refusal in any step before the identity step happens before
-a tag is pushed or a release object exists. A tag push handed to
-`ReleaseHandler.process_event` without a `ReleaseContext` is refused by name
-(`MissingReleaseContextError`).
+destination is refused), the body composed from the per-repository declaration
+in `.ops.yaml` (the install block and assets line), the audience gate on the
+final body, the mirror tag identity (`push_canonical_tag`), then
+`publish_release` with `release_body=` carrying the composed body. A refusal in
+any step before the identity step happens before a tag is pushed or a release
+object exists. A tag push handed to `ReleaseHandler.process_event` without a
+`ReleaseContext` is refused by name (`MissingReleaseContextError`).
 
 ## Release reconcile entry point
 
@@ -1047,6 +1063,75 @@ identity endpoint: `GET /api/v1/user` for the Forgejo token and `GET /user` for
 the GitHub token. No operator-provisioned secret is required. The derivation is
 not part of the engine's Python surface; it lives in the workflow that consumes
 it.
+
+### Release body (P36-017)
+
+`publish_release` accepts an optional keyword-only `release_body: str | None`
+parameter. When given, it is used as the full release body on every destination
+instead of the raw release notes. The body is composed by the caller (the
+webhook path in `_release_tag`, and the workflow path in
+`.forgejo/workflows/forgejo-release.yml`) from these parts, in this order:
+
+1. **Product heading** — rendered from the configured `name_template`.
+2. **Release notes** — the CHANGELOG section extracted by the gate.
+3. **Install block** — when the per-repository declaration
+   `release_body_install_block` in `.ops.yaml` is non-empty, a `### Install`
+   heading followed by its value.
+4. **Assets line** — when the per-repository declaration
+   `release_body_assets_line` in `.ops.yaml` is non-empty, appended verbatim.
+5. **CHANGELOG link** — a markdown link to the tag's CHANGELOG.md on the
+   canonical forge.
+
+The install block and assets line are **business data**, never engine defaults:
+both come from the per-repository declaration at the tag (a key in the
+repository's `.ops.yaml`), read via `load_ops_yaml` in the webhook path and via
+`getattr(layer3, ...)` in the workflow path. An empty install block produces no
+`### Install` heading; an empty assets line produces no line.
+
+**Audience gate.** `check_release_notes_audience` runs on the **final** body —
+after the install block and assets line are composed in — so a tracker reference
+introduced only by the install block (not by the raw notes) is still refused
+before any destination write.
+
+**Effect on existing releases.** An existing release on a destination is judged
+against the supplied `release_body`, not the raw notes:
+
+- A destination release that does not exist is created with that body.
+- One that already exists with an empty body gets the body supplemented (patched
+  in, not re-created).
+- An existing release whose body does not contain the tag's CHANGELOG section
+  is left untouched and fails that destination with a named error that names the
+  difference — the same rule as the title and notes handling.
+- An existing release whose body already matches (the tag's CHANGELOG section is
+  present) is left alone.
+
+The `release_body` parameter is keyword-only and optional. When it is `None` or
+absent, the existing behaviour is unchanged: the body is the raw release notes,
+and the supplement check keys on those notes. This is a backwards-compatible
+extension: a caller that omits the parameter sees no change.
+
+**Write surface.** The release body is written on every release destination,
+GitHub included. `ForgeAdapter.update_release_body(repo, release_id, body)` is an
+async method on the internal adapter base class, implemented by
+`ForgejoAdapter` (PATCH `/repos/{repo}/releases/{id}`) and `GithubAdapter`
+(PATCH `/repos/{repo}/releases/{id}`). Both adapters use their respective
+forge's API to update the body field of an existing release; neither re-creates
+or deletes the release object.
+
+`RepoConfig.release_body_install_block: str = ""`
+`RepoConfig.release_body_assets_line: str = ""`
+
+These two fields are forwarded through `get_repo_config` (lines 834-835 of
+`config_loader.py`). They are per-repository declarations, not engine defaults:
+the engine carries no default install block or assets line. The fields are
+declared in the `fields` array of the machine-readable declaration above.
+
+**RC tag guard.** A tag matching `vX.Y.Z-rc.N` (lowercase `rc`, at least one
+digit) is not created, written or mirrored on any public destination. The
+destination is skipped with one named log line, and `PublicationReport` lists it
+in `rc_skipped_destinations` (serialised as `rc_skipped_destinations` in
+`to_dict()`). The guard runs per-destination in `publish_release` before any
+create or supplement call. A private destination is not skipped.
 
 ## What the published artifacts carry (ADP-005 / ADP-012)
 

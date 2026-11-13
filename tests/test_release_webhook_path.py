@@ -126,7 +126,8 @@ async def test_tag_push_runs_gates_then_identity_then_publish(tmp_path, monkeypa
     # Notes are the CHANGELOG section, not a fallback; only the release-role
     # destination is published to (a single adapter was injected for it).
     kwargs = target.create_release.await_args.kwargs
-    assert kwargs["body"] == "- Faster start."
+    assert "- Faster start." in kwargs["body"]
+    assert "## engine v1.2.3" in kwargs["body"]
     assert kwargs["repo_full_name"] == REPO
     assert kwargs["tag_name"] == TAG
     source.create_release.assert_not_called()
