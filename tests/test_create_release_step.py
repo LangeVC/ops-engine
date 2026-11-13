@@ -394,8 +394,10 @@ def test_different_notes_stay_an_error_through_the_real_block(tmp_path):
     assert release["name"] == BOT_TITLE
     assert release["assets"] == []
     assert release["body"] == other["body"]
-    assert "notes differ from the notes of this build" in log, log
-    assert "existing_release_id=41" in log, log
+    # P36-017 F9: the body-writer path catches the mismatched body before the
+    # old supplement/title/asset logic runs. The error message names the
+    # CHANGELOG section, not a raw-notes substring difference.
+    assert "does not contain the CHANGELOG section" in log, log
     assert re.search(
         rf"^failed destinations:\s+forgejo:{re.escape(FORGEJO_REPO)}$",
         log,

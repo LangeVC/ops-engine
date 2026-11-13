@@ -416,3 +416,84 @@ async def test_release_context_body_fields_reach_publish_release(tmp_path, monke
     label = f"forgejo:{REPO}"
     assert report.published == [label]
     assert report.failed == []
+
+
+# ---------------------------------------------------------------------------
+# Criterion 4: audience gate on final body (RED on base)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_audience_gate_runs_on_final_body_not_raw_notes(tmp_path, monkeypatch):
+    """Criterion 4 RED: the audience gate must run on the final composed body
+    (heading + notes + install block + assets line + changelog link), not only
+    on the raw CHANGELOG notes. A tracker reference introduced only by the
+    install block is caught; on the base commit (before P36-017) the gate only
+    checked raw notes, so this test would fail as a test failure."""
+    from unittest.mock import AsyncMock
+
+    from ops_engine.config_loader import ReleaseConfig
+    from ops_engine.modules import release as release_module
+    from ops_engine.modules.release import (
+        ReleaseContext,
+        ReleaseHandler,
+        TagIdentitySpec,
+    )
+    from ops_engine.modules.release_gates import ReleaseNotesAudienceError
+
+    dest = FakeDestination()
+    adapter = _forgejo(dest)
+
+    source = AsyncMock()
+    # Raw notes contain NO tracker reference — the gate on raw notes would pass.
+    clean_notes = "- A feature.\n\n- A fix.\n"
+    # But the install block introduces a tracker reference.
+    install_with_tracker = "Fix LVC-999 in installer"
+
+    async def get_file_content(repo, path, ref="main"):
+        return {
+            "CHANGELOG.md": f"# Changes\n\n## {TAG}\n\n{clean_notes}",
+            ".ops.yaml": (
+                "destinations:\n"
+                "  - {forge: forgejo, repo: langevc/ops-engine, role: release, credential_variable: OPS_TOKEN}\n"
+                f"release_body_install_block: \"{install_with_tracker}\"\n"
+            ),
+        }[path]
+
+    source.get_file_content = get_file_content
+
+    monkeypatch.setattr(release_module, "push_canonical_tag", AsyncMock())
+
+    context = ReleaseContext(
+        ops_config=_config(forge="forgejo"),
+        artifact_dir=tmp_path / "dist",
+        identity=TagIdentitySpec(
+            repo_dir=str(tmp_path),
+            canonical_url="https://forge.example/langevc/ops-engine.git",
+            canonical_token="tok",
+            mirror_remote="https://mirror.example/langevc/ops-engine.git",
+        ),
+        adapters=[adapter],
+        ticket_prefixes=["LVC"],
+    )
+
+    (tmp_path / "dist").mkdir()
+    for name in FILES:
+        (tmp_path / "dist" / name).write_bytes(name.encode())
+
+    # The audience gate on the final body must refuse because the install
+    # block introduces "LVC-999". On the base commit (pre-P36-017), the
+    # gate only checked raw notes, so this would NOT raise — the test
+    # fails as an assertion error, not a TypeError.
+    with pytest.raises(ReleaseNotesAudienceError, match="LVC-999"):
+        await ReleaseHandler.process_event(
+            source,
+            {
+                "event_type": "push",
+                "action": None,
+                "repo": REPO,
+                "raw": {"ref": f"refs/tags/{TAG}"},
+            },
+            ReleaseConfig(enabled=True, trigger="tag_push", tag_pattern="v*"),
+            context,
+        )

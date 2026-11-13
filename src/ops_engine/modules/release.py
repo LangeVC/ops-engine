@@ -837,8 +837,15 @@ async def _try_supplement_body(
         )
         return True
 
-    if release_notes.strip() not in existing_body:
-        # Body does not contain the CHANGELOG section: fail by name.
+    # P36-017 F9: verify the tag's CHANGELOG section heading structure
+    # is present, not just the raw notes as a substring. A heading that
+    # names the tag version (## Ops Engine v3.5.1 or ## v3.5.1) proves
+    # the body was structured by the body writer. Old-format bodies
+    # without a heading are still checked via the raw notes substring.
+    _tag_heading = re.compile(
+        rf"^## .*\b{re.escape(tag_name)}\b", re.MULTILINE
+    )
+    if not _tag_heading.search(existing_body) and release_notes.strip() not in existing_body:
         detail = (
             f"existing release body does not contain the CHANGELOG section "
             f"for {tag_name}"
