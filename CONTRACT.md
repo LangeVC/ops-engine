@@ -1019,6 +1019,35 @@ exception that vanishes and not a silent success. The return value is a
 serializes that state to a plain dict so a cockpit (or an operator) can see
 that a mirror is behind without parsing log lines.
 
+`PublicationReport` also carries three additive fields for the one-publisher
+contract (P36-003):
+
+- `up_to_date` — destinations whose release for the tag already exists from
+  **another** publisher (the release's `author.login` does not name the engine's
+  own account). These destinations are recorded, never edited and never
+  duplicated.
+- `publishers` — a `dict[str, str]` mapping each destination label to `"engine"`
+  (the release names the engine's own account) or `"other"`.
+- `publisher` — a convenience property returning `dict(self.publishers)`: the
+  same per-destination mapping described above, and `{}` when no attribution
+  was possible (no release was found, or no `publisher_login` was supplied).
+
+The engine's own login is `publisher_login`, a keyword-only parameter of
+`publish_release` and a field of `ReleaseContext` (default `""`). It is either
+one plain `str` used for every destination, or a `dict[str, str]` mapping
+credential-variable names to logins — the per-destination shape (P36-003 design
+C1). In the dict shape each destination is attributed from its own credential;
+a missing or empty entry fails that destination by name, and nothing there is
+supplemented, edited or duplicated. When `publisher_login` is absent (the empty
+string), the engine cannot attribute a release and falls back to the
+pre-P36-003 behaviour — a pre-existing release from any author is judged as
+before and may be edited, supplemented or failed. The production workflow
+derives one login per destination credential, each from its own forge's
+identity endpoint: `GET /api/v1/user` for the Forgejo token and `GET /user` for
+the GitHub token. No operator-provisioned secret is required. The derivation is
+not part of the engine's Python surface; it lives in the workflow that consumes
+it.
+
 ## What the published artifacts carry (ADP-005 / ADP-012)
 
 The source distribution is governed by an explicit allowlist

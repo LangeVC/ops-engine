@@ -113,6 +113,10 @@ class Forge:
 
     def handle(self, method: str, path: str, query: dict, body: bytes):
         self.requests.append((method, path))
+        # P36-003: the workflow derivation calls GET /api/v1/user (Forgejo)
+        # and GET /user (GitHub) to derive publisher logins per destination.
+        if method == "GET" and path in ("/api/v1/user", "/user"):
+            return 200, {"login": "dev.bot_langevc"}
         rel = re.fullmatch(r"/(?:api/v1/)?repos/([^/]+/[^/]+)/releases(.*)", path)
         if rel is None:
             return 404, {"message": f"double: unexpected {method} {path}"}
@@ -210,7 +214,8 @@ def _executable(path: Path, body: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
-def run_step(tmp_path: Path, forgejo: Forge, github: Forge) -> subprocess.CompletedProcess:
+def run_step(tmp_path: Path, forgejo: Forge, github: Forge,
+             *, inject_github_api_base: bool = True) -> subprocess.CompletedProcess:
     """Run the workflow's own Create Release block against the two doubles."""
     work = tmp_path / "work"
     bin_dir = tmp_path / "bin"
@@ -253,6 +258,20 @@ def run_step(tmp_path: Path, forgejo: Forge, github: Forge) -> subprocess.Comple
     )
     github_url = github.start()
     forgejo_url = forgejo.start()
+    # curl shim: intercepts https://api.github.com/user so the GitHub
+    # derivation works without GITHUB_API_BASE (production shape, F5-01).
+    _executable(
+        bin_dir / "curl",
+        'for a; do\n'
+        '  case "$a" in\n'
+        '    https://api.github.com/user)\n'
+        '      printf \'{"login":"dev.bot_langevc"}\\n\'\n'
+        '      exit 0\n'
+        '      ;;\n'
+        '  esac\n'
+        'done\n'
+        'exec /usr/bin/curl "$@"\n',
+    )
     (shim / "sitecustomize.py").write_text(
         "import os\n"
         "try:\n"
@@ -282,6 +301,8 @@ def run_step(tmp_path: Path, forgejo: Forge, github: Forge) -> subprocess.Comple
         "HOME": str(tmp_path),
         "PYTHONPATH": os.pathsep.join([str(shim), str(REPO_ROOT / "src")]),
     }
+    if inject_github_api_base:
+        env["GITHUB_API_BASE"] = github_url
     try:
         return subprocess.run(
             ["bash", "-eo", "pipefail", "-c", _step()["run"]],
@@ -381,3 +402,62 @@ def test_different_notes_stay_an_error_through_the_real_block(tmp_path):
         re.MULTILINE,
     ), log
     assert re.search(r"^supplemented destinations:\s+\(none\)$", log, re.MULTILINE), log
+
+
+def test_publisher_logins_are_derived_per_destination(tmp_path):
+    """F5-04/F2a binding: the workflow derives a publisher login per credential
+    variable and passes them to publish_release. The publisher line in the log
+    proves the forwarding reaches the engine: without it, no publisher entry
+    exists and the log shows 'publisher: {}'."""
+    forgejo = Forge("forgejo", bot_release())
+    github = Forge("github")
+    proc = run_step(tmp_path, forgejo, github)
+    log = log_of(proc)
+
+    assert proc.returncode == 0, log
+    # The derivation result is printed.
+    assert "publisher_logins derived from token identities:" in log, log
+    assert '"FORGEJO_TOKEN"' in log, log
+    assert '"GH_MIRROR_TOKEN"' in log, log
+    assert '"dev.bot_langevc"' in log, log
+    # The forgejo destination's release is supplemented (engine's own).
+    assert re.search(
+        rf"^supplemented destinations:\s+forgejo:{re.escape(FORGEJO_REPO)}$",
+        log, re.MULTILINE,
+    ), log
+    # F5-04 binding: the publisher line proves the forwarded login reached
+    # the engine. Without the forwarding, report.publisher is {}.
+    assert re.search(
+        rf"^publisher:.*'forgejo:{re.escape(FORGEJO_REPO)}': 'engine'.*"
+        rf"'github:{re.escape(GITHUB_REPO)}': 'engine'",
+        log, re.MULTILINE,
+    ), log
+
+
+def test_publisher_login_derivation_failure_fails_the_destination(tmp_path):
+    """F2b fail-closed: when the user endpoint cannot be reached, the
+    derivation yields an empty string, and that destination fails by name."""
+    forgejo = Forge("forgejo", bot_release())
+    github = Forge("github")
+    # Make the Forgejo user endpoint 404 by overriding the handle for
+    # /api/v1/user. We do this by subclassing the handle method.
+    orig_forgejo_handle = forgejo.handle
+
+    def failing_handle(method, path, query, body):
+        if method == "GET" and path == "/api/v1/user":
+            return 404, {"message": "not found"}
+        if method == "GET" and path == "/user":
+            return 200, {"login": "dev.bot_langevc"}
+        return orig_forgejo_handle(method, path, query, body)
+
+    forgejo.handle = failing_handle
+    proc = run_step(tmp_path, forgejo, github)
+    log = log_of(proc)
+
+    assert proc.returncode != 0, log
+    # The forgejo destination must fail because its publisher_login is empty.
+    assert re.search(
+        rf"^failed destinations:\s+.*forgejo:{re.escape(FORGEJO_REPO)}",
+        log, re.MULTILINE,
+    ), log
+    assert "publisher_login unavailable" in log, log

@@ -138,6 +138,11 @@ def test_no_release_destination_literal_in_the_release_workflow():
     ):
         for lineno, line in enumerate(WORKFLOW_CONTENT.splitlines(), start=1):
             if lit in line:
+                # F5-01: the GITHUB_API_BASE default line (api.github.com)
+                # is the well-known GitHub API endpoint for identity
+                # derivation, not a destination literal.
+                if "GITHUB_API_BASE" in line:
+                    continue
                 offending.append(f"{lit} (line {lineno})")
     assert not offending, f"destination literals still present: {offending}"
 
