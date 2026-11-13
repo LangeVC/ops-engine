@@ -95,7 +95,8 @@ async def test_publishes_only_the_matching_tag_that_has_no_release(tmp_path, mon
     assert report.failed == {}
     target.create_release.assert_called_once()
     assert target.create_release.call_args.kwargs["tag_name"] == "v1.2.3"
-    assert target.create_release.call_args.kwargs["body"].strip() == "- Faster start."
+    assert "- Faster start." in target.create_release.call_args.kwargs["body"]
+    assert "## engine v1.2.3" in target.create_release.call_args.kwargs["body"]
     identity.assert_awaited_once()
 
 
