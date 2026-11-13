@@ -132,6 +132,10 @@ async def test_publish_release_serves_each_destination_its_own_credential(tmp_pa
         tag_name="v1.0.0",
         published=["forgejo:exampleorg/engine", "github:exampleorg/engine"],
         failed=[],
+        body_states={
+            "forgejo:exampleorg/engine": "written",
+            "github:exampleorg/engine": "written",
+        },
     )
 
     forgejo, github = adapters
