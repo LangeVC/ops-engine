@@ -34,7 +34,7 @@ DEFAULT_NAME_TEMPLATE = "{repo_name} {tag_name}"
 # _TAG_RE in release_gates.py already accepts) is not created, written or
 # mirrored on any public destination; the destination is skipped with one
 # named log line and the run summary lists the reason.
-_RC_TAG_RE = re.compile(r"^v\d+\.\d+\.\d+-rc\d+$")
+_RC_TAG_RE = re.compile(r"^v\d+\.\d+\.\d+-rc\.?\d+$")
 
 
 class _TemplateDict(dict[str, str]):

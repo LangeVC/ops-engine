@@ -868,7 +868,7 @@ jobs:
               # vX.Y.Z-rc.N is not created, written or mirrored on any
               # public destination. Check before the mirror push so the
               # tag never reaches the mirror.
-              _is_rc = __import__("re").match(r"^v\d+\.\d+\.\d+-rc\d+$", tag_name)
+              _is_rc = __import__("re").match(r"^v\d+\.\d+\.\d+-rc\.?\d+$", tag_name)
 
               # REL-020 — push the canonical tag object onto the mirror BEFORE the
               # engine publishes, so the github create_release cannot invent a tag.
