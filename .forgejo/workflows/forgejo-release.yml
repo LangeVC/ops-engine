@@ -653,7 +653,7 @@ jobs:
               OpsYamlError,
               load_ops_yaml,
           )
-          from ops_engine.modules.release import ReleaseHandler
+          from ops_engine.modules.release import ReleaseHandler, render_release_name
 
           def _publisher_login_dict():
               """Parse PUBLISHER_LOGIN_JSON into a dict[str, str] mapping
@@ -896,6 +896,31 @@ jobs:
                       webhook_secret=os.environ.get("GH_MIRROR_WEBHOOK_SECRET", ""),
                   )
 
+              # P36-017 — compose the full release body from the
+              # per-repository declaration in .ops.yaml. The install block
+              # and assets line are business data, never engine defaults.
+              # The audience gate (the "Gate the release notes for an
+              # external audience" step above) already ran on the raw notes,
+              # so the gate is the same as it was before the body change.
+              product_heading = render_release_name(
+                  name_template, repo, tag_name
+              )
+              changelog_url = (
+                  f"{forgejo_base_url}/{repo}/src/tag/{tag_name}/CHANGELOG.md"
+              )
+              release_body = (
+                  f"## {product_heading}\n\n{release_notes}\n"
+              )
+              install_block = getattr(layer3, "release_body_install_block", "")
+              if install_block:
+                  release_body += f"### Install\n{install_block}\n\n"
+              assets_line = getattr(layer3, "release_body_assets_line", "")
+              if assets_line:
+                  release_body += f"{assets_line}\n\n"
+              release_body += (
+                  f"See [CHANGELOG.md]({changelog_url}) for all changes.\n"
+              )
+
               report = await ReleaseHandler.publish_release(
                   config,
                   repo,
@@ -912,6 +937,7 @@ jobs:
                   # destination naming the difference when they are not.
                   skip_existing=True,
                   publisher_login=_publisher_login_dict(),
+                  release_body=release_body,
               )
 
               if mirror_failed:
