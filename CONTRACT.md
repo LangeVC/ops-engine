@@ -1133,6 +1133,41 @@ in `rc_skipped_destinations` (serialised as `rc_skipped_destinations` in
 `to_dict()`). The guard runs per-destination in `publish_release` before any
 create or supplement call. A private destination is not skipped.
 
+### Run summary body state (P36-018)
+
+`PublicationReport.body_states` is a `dict[str, str]` mapping each destination
+label to one of four body-state values produced during publication:
+
+- `"written"` — the release was created with the full body.
+- `"supplemented"` — the release existed with an empty body; the body was
+  patched in.
+- `"already_equal"` — the release existed and its body already contained the
+  tag's CHANGELOG section.
+- `"failed: <detail>"` — the body lacked the CHANGELOG section; the destination
+  is failed and the detail names the difference.
+
+`to_dict()` serialises it as `"body_states": dict(self.body_states)`.
+
+### Read-only release body drift check (P36-018)
+
+`ReconcileHandler.check_release_body` is an async static method that reports a
+release object on any destination whose body is empty or lacks the CHANGELOG
+section, without writing:
+
+```python
+ReconcileHandler.check_release_body(adapter, repo, tag_name, *, release_notes="") -> ReleaseBodyDrift | None
+```
+
+It looks up the release for `tag_name`, and returns a `ReleaseBodyDrift` when
+the body is empty (`empty=True`) or lacks the `release_notes` content
+(`missing_changelog=True`). Returns `None` when the release is absent or the
+body is correct. The check never writes — the report is for a cockpit or
+monitoring check.
+
+`ReleaseBodyDrift` is a dataclass with fields `repo`, `tag_name`, `release_id`,
+`empty`, and `missing_changelog`, and a `to_dict()` method. It lives in the
+unpromised submodule `ops_engine.modules.reconcile`.
+
 ## What the published artifacts carry (ADP-005 / ADP-012)
 
 The source distribution is governed by an explicit allowlist
