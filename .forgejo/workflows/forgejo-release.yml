@@ -969,6 +969,7 @@ jobs:
               print(f"up-to-date destinations:   {up_to_date}")
               print(f"rc-skipped destinations:   {rc_skipped}")
               print(f"failed destinations:       {failed}")
+              print(f"body states:               {report.body_states}")
               print(f"publisher: {report.publisher}")
               for label in report.failed:
                   print(f"  {label}: {report.failure_details.get(label) or '(no detail)'}")
