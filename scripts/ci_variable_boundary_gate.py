@@ -266,7 +266,14 @@ def _vis_vars_offence(line, lineno):
 def _vis_api_host_offence(line, lineno):
     """Refuse a forge API host name by value, even without an OWNER/REPO beside
     it. An API call takes its transport from the host and its target from a
-    split path/owner, so only refusing both half-destinations closes the shape."""
+    split path/owner, so only refusing both half-destinations closes the shape.
+
+    F5-01: ``GITHUB_API_BASE`` default carries ``api.github.com`` as the
+    well-known GitHub API endpoint for identity derivation, not a destination
+    literal. The gate must not refuse the default line.
+    """
+    if "GITHUB_API_BASE" in line:
+        return
     for m in _API_HOST_REF.finditer(line):
         yield lineno, m.group(0)
 

@@ -112,15 +112,14 @@ class PublicationReport:
     publishers: dict[str, str] = field(default_factory=dict)
 
     @property
-    def publisher(self) -> str:
-        """Who made the release found for this tag, when that is one answer.
+    def publisher(self) -> dict[str, str]:
+        """Who made the release found for this tag, per destination.
 
-        A tag-level report names ``engine`` or ``other`` only when every
-        attributed destination agrees; no attribution (or a disagreement
-        between destinations) is the empty string, never a guess.
+        Returns the ``publishers`` dict mapping destination labels to
+        ``engine`` or ``other``. An empty dict means no attribution was
+        possible (no publisher_login supplied, or no release existed).
         """
-        values = set(self.publishers.values())
-        return values.pop() if len(values) == 1 else ""
+        return dict(self.publishers)
 
     @property
     def partial(self) -> bool:
@@ -392,10 +391,10 @@ class ReleaseHandler:
         never to a false ``engine``.
 
         A ``dict[str, str]`` maps credential-variable names to logins (one
-        login per destination, P36-003 design C1). An empty dict means no
-        per-destination mode. A non-empty dict where a destination's
+        login per destination, P36-003 design C1). Any dict (including an
+        empty one) means per-destination mode: a destination whose
         credential_variable is absent or maps to an empty string means the
-        derivation failed for that destination: it is failed by name and
+        derivation failed for that destination and it is failed by name;
         nothing is supplemented, edited or duplicated (fail closed).
 
         ``credentials`` is a per-destination credential mapping (ADP-011):
@@ -684,8 +683,6 @@ def _resolve_publisher_login(
     *destination* means the derivation failed for that destination.
     """
     if isinstance(publisher_login, dict):
-        if not publisher_login:
-            return ""
         cred = destination.credential_variable or ""
         return publisher_login.get(cred) or None
     return publisher_login

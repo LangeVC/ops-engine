@@ -192,7 +192,7 @@ async def test_the_report_names_the_other_publisher_per_tag(forge, make, tmp_pat
     dest = FakeDestination(_release(author=OTHER_LOGIN))
     report, _ = await _publish(forge, make(dest), tmp_path, publisher_login=ENGINE_LOGIN)
 
-    assert report.publisher == "other"
+    assert report.publisher == {f"{forge}:{REPO}": "other"}
     assert report.tag_name == TAG
 
 
@@ -208,7 +208,7 @@ async def test_the_engine_creates_exactly_one_release_per_tag(forge, make, tmp_p
     assert dest.creates() == 1
     assert sorted(dest.uploads) == sorted(FILES)
     assert report.published == [label]
-    assert report.publisher == "engine"
+    assert report.publisher == {f"{forge}:{REPO}": "engine"}
     assert report.failed == [] and report.up_to_date == []
 
 
@@ -229,7 +229,7 @@ async def test_the_engines_own_earlier_release_is_supplemented_and_not_duplicate
     assert dest.creates() == 0
     assert len(report.supplemented) == 1 and report.published == []
     assert report.up_to_date == [] and report.failed == []
-    assert report.publisher == "engine"
+    assert report.publisher == {"forgejo:langevc/ops-engine": "engine"}
     assert "result=supplemented" in audit[0]
 
 
@@ -244,7 +244,7 @@ async def test_a_release_without_an_author_is_named_other_and_never_engine(tmp_p
     )
 
     assert dest.writes() == []
-    assert report.publisher == "other"
+    assert report.publisher == {"forgejo:langevc/ops-engine": "other"}
     assert report.failed == [] and len(report.skipped) == 1
 
 
@@ -288,7 +288,7 @@ async def test_a_duplicate_answered_for_another_publishers_release_is_up_to_date
     assert dest.patches == [] and dest.uploads == []
     assert report.up_to_date == [label]
     assert report.failed == [] and report.published == []
-    assert report.publisher == "other"
+    assert report.publisher == {f"{forge}:{REPO}": "other"}
     assert audit[0].endswith("result=up-to-date publisher=other")
 
 
@@ -400,7 +400,7 @@ async def test_release_context_publisher_login_reaches_publish_release(
     report = captured["report"]
     label = f"forgejo:{REPO}"
     assert report.up_to_date == [label]
-    assert report.publisher == "other"
+    assert report.publisher == {label: "other"}
 
 
 # --- Per-destination publisher_login (P36-003 design C1) ---------------------
@@ -472,7 +472,7 @@ async def test_per_destination_publisher_login_splits_across_forges(tmp_path):
         f"forgejo:{REPO}": "engine",
         f"github:{REPO}": "engine",
     }
-    assert report.publisher == "engine"
+    assert report.publisher == {f"forgejo:{REPO}": "engine", f"github:{REPO}": "engine"}
     assert report.failed == []
     assert report.up_to_date == []
     # Both supplemented (title already matches, assets missing).
@@ -513,7 +513,7 @@ async def test_per_destination_publisher_login_empty_entry_fails_destination(tmp
     # github was never touched.
     assert github_dest.creates() == 0
     assert github_dest.uploads == []
-    assert report.publisher == "other"
+    assert report.publisher == {f"forgejo:{REPO}": "other"}
 
 
 async def _publish_multi(config, adapters, tmp_path, **over):

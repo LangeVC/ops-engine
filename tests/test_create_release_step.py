@@ -214,7 +214,8 @@ def _executable(path: Path, body: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
-def run_step(tmp_path: Path, forgejo: Forge, github: Forge) -> subprocess.CompletedProcess:
+def run_step(tmp_path: Path, forgejo: Forge, github: Forge,
+             *, inject_github_api_base: bool = True) -> subprocess.CompletedProcess:
     """Run the workflow's own Create Release block against the two doubles."""
     work = tmp_path / "work"
     bin_dir = tmp_path / "bin"
@@ -257,6 +258,20 @@ def run_step(tmp_path: Path, forgejo: Forge, github: Forge) -> subprocess.Comple
     )
     github_url = github.start()
     forgejo_url = forgejo.start()
+    # curl shim: intercepts https://api.github.com/user so the GitHub
+    # derivation works without GITHUB_API_BASE (production shape, F5-01).
+    _executable(
+        bin_dir / "curl",
+        'for a; do\n'
+        '  case "$a" in\n'
+        '    https://api.github.com/user)\n'
+        '      printf \'{"login":"dev.bot_langevc"}\\n\'\n'
+        '      exit 0\n'
+        '      ;;\n'
+        '  esac\n'
+        'done\n'
+        'exec /usr/bin/curl "$@"\n',
+    )
     (shim / "sitecustomize.py").write_text(
         "import os\n"
         "try:\n"
@@ -282,11 +297,12 @@ def run_step(tmp_path: Path, forgejo: Forge, github: Forge) -> subprocess.Comple
         "GH_MIRROR_TOKEN": "test-token-github",
         "GH_MIRROR_WEBHOOK_SECRET": "test-secret-github",
         "TEST_GITHUB_API": github_url,
-        "GITHUB_API_BASE": github_url,
         "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
         "HOME": str(tmp_path),
         "PYTHONPATH": os.pathsep.join([str(shim), str(REPO_ROOT / "src")]),
     }
+    if inject_github_api_base:
+        env["GITHUB_API_BASE"] = github_url
     try:
         return subprocess.run(
             ["bash", "-eo", "pipefail", "-c", _step()["run"]],
@@ -389,9 +405,10 @@ def test_different_notes_stay_an_error_through_the_real_block(tmp_path):
 
 
 def test_publisher_logins_are_derived_per_destination(tmp_path):
-    """F2a binding: the workflow derives a publisher login per credential
-    variable and passes them to publish_release. Deleting the derivation
-    (making the user endpoint 404) must cause the destination to fail."""
+    """F5-04/F2a binding: the workflow derives a publisher login per credential
+    variable and passes them to publish_release. The publisher line in the log
+    proves the forwarding reaches the engine: without it, no publisher entry
+    exists and the log shows 'publisher: {}'."""
     forgejo = Forge("forgejo", bot_release())
     github = Forge("github")
     proc = run_step(tmp_path, forgejo, github)
@@ -406,6 +423,13 @@ def test_publisher_logins_are_derived_per_destination(tmp_path):
     # The forgejo destination's release is supplemented (engine's own).
     assert re.search(
         rf"^supplemented destinations:\s+forgejo:{re.escape(FORGEJO_REPO)}$",
+        log, re.MULTILINE,
+    ), log
+    # F5-04 binding: the publisher line proves the forwarded login reached
+    # the engine. Without the forwarding, report.publisher is {}.
+    assert re.search(
+        rf"^publisher:.*'forgejo:{re.escape(FORGEJO_REPO)}': 'engine'.*"
+        rf"'github:{re.escape(GITHUB_REPO)}': 'engine'",
         log, re.MULTILINE,
     ), log
 
