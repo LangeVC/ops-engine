@@ -466,3 +466,27 @@ def test_layer3_public_destination_with_no_globs_anywhere_is_refused_at_merge(tm
     with pytest.raises(ValueError) as excinfo:
         RepoConfig().merge_layer3(load_ops_yaml(tmp_path))
     assert "exampleorg/pub" in str(excinfo.value)
+
+
+# --- P36-017 F6: mutation requirement — config forwarding survives -----------
+
+
+def test_release_body_parts_forward_through_get_repo_config():
+    """The release body parts (install block, assets line) are forwarded
+    through get_repo_config. Deleting config_loader.py:834-835 must make
+    this test fail — the body parts never reach the resolved config."""
+    config = OpsEngineConfig(
+        orgs={
+            "langevc": OrgConfig(
+                repositories={
+                    "ops-engine": RepoConfig(
+                        release_body_install_block="pip install ops-engine",
+                        release_body_assets_line="[wheel](https://x.com/w.whl)",
+                    )
+                }
+            )
+        }
+    )
+    resolved = config.get_repo_config("langevc", "ops-engine")
+    assert resolved.release_body_install_block == "pip install ops-engine"
+    assert resolved.release_body_assets_line == "[wheel](https://x.com/w.whl)"
