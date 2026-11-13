@@ -21,7 +21,7 @@ import pytest
 from ops_engine.adapters.forgejo_adapter import ForgejoAdapter
 from ops_engine.adapters.github_adapter import GithubAdapter
 from ops_engine.config_loader import OpsEngineConfig
-from ops_engine.modules.release import ReleaseHandler
+from ops_engine.modules.release import PublicationReport, ReleaseHandler
 
 REPO = "langevc/ops-engine"
 TAG = "v3.5.1"
@@ -465,3 +465,70 @@ async def test_drift_check_returns_none_when_empty_repo():
 
     assert result is None
     assert dest.writes() == []
+
+
+# ---------------------------------------------------------------------------
+# F4: mutation guard — to_dict() serialization of body_states
+# ---------------------------------------------------------------------------
+
+
+def test_publication_report_to_dict_includes_body_states():
+    """F4 mutation guard: deleting the 'body_states' serialization line from
+    PublicationReport.to_dict() must cause this test to fail.
+
+    The serialized form is consumed downstream (workflow run summary), so the
+    key must be present in to_dict() output."""
+    report = PublicationReport(
+        repo=REPO,
+        tag_name=TAG,
+        published=[f"forgejo:{REPO}"],
+        body_states={f"forgejo:{REPO}": "written"},
+    )
+    d = report.to_dict()
+    assert "body_states" in d, (
+        "to_dict() is missing 'body_states' key — "
+        "the downstream consumer sees no body state"
+    )
+    assert d["body_states"] == {f"forgejo:{REPO}": "written"}
+
+
+def test_publication_report_to_dict_includes_body_states_when_empty():
+    """F4 mutation guard: even an empty body_states dict must be serialized."""
+    report = PublicationReport(repo=REPO, tag_name=TAG)
+    d = report.to_dict()
+    assert "body_states" in d, (
+        "to_dict() is missing 'body_states' key — "
+        "the downstream consumer sees no body state"
+    )
+    assert d["body_states"] == {}
+
+
+# ---------------------------------------------------------------------------
+# F3: mutation guard — workflow run-summary print of body_states
+# ---------------------------------------------------------------------------
+
+
+def test_workflow_run_summary_prints_body_states():
+    """F3 mutation guard: deleting the print line for body_states from the
+    shipped workflow must cause this test to fail.
+
+    Reads the forgejo-release.yml shipped in the repository and asserts the
+    exact line that prints body_states exists. If the line is deleted,
+    reworded, or renamed, this test goes red."""
+    import pathlib
+    workflow = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / ".forgejo" / "workflows" / "forgejo-release.yml"
+    )
+    lines = workflow.read_text(encoding="utf-8").splitlines()
+    # The line must print body_states verbatim.  Searching for the exact
+    # fragment is deliberate: a different attribute name or a print of a
+    # different object would not match.
+    has_line = any(
+        "body_states" in line and "report.body_states" in line
+        for line in lines
+    )
+    assert has_line, (
+        "forgejo-release.yml is missing the body_states print line — "
+        "the run summary does not list the body state per destination"
+    )
