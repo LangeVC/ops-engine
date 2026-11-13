@@ -348,6 +348,8 @@ async def test_release_context_body_fields_reach_publish_release(tmp_path, monke
             ".ops.yaml": (
                 "destinations:\n"
                 "  - {forge: forgejo, repo: langevc/ops-engine, role: release, credential_variable: OPS_TOKEN}\n"
+                f"release_body_install_block: {INSTALL_BLOCK}\n"
+                f"release_body_assets_line: {ASSETS_LINE}\n"
             ),
         }[path]
     source.get_file_content = get_file_content
@@ -377,8 +379,6 @@ async def test_release_context_body_fields_reach_publish_release(tmp_path, monke
             mirror_remote="https://mirror.example/langevc/ops-engine.git",
         ),
         adapters=[adapter],
-        release_body_install_block=INSTALL_BLOCK,
-        release_body_assets_line=ASSETS_LINE,
     )
 
     (tmp_path / "dist").mkdir()

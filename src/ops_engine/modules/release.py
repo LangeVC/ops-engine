@@ -12,7 +12,7 @@ import httpx
 
 from ops_engine.adapters.base import ForgeAdapter
 from ops_engine.adapters.factory import Credential, MissingCredentialError, adapters_for
-from ops_engine.config_loader import Destination, OpsEngineConfig, ReleaseConfig
+from ops_engine.config_loader import Destination, OpsEngineConfig, ReleaseConfig, load_ops_yaml
 from ops_engine.modules.mirror import resolve_destinations
 from ops_engine.modules.notification import NotificationHandler
 from ops_engine.modules.release_gates import (
@@ -1103,7 +1103,6 @@ async def _release_tag(
             f"of {repo} at {tag_name}: {exc}. No notes, so no release."
         ) from exc
     notes = extract_changelog_section(changelog, tag_name)
-    check_release_notes_audience(notes, context.ticket_prefixes)
 
     # Destinations from .ops.yaml at the tag; read-only, still before any write.
     try:
@@ -1124,8 +1123,46 @@ async def _release_tag(
                 f"{tag_name} declares no destination with role 'release'."
             )
 
-        # Identity (OE-008), after every gate.
+        # P36-017: read the per-repository declaration for the body parts
+        # (install block and assets line) from the .ops.yaml at the tag.
+        # These are business data, never engine defaults.
+        layer3_config = load_ops_yaml(layer3_dir)
+        install_block = (
+            layer3_config.release_body_install_block
+            if layer3_config is not None
+            else ""
+        )
+        assets_line = (
+            layer3_config.release_body_assets_line
+            if layer3_config is not None
+            else ""
+        )
+
         identity = context.identity
+
+        # Compose the full release body (P36-017).  The install block and
+        # assets line come from the per-repository declaration at the tag,
+        # never from engine defaults.
+        canonical_url = identity.canonical_url.removesuffix(".git")
+        changelog_url = (
+            f"{canonical_url}/src/tag/{tag_name}/{config.changelog_path}"
+        )
+        body = f"## {render_release_name(name_template, repo, tag_name)}\n\n{notes}\n"
+        if install_block:
+            body += f"### Install\n{install_block}\n\n"
+        if assets_line:
+            body += f"{assets_line}\n\n"
+        body += (
+            f"See [{config.changelog_path}]({changelog_url})"
+            f" for all changes.\n"
+        )
+
+        # The external-audience gate runs on the FINAL body before any
+        # destination write (P36-017 criterion 3). A tracker reference
+        # introduced only by the install block is refused here.
+        check_release_notes_audience(body, context.ticket_prefixes)
+
+        # Identity (OE-008), after every gate.
         await push_canonical_tag(
             identity.repo_dir,
             tag_name,
@@ -1134,24 +1171,6 @@ async def _release_tag(
             identity.mirror_remote,
             identity.runner,
             mirror_token=identity.mirror_token,
-        )
-
-        # Compose the full release body (P36-017).  The install block and
-        # assets line come from the per-repository declaration (the caller
-        # sets them on the ReleaseContext from the layover config), never
-        # from engine defaults.
-        canonical_url = identity.canonical_url.removesuffix(".git")
-        changelog_url = (
-            f"{canonical_url}/src/tag/{tag_name}/{config.changelog_path}"
-        )
-        body = f"## {render_release_name(name_template, repo, tag_name)}\n\n{notes}\n"
-        if context.release_body_install_block:
-            body += f"### Install\n{context.release_body_install_block}\n\n"
-        if context.release_body_assets_line:
-            body += f"{context.release_body_assets_line}\n\n"
-        body += (
-            f"See [{config.changelog_path}]({changelog_url})"
-            f" for all changes.\n"
         )
 
         logger.info(f"Publishing release {tag_name} of {repo}")
