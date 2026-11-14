@@ -299,29 +299,29 @@ class ExistingReleaseDestination:
     """A destination where the release already exists with a given body and no
     race occurs (first GET returns 200)."""
 
-    def __init__(self, *, body):
+    def __init__(self, *, body, name=TITLE, assets=None):
         self._body = body
+        self._name = name
+        self._assets = list(assets or [])
         self.patched_bodies = []
         self.calls = []
+
+    def _release(self):
+        return {
+            "id": RELEASE_ID,
+            "tag_name": TAG,
+            "name": self._name,
+            "body": self._body,
+            "assets": self._assets,
+        }
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
         self.calls.append((request.method, path))
         if request.method == "GET" and "/releases/tags/" in path:
-            return httpx.Response(
-                200,
-                json={
-                    "id": RELEASE_ID,
-                    "tag_name": TAG,
-                    "name": TITLE,
-                    "body": self._body,
-                },
-            )
+            return httpx.Response(200, json=self._release())
         if request.method == "GET" and path.endswith("/releases"):
-            return httpx.Response(200, json=[{
-                "id": RELEASE_ID, "tag_name": TAG, "name": TITLE,
-                "body": self._body,
-            }])
+            return httpx.Response(200, json=[self._release()])
         if request.method == "PATCH" and f"/releases/{RELEASE_ID}" in path:
             body = json.loads(request.content)
             if "body" in body:
@@ -697,3 +697,21 @@ async def test_body_state_rc_skipped(tmp_path):
     label = f"forgejo:{REPO}"
     assert report.rc_skipped == [label]
     assert report.body_states.get(label) == "rc_skipped"
+
+
+@pytest.mark.asyncio
+async def test_body_state_skipped(tmp_path):
+    """F6 mutation guard: replacing the skipped body_states write in
+    _judge_existing_release with `pass` must cause this test to fail.
+
+    The complete release is skipped and that state must appear in
+    body_states, not only in the skipped list."""
+    dest = ExistingReleaseDestination(
+        body=NOTES, assets=[{"name": name} for name in FILES],
+    )
+    report, _ = await _publish("forgejo", _forgejo(dest), tmp_path)
+
+    label = f"forgejo:{REPO}"
+    assert report.skipped == [label]
+    assert dest.patched_bodies == []
+    assert report.body_states.get(label) == "skipped"
