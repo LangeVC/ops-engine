@@ -880,7 +880,7 @@ async def _try_supplement_body(
 
     # Body already contains the CHANGELOG section: already equal.
     report.body_states[label] = "already_equal"
-    return False
+    return True
 
 
 async def _try_supplement(

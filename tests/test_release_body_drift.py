@@ -208,6 +208,8 @@ async def test_create_race_empty_body_supplemented_forgejo(tmp_path):
     assert dest.creates() == 1  # the initial attempt that got 409
     assert report.supplemented == [label]
     assert report.failed == []
+    # RED PROOF (criterion 4): body_states attribute is new in 3.6.0.
+    assert report.body_states.get(label) == "supplemented"
 
 
 @pytest.mark.asyncio
@@ -226,6 +228,8 @@ async def test_create_race_empty_body_supplemented_github(tmp_path):
     assert dest.creates() == 1  # the initial attempt that got 422
     assert report.supplemented == [label]
     assert report.failed == []
+    # RED PROOF (criterion 4): body_states attribute is new in 3.6.0.
+    assert report.body_states.get(label) == "supplemented"
 
 
 @pytest.mark.asyncio
@@ -243,6 +247,9 @@ async def test_create_race_non_empty_body_fails_for_missing_changelog_forgejo(tm
     assert label in report.failed
     detail = report.failure_details.get(label, "")
     assert "CHANGELOG" in detail or "changelog" in detail.lower()
+    # RED PROOF (criterion 4): body_states attribute is new in 3.6.0.
+    state = report.body_states.get(label, "")
+    assert state.startswith("failed:")
 
 
 # ---------------------------------------------------------------------------
@@ -527,6 +534,10 @@ def test_workflow_run_summary_prints_body_states():
     has_line = any(
         "body_states" in line and "report.body_states" in line
         for line in lines
+    )
+    assert has_line, (
+        "forgejo-release.yml is missing the body_states print line — "
+        "the run summary must list body state per destination"
     )
 # ---------------------------------------------------------------------------
 # F5: test drives scripts/release-body-drift.py

@@ -177,6 +177,7 @@ async def test_failure_on_second_destination_is_a_reported_partial(tmp_path):
         "rc_skipped_destinations": [],
         "body_states": {
             "github:exampleorg/engine": "written",
+            "forgejo:exampleorg/engine": "failed: upstream refused",
         },
     }
 
