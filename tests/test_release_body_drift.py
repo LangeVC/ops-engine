@@ -674,3 +674,26 @@ async def test_release_body_drift_script_exits_nonzero_on_missing_changelog():
     ])
     assert exit_code == 1, f"expected exit 1 for missing changelog, got {exit_code}"
     assert dest.writes() == []
+
+
+# ---------------------------------------------------------------------------
+# F6: one mutation guard per remaining body_states write
+# ---------------------------------------------------------------------------
+
+RC_TAG = "v3.5.1-rc1"
+
+
+@pytest.mark.asyncio
+async def test_body_state_rc_skipped(tmp_path):
+    """F6 mutation guard: replacing the rc_skipped body_states write in
+    publish_release with `pass` must cause this test to fail.
+
+    The run summary must list the state per destination, so an RC-skipped
+    destination cannot be silent in body_states while named in rc_skipped."""
+    dest = RaceFakeDestination(body="", create_status=0)
+    report, _ = await _publish("forgejo", _forgejo(dest), tmp_path,
+                               release_body=FULL_BODY, tag_name=RC_TAG)
+
+    label = f"forgejo:{REPO}"
+    assert report.rc_skipped == [label]
+    assert report.body_states.get(label) == "rc_skipped"
