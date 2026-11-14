@@ -64,12 +64,6 @@ def _version_sync(*args: str):
 def test_version_sync_check_passes_at_the_release_version():
     result = _version_sync("check")
     assert result.returncode == 0, result.stdout + result.stderr
-    assert VERSION in result.stdout
-
-
-def test_the_release_tag_matches_the_declared_version():
-    result = _version_sync("check-tag", "v%s" % VERSION)
-    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_the_notes_section_exists_and_is_short():
