@@ -777,3 +777,21 @@ async def test_body_state_failed_publisher_login_unavailable(tmp_path):
     assert report.body_states.get(label) == (
         "failed: publisher_login unavailable"
     )
+
+
+@pytest.mark.asyncio
+async def test_body_state_supplemented_records_entry_via_setdefault(tmp_path):
+    """F6 mutation guard: replacing the setdefault body_states write in
+    _try_supplement with `pass` must cause this test to fail.
+
+    The title/asset supplement path must also record the body state
+    'supplemented'."""
+    dest = ExistingReleaseDestination(
+        body=NOTES, name="Ops Engine v3.5.1",
+        assets=[{"name": name} for name in FILES],
+    )
+    report, _ = await _publish("forgejo", _forgejo(dest), tmp_path)
+
+    label = f"forgejo:{REPO}"
+    assert report.supplemented == [label]
+    assert report.body_states.get(label) == "supplemented"
