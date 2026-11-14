@@ -1,5 +1,14 @@
 # Changelog
 
+## 3.6.1
+
+The `credential_variable` field on a release destination is now optional. The 3.6.0 loader refused a release destination without it, which broke the `.ops.yaml` of three public repositories whose release blocks declare no credential variable. The adapter factory already falls back from the variable name to the forge key, so the mandatory rule was stricter than the contract needs. A destination without `credential_variable` now resolves its credential by forge name, while a destination that declares the variable still uses it.
+
+### The credential variable is optional
+
+- **A release destination without `credential_variable` loads** from a repository `.ops.yaml` and from a layover `config.yml`, and resolves its credential by the forge key.
+- **The P36-002 behaviour is unchanged.** A declared variable still wins, two destinations of one forge with different variables still receive different tokens, and a missing credential still fails that destination by name.
+
 ## 3.6.0
 
 A release could reach a public mirror with a credential that was not the mirror's own, two publishers could race on one repository, and the release body was written on Forgejo only. The engine now refuses by path and blob, keeps one credential per destination off the command line, and writes the body on every release destination.

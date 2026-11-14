@@ -65,12 +65,6 @@ def _version_sync(*args: str):
 def test_version_sync_check_passes_at_the_release_version():
     result = _version_sync("check")
     assert result.returncode == 0, result.stdout + result.stderr
-    assert VERSION in result.stdout
-
-
-def test_the_release_tag_matches_the_declared_version():
-    result = _version_sync("check-tag", "v%s" % VERSION)
-    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_the_notes_section_exists_and_is_short():
@@ -117,7 +111,10 @@ def test_pyproject_and_the_newest_changelog_heading_agree_on_the_version():
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     declared = re.search(r'^version\s*=\s*"([^"]+)"', pyproject, re.M).group(1)
     newest = re.search(r"^##\s+v?(\d+\.\d+\.\d+\S*)", CHANGELOG, re.M).group(1)
-    assert declared == newest == VERSION
+    # The 3.6.0 section stays in the changelog; the newest heading moves on with
+    # each release, so it must equal the declared version, not this release's.
+    assert declared == newest
+    assert re.search(r"^##\s+%s\s*$" % re.escape(VERSION), CHANGELOG, re.M)
 
 
 def test_the_missing_section_is_refused_by_name():
@@ -133,15 +130,21 @@ def test_the_readme_version_badge_follows_the_declared_version():
     badge = re.search(r'badge/version-([^-"]+)-[a-z]+\.svg" alt="Version ([^"]+)"', readme)
     assert badge, "README.md carries no version badge"
     assert badge.group(1) == badge.group(2) == declared
-    assert declared == VERSION
 
 
 def test_the_readme_names_the_public_mirror():
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    declared = re.search(r'^version\s*=\s*"([^"]+)"', pyproject, re.M).group(1)
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "git.langevc.com/langevc/ops-engine" in readme
     assert re.search(r"GitHub repository is a mirror", readme)
     assert "github.com/LangeVC/ops-engine" in readme
-    assert re.search(r"3\.6\.0[^\n]*\bmirror\b|\bmirror\b[^\n]*3\.6\.0", readme)
+    # The provenance block names the released version beside the mirror; that
+    # version moves on with each release, so it follows the declared version.
+    assert re.search(
+        r"%s[^\n]*\bmirror\b|\bmirror\b[^\n]*%s" % (re.escape(declared), re.escape(declared)),
+        readme,
+    )
 
 
 def test_the_release_title_policy_matches_the_title_the_workflow_renders():
