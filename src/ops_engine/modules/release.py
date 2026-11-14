@@ -466,6 +466,7 @@ class ReleaseHandler:
                     label = _destination_label(destination)
                     report.failed.append(label)
                     report.failure_details[label] = str(exc)
+                    report.body_states[label] = f"failed: {exc}"
                     logger.error(
                         f"partial publication: {label} "
                         f"failed: {exc}"
@@ -795,6 +796,14 @@ async def _judge_existing_release(
             release_body, release_notes, artifacts,
         ):
             return
+        # Body already contains the CHANGELOG section.  Use the existing
+        # body as the reference for subsequent notes comparisons so that
+        # title and asset corrections still run without a false "notes
+        # differ" report (the body is the full composed body, not just
+        # the raw release_notes).
+        found_body = await adapter.find_release(destination.repo, tag_name)
+        if isinstance(found_body, dict) and found_body.get("body"):
+            release_notes = found_body["body"]
     if await _try_supplement(
         adapter, destination, report, audit, tag_name, label,
         release_name, release_notes, artifacts,
@@ -879,8 +888,12 @@ async def _try_supplement_body(
         return True
 
     # Body already contains the CHANGELOG section: already equal.
+    # The body_states entry is recorded here, but we return False so the
+    # caller continues with the existing supplement/title/asset logic
+    # (P36-017/P36-003). The body_states entry is kept even if the
+    # subsequent supplement path overwrites it.
     report.body_states[label] = "already_equal"
-    return True
+    return False
 
 
 async def _try_supplement(
@@ -910,6 +923,7 @@ async def _try_supplement(
     )
     logger.info(f"Release {tag_name} on {label} supplemented: {detail}")
     report.supplemented.append(label)
+    report.body_states.setdefault(label, "supplemented")
     _audit_destination(audit, tag_name, label, "supplemented", detail)
     return True
 

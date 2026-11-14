@@ -475,6 +475,67 @@ async def test_drift_check_returns_none_when_empty_repo():
 
 
 # ---------------------------------------------------------------------------
+# F7: check_release_body with empty release_notes must fail closed
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_drift_check_empty_release_notes_raises_valueerror():
+    """F7 mutation guard: check_release_body with an empty release_notes must
+    raise ValueError, not silently skip the CHANGELOG comparison. Deleting the
+    guard must cause this test to fail.
+
+    A non-empty body without the expected CHANGELOG section comparison is
+    misleading — the caller asked for a check but got a silent success.
+    Failing closed forces the caller to supply the expected notes."""
+    dest = DriftCheckFakeDestination(body=OTHER_BODY)
+    adapter = _forgejo(dest)
+
+    with pytest.raises(ValueError, match="release_notes is required"):
+        await ReconcileHandler.check_release_body(
+            adapter, REPO, TAG, release_notes="",
+        )
+
+    assert dest.writes() == []
+
+
+# ---------------------------------------------------------------------------
+# F6: MissingCredentialError destination must have a body_states entry
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_missing_credential_destination_has_body_states_entry(tmp_path):
+    """F6 mutation guard: a destination that fails with MissingCredentialError
+    must have a body_states entry. Deleting the body_states line from the
+    MissingCredentialError branch must cause this test to fail.
+
+    Every destination gets a body_states entry — criterion 1."""
+    from ops_engine.adapters.factory import Credential, MissingCredentialError
+
+    art = tmp_path / "dist"
+    art.mkdir(exist_ok=True)
+    for name in FILES:
+        (art / name).write_bytes(name.encode())
+
+    # Use a real Forgejo adapter with no mock transport — but supply
+    # credentials={} so that MissingCredentialError is raised before any
+    # network call.
+    report = await ReleaseHandler.publish_release(
+        _config(forge="forgejo"), REPO, TAG, NOTES, art,
+        credentials={}, skip_existing=True,
+        release_body=FULL_BODY,
+    )
+
+    label = f"forgejo:{REPO}"
+    assert label in report.failed
+    state = report.body_states.get(label, "")
+    assert state.startswith("failed:"), (
+        f"MissingCredentialError destination missing from body_states: {report.body_states}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # F4: mutation guard — to_dict() serialization of body_states
 # ---------------------------------------------------------------------------
 

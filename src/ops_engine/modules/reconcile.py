@@ -276,7 +276,13 @@ class ReconcileHandler:
         if not existing_body:
             result.empty = True
             return result
-        if release_notes and release_notes.strip() not in existing_body:
+        if not release_notes.strip():
+            raise ValueError(
+                "check_release_body: release_notes is required to compare "
+                "the CHANGELOG section; the body is non-empty but the "
+                "comparison cannot be made without the expected notes"
+            )
+        if release_notes.strip() not in existing_body:
             result.missing_changelog = True
             return result
         return None
