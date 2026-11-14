@@ -758,3 +758,22 @@ async def test_body_state_incomplete(tmp_path):
     assert state.startswith("incomplete:"), (
         f"incomplete destination missing from body_states: {report.body_states}"
     )
+
+
+@pytest.mark.asyncio
+async def test_body_state_failed_publisher_login_unavailable(tmp_path):
+    """F6 mutation guard: replacing the publisher_login-unavailable
+    body_states write in publish_release with `pass` must cause this test to
+    fail.
+
+    Per-destination publisher attribution without a login fails that
+    destination by name; the failure must appear in body_states."""
+    dest = ExistingReleaseDestination(body=FULL_BODY)
+    report, _ = await _publish("forgejo", _forgejo(dest), tmp_path,
+                               release_body=FULL_BODY, publisher_login={})
+
+    label = f"forgejo:{REPO}"
+    assert label in report.failed
+    assert report.body_states.get(label) == (
+        "failed: publisher_login unavailable"
+    )
