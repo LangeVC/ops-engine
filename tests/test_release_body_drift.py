@@ -299,21 +299,25 @@ class ExistingReleaseDestination:
     """A destination where the release already exists with a given body and no
     race occurs (first GET returns 200)."""
 
-    def __init__(self, *, body, name=TITLE, assets=None):
+    def __init__(self, *, body, name=TITLE, assets=None, author=None):
         self._body = body
         self._name = name
         self._assets = list(assets or [])
+        self._author = author
         self.patched_bodies = []
         self.calls = []
 
     def _release(self):
-        return {
+        release = {
             "id": RELEASE_ID,
             "tag_name": TAG,
             "name": self._name,
             "body": self._body,
             "assets": self._assets,
         }
+        if self._author is not None:
+            release["author"] = {"login": self._author}
+        return release
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -715,3 +719,24 @@ async def test_body_state_skipped(tmp_path):
     assert report.skipped == [label]
     assert dest.patched_bodies == []
     assert report.body_states.get(label) == "skipped"
+
+
+ENGINE_LOGIN = "dev.bot_langevc"
+OTHER_LOGIN = "github-actions[bot]"
+
+
+@pytest.mark.asyncio
+async def test_body_state_up_to_date(tmp_path):
+    """F6 mutation guard: replacing the up_to_date body_states write in
+    _judge_existing_release with `pass` must cause this test to fail.
+
+    A release authored by another publisher is recorded up to date and that
+    state must appear in body_states."""
+    dest = ExistingReleaseDestination(body=FULL_BODY, author=OTHER_LOGIN)
+    report, _ = await _publish("forgejo", _forgejo(dest), tmp_path,
+                               release_body=FULL_BODY,
+                               publisher_login=ENGINE_LOGIN)
+
+    label = f"forgejo:{REPO}"
+    assert report.up_to_date == [label]
+    assert report.body_states.get(label) == "up_to_date"
