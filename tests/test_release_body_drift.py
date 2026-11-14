@@ -740,3 +740,21 @@ async def test_body_state_up_to_date(tmp_path):
     label = f"forgejo:{REPO}"
     assert report.up_to_date == [label]
     assert report.body_states.get(label) == "up_to_date"
+
+
+@pytest.mark.asyncio
+async def test_body_state_incomplete(tmp_path):
+    """F6 mutation guard: replacing the incomplete body_states write in
+    _record_incomplete with `pass` must cause this test to fail.
+
+    A release whose notes differ fails the destination with the named
+    difference, and that state must appear in body_states."""
+    dest = ExistingReleaseDestination(body=OTHER_BODY)
+    report, _ = await _publish("forgejo", _forgejo(dest), tmp_path)
+
+    label = f"forgejo:{REPO}"
+    assert label in report.failed
+    state = report.body_states.get(label, "")
+    assert state.startswith("incomplete:"), (
+        f"incomplete destination missing from body_states: {report.body_states}"
+    )
