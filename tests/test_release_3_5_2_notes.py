@@ -112,7 +112,10 @@ def test_pyproject_and_the_newest_changelog_heading_agree_on_the_version():
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     declared = re.search(r'^version\s*=\s*"([^"]+)"', pyproject, re.M).group(1)
     newest = re.search(r"^##\s+v?(\d+\.\d+\.\d+\S*)", CHANGELOG, re.M).group(1)
-    assert declared == newest == VERSION
+    # The 3.5.2 section stays in the changelog; the newest heading moves on with
+    # each release, so it must equal the declared version, not this release's.
+    assert declared == newest
+    assert re.search(r"^##\s+%s\s*$" % re.escape(VERSION), CHANGELOG, re.M)
 
 
 def test_the_missing_section_is_refused_by_name():
