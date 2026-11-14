@@ -1,5 +1,16 @@
 schema: 1
 source_of_truth: pyproject.toml
+
+# The release title policy: every release of this product is titled
+# "<product> v<version>", the form the release workflow renders from its
+# NAME_TEMPLATE ("Ops Engine {tag_name}"). The pattern is the full regex a
+# rendered title must match; {product} is replaced with product_name before
+# the match, and the version comes from the tag (vX.Y.Z, optionally -rcN).
+# Written as a single-line flow mapping on purpose: the version-sync parser
+# accepts only flat top-level scalars and the locations list, and a nested
+# block map would make it exit before any comparison.
+release_title_policy: {product_name: Ops Engine, pattern: '^{product} v\d+\.\d+\.\d+(?:-rc\d+)?$'}
+
 locations:
   - path: pyproject.toml
     pattern: '^version\s*=\s*"(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)"$'

@@ -1,5 +1,24 @@
 # Changelog
 
+## 3.6.0
+
+A release could reach a public mirror with a credential that was not the mirror's own, two publishers could race on one repository, and the release body was written on Forgejo only. The engine now refuses by path and blob, keeps one credential per destination off the command line, and writes the body on every release destination.
+
+### The public mirror refuses by name
+
+- **A visibility exception names one path and one blob.** Every other blob at that path is still refused.
+- **A readiness report lists what a repository would refuse before it goes public.** `python -m ops_engine.modules.visibility_report` prints each path, blob and count, read-only, in pasteable form.
+
+### One credential and one publisher per destination
+
+- **Each destination uses its own credential, and no token appears in `git` argv.** The credential travels in the environment of the call.
+- **A repository has one publisher.** The step reports `up_to_date` with `publishers` and `publisher_login` instead of racing a second one.
+
+### The release body on every destination
+
+- **Every release destination gets the body**, the GitHub mirror included; an RC tag never publishes as a final release.
+- **The run summary names the body state per destination** — written, supplemented, already equal, or failed with the named difference — and a read-only drift check reports a release whose body is empty or lacks the CHANGELOG section, without writing.
+
 ## 3.5.2
 
 A release created beforehand by the layover's ops bot made the release step fail, because its title and its files did not match what the build produces. The step now completes such a release instead of failing on it.

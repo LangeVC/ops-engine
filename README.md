@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-3.5.2-blue.svg" alt="Version 3.5.2">
+  <img src="https://img.shields.io/badge/version-3.6.0-blue.svg" alt="Version 3.6.0">
   <img src="https://img.shields.io/badge/python-3.10+-blue.svg" alt="Python 3.10+">
   <img src="https://img.shields.io/badge/License-Apache%202.0-green.svg" alt="License: Apache 2.0">
   <img src="https://img.shields.io/badge/architecture-config--driven-orange.svg" alt="Architecture: Config-Driven">
@@ -15,6 +15,8 @@
 
 > **Repository provenance.** The canonical home of this repository is Forgejo
 > at `git.langevc.com/langevc/ops-engine`. The GitHub repository is a mirror.
+> Release 3.6.0 is published on the canonical Forgejo and on its public mirror,
+> the GitHub repository, with the body written on each destination.
 
 ## The Problem
 
