@@ -17,6 +17,7 @@ import yaml
 
 from ops_engine.modules.release_gates import (
     check_release_notes_audience,
+    check_release_title,
     extract_changelog_section,
 )
 
@@ -140,3 +141,22 @@ def test_the_readme_names_the_public_mirror():
     assert "git.langevc.com/langevc/ops-engine" in readme
     assert re.search(r"GitHub repository is a mirror", readme)
     assert "github.com/LangeVC/ops-engine" in readme
+    assert re.search(r"3\.6\.0[^\n]*\bmirror\b|\bmirror\b[^\n]*3\.6\.0", readme)
+
+
+def test_the_release_title_policy_matches_the_title_the_workflow_renders():
+    declaration = yaml.safe_load((ROOT / ".version.yaml").read_text(encoding="utf-8"))
+    policy = declaration["release_title_policy"]
+    product = policy["product_name"]
+    pattern = policy["pattern"].replace("{product}", re.escape(product))
+    workflow = (ROOT / ".forgejo" / "workflows" / "forgejo-release.yml").read_text(
+        encoding="utf-8"
+    )
+    templates = sorted(set(re.findall(r'NAME_TEMPLATE:\s*"([^"]*)"', workflow)))
+    assert templates, "the release workflow declares no NAME_TEMPLATE"
+    for template in templates:
+        title = check_release_title("v%s" % VERSION, name_template=template)
+        assert title == "%s v%s" % (product, VERSION), title
+        assert re.match(pattern, title), title
+    assert re.match(pattern, check_release_title("v%s-rc1" % VERSION, name_template=templates[0]))
+    assert not re.match(pattern, check_release_title("v%s" % VERSION, prefix="Other"))
