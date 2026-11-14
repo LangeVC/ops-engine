@@ -15,8 +15,8 @@
 
 > **Repository provenance.** The canonical home of this repository is Forgejo
 > at `git.langevc.com/langevc/ops-engine`. The GitHub repository is a mirror.
-> Release 3.6.0 is published on the canonical Forgejo and on that mirror,
-> the public GitHub repository, with the body written on each destination.
+> Release 3.6.0 is published on the canonical Forgejo and on its public mirror,
+> the GitHub repository, with the body written on each destination.
 
 ## The Problem
 
