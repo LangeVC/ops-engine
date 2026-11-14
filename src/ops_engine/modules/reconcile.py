@@ -59,6 +59,35 @@ class MirrorState:
 
 
 @dataclass
+class ReleaseBodyDrift:
+    """Read-only snapshot of a release body on one destination (P36-018).
+
+    The drift check reads the release object and reports whether its body is
+    empty or lacks the CHANGELOG section. It never writes — the report is for
+    a cockpit or a monitoring check.
+    """
+
+    repo: str = ""
+    tag_name: str = ""
+    release_id: int | None = None
+    empty: bool = False
+    missing_changelog: bool = False
+
+    @property
+    def ok(self) -> bool:
+        return not self.empty and not self.missing_changelog
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "repo": self.repo,
+            "tag_name": self.tag_name,
+            "release_id": self.release_id,
+            "empty": self.empty,
+            "missing_changelog": self.missing_changelog,
+        }
+
+
+@dataclass
 class DriftReport:
     """Ref-level drift between a primary repo and its mirror (OE-024).
 
@@ -216,6 +245,47 @@ class ReconcileHandler:
             if not await adapter.release_exists(repo, tag_name):
                 missing.append(tag_name)
         return missing
+
+    @staticmethod
+    async def check_release_body(
+        adapter: ForgeAdapter,
+        repo: str,
+        tag_name: str,
+        *,
+        release_notes: str = "",
+    ) -> ReleaseBodyDrift | None:
+        """Read-only drift check for a release body on one destination (P36-018).
+
+        Looks up the release object for ``tag_name``. Returns a
+        :class:`ReleaseBodyDrift` when the body is empty or lacks the
+        CHANGELOG section. Returns ``None`` when there is no release for the
+        tag. The check never writes — the report is for a cockpit or
+        monitoring check.
+        """
+        if not repo:
+            return None
+        found = await adapter.find_release(repo, tag_name)
+        if not isinstance(found, dict) or found.get("id") is None:
+            return None
+        existing_body = (found.get("body") or "").strip()
+        result = ReleaseBodyDrift(
+            repo=repo,
+            tag_name=tag_name,
+            release_id=found.get("id"),
+        )
+        if not existing_body:
+            result.empty = True
+            return result
+        if not release_notes.strip():
+            raise ValueError(
+                "check_release_body: release_notes is required to compare "
+                "the CHANGELOG section; the body is non-empty but the "
+                "comparison cannot be made without the expected notes"
+            )
+        if release_notes.strip() not in existing_body:
+            result.missing_changelog = True
+            return result
+        return None
 
     @staticmethod
     async def reconcile_release_tags(

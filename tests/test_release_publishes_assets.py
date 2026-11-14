@@ -126,6 +126,10 @@ async def test_publishes_to_every_destination_in_order(tmp_path):
         tag_name="v1.0.0",
         published=["github:exampleorg/engine", "forgejo:exampleorg/engine"],
         failed=[],
+        body_states={
+            "github:exampleorg/engine": "written",
+            "forgejo:exampleorg/engine": "written",
+        },
     )
     assert report.partial is False
 
@@ -171,6 +175,10 @@ async def test_failure_on_second_destination_is_a_reported_partial(tmp_path):
         "publishers": {},
         "partial": True,
         "rc_skipped_destinations": [],
+        "body_states": {
+            "github:exampleorg/engine": "written",
+            "forgejo:exampleorg/engine": "failed: upstream refused",
+        },
     }
 
 

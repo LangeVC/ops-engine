@@ -162,6 +162,10 @@ async def test_one_publication_uses_each_destination_its_own_credential(tmp_path
         tag_name="v1.0.0",
         published=["forgejo:exampleorg/engine", "github:exampleorg/engine"],
         failed=[],
+        body_states={
+            "forgejo:exampleorg/engine": "written",
+            "github:exampleorg/engine": "written",
+        },
     )
 
     # Each adapter was constructed with its own credential; the forgejo adapter
