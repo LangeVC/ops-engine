@@ -530,19 +530,20 @@ class RepoConfig(BaseModel):
     def _release_destinations_declare_credential_variable(
         cls, value: list[Destination],
     ) -> list[Destination]:
-        """Refuse a release destination without its own credential variable (P36-002).
+        """Validate release destinations have a credential key (P36-002, P36-020).
 
-        Each release destination must name the environment variable that
-        supplies its credential, so two destinations on the same forge receive
-        distinct tokens and a Forgejo destination never receives the GitHub
-        token. The refusal names the destination, not just the forge.
+        Each release destination resolves its credential by
+        ``credential_variable`` when set; otherwise the destination's
+        ``forge`` value is used as the key. The adapter factory
+        (``adapters_for``) already falls back from variable to forge, so
+        the mandatory rule of P36-002 is lifted here (P36-020) to let a
+        release destination without its own variable load from a
+        repository ``.ops.yaml`` or from a layover ``config.yml``.
+
+        The validation is now a no-op: the field is optional and the
+        factory handles the fallback. The validator is retained as a
+        documentation anchor so the policy is visible at the call site.
         """
-        for dest in value:
-            if dest.role == "release" and not dest.credential_variable.strip():
-                raise ValueError(
-                    f"release destination {dest.forge}:{dest.repo} must "
-                    f"declare 'credential_variable'"
-                )
         return value
 
     @model_validator(mode="after")
