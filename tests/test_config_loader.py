@@ -468,6 +468,53 @@ def test_layer3_public_destination_with_no_globs_anywhere_is_refused_at_merge(tm
     assert "exampleorg/pub" in str(excinfo.value)
 
 
+# --- P36-021: the release block's name_template is a declared field ----------
+
+
+def test_release_name_template_is_declared_and_defaults_to_none():
+    """The key is a field, not a pydantic-ignored extra.
+
+    Deleting ``ReleaseConfig.name_template`` must make this fail: the model then
+    drops ``release.name_template`` on load and the field lookup raises.
+    """
+    assert "name_template" in ReleaseConfig.model_fields
+    assert ReleaseConfig().name_template is None
+
+
+def test_layover_release_name_template_survives_get_repo_config():
+    """The layover release block reaches the resolved config whole."""
+    config = OpsEngineConfig(
+        orgs={
+            "langevc": OrgConfig(
+                repositories={
+                    "ops-engine": RepoConfig(
+                        release=ReleaseConfig(
+                            enabled=True,
+                            trigger="tag_push",
+                            tag_pattern="v*",
+                            name_template="Ops Engine {tag_name}",
+                        )
+                    )
+                }
+            )
+        }
+    )
+    resolved = config.get_repo_config("langevc", "ops-engine")
+    assert resolved.release.name_template == "Ops Engine {tag_name}"
+
+
+def test_repo_ops_yaml_release_name_template_loads(tmp_path):
+    """A repository's own release block is read the same way as the layover's."""
+    from ops_engine.config_loader import load_ops_yaml
+
+    (tmp_path / ".ops.yaml").write_text(
+        'release:\n  name_template: "Ops Engine LTS {tag_name}"\n', encoding="utf-8"
+    )
+    layer3 = load_ops_yaml(tmp_path)
+    assert layer3 is not None
+    assert layer3.release.name_template == "Ops Engine LTS {tag_name}"
+
+
 # --- P36-017 F6: mutation requirement — config forwarding survives -----------
 
 
