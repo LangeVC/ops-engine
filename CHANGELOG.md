@@ -1,5 +1,14 @@
 # Changelog
 
+## 3.6.2
+
+A `name_template` declared in a release block was ignored. Neither `RepoConfig` nor `ReleaseConfig` declared the field, so pydantic dropped it, and a release was titled by the derived default instead of the product title the release title policy requires. The field is now declared on the model that both a layover `config.yml` release block and a repository `.ops.yaml` release block populate, and the webhook path resolves and gates it for each repository.
+
+### The title form comes from the configuration
+
+- **A `release.name_template` in a layover `config.yml` or a repository `.ops.yaml` is loaded** and reaches the rendered release name and the title gate. A repository that declares none keeps the derived default `{repo_name} {tag_name}`.
+- **A template that does not render to the gated title form fails that repository by name** before any release object exists, and the other repositories of the same run keep running.
+
 ## 3.6.1
 
 The `credential_variable` field on a release destination is now optional. The 3.6.0 loader refused a release destination without it, which broke the `.ops.yaml` of three public repositories whose release blocks declare no credential variable. The adapter factory already falls back from the variable name to the forge key, so the mandatory rule was stricter than the contract needs. A destination without `credential_variable` now resolves its credential by forge name, while a destination that declares the variable still uses it.
