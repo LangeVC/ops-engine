@@ -388,6 +388,19 @@ any step before the identity step happens before a tag is pushed or a release
 object exists. A tag push handed to `ReleaseHandler.process_event` without a
 `ReleaseContext` is refused by name (`MissingReleaseContextError`).
 
+The title form is `ReleaseConfig.name_template` (`release.name_template`,
+default `null`). It is declared on the same model that carries a layover
+`config.yml` release block and a repository `.ops.yaml` release block, so both
+declarations are read instead of dropped as an unknown key. The webhook path
+resolves it after the `.ops.yaml` read and before the CHANGELOG section is
+extracted, in this order: the `name_template` of the `ReleaseContext` (the
+workflow's `NAME_TEMPLATE`), the repository's own release block at the tag, the
+layover's release block, and the derived default `{repo_name} {tag_name}`. The
+resolved template is rendered around the tag and gated by `check_release_title`
+under the same name; a refusal names the repository whose release block declared
+the template, and the other repositories of the same run keep running. Without a
+configured template the release keeps the derived default.
+
 ## Release reconcile entry point
 
 `ReconcileHandler.reconcile_release_tags` (`ReconcileHandler` is a `contract`

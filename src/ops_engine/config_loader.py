@@ -249,6 +249,12 @@ class ReleaseConfig(BaseModel):
     # leaves the artifact root is refused. Read from the layover's own config,
     # never from a repository's ``.ops.yaml`` (D18).
     artifact_dir: Optional[str] = Field(default=None)
+    # P36-021: the title form of a release (``"<Product> {tag_name}"``). Declared
+    # here so a layover ``config.yml`` release block and a repository
+    # ``.ops.yaml`` release block are read instead of dropped by pydantic's
+    # ignored extras. The engine already renders and gates it; without a value
+    # the release keeps the derived default (``DEFAULT_NAME_TEMPLATE``).
+    name_template: Optional[str] = Field(default=None)
     # Switch for the release reconcile cycle (OE-010): false disables it, so a
     # tag pushed while the layover was stopped gets no release from the cycle.
     reconcile: bool = Field(default=True)

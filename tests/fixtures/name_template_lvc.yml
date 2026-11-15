@@ -1,0 +1,16 @@
+# lvc-ops style layover block (P36-021 criterion 3).
+#
+# The release block carries ``assets: none``, a key the engine does not declare.
+# It must stay an ignored extra while the name_template is loaded, so a real
+# layover config keeps loading unchanged.
+orgs:
+  langevc:
+    repositories:
+      ops-engine:
+        release:
+          enabled: true
+          trigger: "tag_push"
+          tag_pattern: "v*"
+          changelog_path: "CHANGELOG.md"
+          assets: none
+          name_template: "Ops Engine {tag_name}"

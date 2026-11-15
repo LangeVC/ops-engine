@@ -17,6 +17,7 @@ from ops_engine.modules.mirror import resolve_destinations
 from ops_engine.modules.notification import NotificationHandler
 from ops_engine.modules.release_gates import (
     MissingChangelogEntryError,
+    ReleaseTitleError,
     check_release_notes_audience,
     check_release_title,
     extract_changelog_section,
@@ -1155,15 +1156,6 @@ async def _release_tag(
         context.artifact_dir, getattr(config, "artifact_dir", None)
     )
 
-    # Gates (OE-007) on the CHANGELOG and the tag.
-    name_template = (
-        context.name_template
-        or getattr(config, "name_template", None)
-        or DEFAULT_NAME_TEMPLATE
-    )
-    title_form = render_release_name(name_template, repo, "{tag_name}")
-    check_release_title(tag_name, name_template=title_form)
-
     try:
         changelog = await adapter.get_file_content(
             repo, config.changelog_path, ref=tag_name
@@ -1173,7 +1165,6 @@ async def _release_tag(
             f"MissingChangelogEntryError: could not read {config.changelog_path} "
             f"of {repo} at {tag_name}: {exc}. No notes, so no release."
         ) from exc
-    notes = extract_changelog_section(changelog, tag_name)
 
     # Destinations from .ops.yaml at the tag; read-only, still before any write.
     try:
@@ -1208,6 +1199,29 @@ async def _release_tag(
             if layer3_config is not None
             else ""
         )
+
+        # P36-021: the title form. The repository's own release block (Layer 3)
+        # wins, then the layover's release block (Layer 2), then the derived
+        # default. The template is resolved AFTER the .ops.yaml read so the
+        # repository declaration is what the gate sees, and the gate still runs
+        # before the CHANGELOG section is extracted (OE-007).
+        layer3_release = layer3_config.release if layer3_config is not None else None
+        name_template = (
+            context.name_template
+            or (layer3_release.name_template if layer3_release is not None else None)
+            or getattr(config, "name_template", None)
+            or DEFAULT_NAME_TEMPLATE
+        )
+        title_form = render_release_name(name_template, repo, "{tag_name}")
+        try:
+            check_release_title(tag_name, name_template=title_form)
+        except ReleaseTitleError as exc:
+            # Criterion 2: the refusal names the repository whose release block
+            # declared the template. Only this repository fails; the others of
+            # the same run keep their own loaded block and keep running.
+            raise ReleaseTitleError(f"{repo}: {exc}") from exc
+
+        notes = extract_changelog_section(changelog, tag_name)
 
         identity = context.identity
 

@@ -29,9 +29,10 @@ MIRROR_CONTENT = MIRROR.read_text(encoding="utf-8")
 class _ReleaseConfig:
     """A placeholder-tolerant release config.
 
-    The engine carries no ``name_template`` field of its own (it is layover
-    data). But ReleaseHandler must accept a config that carries one, so we
-    define a payload that behaves like a Pydantic model here.
+    Since 3.6.2 the engine carries ``name_template`` on ``ReleaseConfig``
+    (P36-021), so a real release block can carry it. This payload still stands
+    in for one here: these tests drive ``publish_release`` directly with a
+    duck-typed config and never load a YAML block.
     """
 
     def __init__(self, enabled=True, *, name_template=None):
