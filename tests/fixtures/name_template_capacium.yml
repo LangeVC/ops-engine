@@ -1,0 +1,16 @@
+# capacium-ops style layover block (P36-021 criterion 3).
+#
+# Shaped like the deployed capacium layover config: the release block declares
+# enabled/trigger/tag_pattern/changelog_path. The deployed blocks carry no
+# name_template yet; this fixture declares the product title the lane makes
+# loadable, so the capacium style renders through the engine's loader too.
+orgs:
+  capacium:
+    repositories:
+      capacium:
+        release:
+          enabled: true
+          trigger: "tag_push"
+          tag_pattern: "v*"
+          changelog_path: "CHANGELOG.md"
+          name_template: "Capacium {tag_name}"

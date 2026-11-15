@@ -1,0 +1,23 @@
+# fusionaize-ops style layover block (P36-021 criterion 3).
+#
+# Shaped like the deployed layover config: a lowercase org key and release
+# blocks that carry the product title as a name_template. The engine must load
+# BOTH templates through its own loader; neither is engine data. Carried under
+# the explicit ``orgs:`` mapping, the layout ``OpsEngineConfig.load`` takes.
+orgs:
+  fusionaize:
+    repositories:
+      faigrid:
+        release:
+          enabled: true
+          trigger: "tag_push"
+          tag_pattern: "v*"
+          changelog_path: "CHANGELOG.md"
+          name_template: "fusionAIze Grid {tag_name}"
+      failens:
+        release:
+          enabled: true
+          trigger: "tag_push"
+          tag_pattern: "v*"
+          changelog_path: "CHANGELOG.md"
+          name_template: "fusionAIze Lens {tag_name}"
