@@ -251,7 +251,10 @@ async def test_an_explicit_context_template_still_wins(tmp_path, monkeypatch):
 
 # --- criterion 2: a non-conforming template fails that repository by name -----
 
-BAD_TEMPLATE = "Ops Engine {tag_name} (unreleased)"
+# The gated title form is built around exactly one ``{tag_name}``. A template
+# without it renders a title that carries no tag at all, so the gate refuses it
+# for this repository before any release object exists.
+BAD_TEMPLATE = "Ops Engine (unreleased)"
 
 
 @pytest.mark.asyncio
