@@ -15,11 +15,21 @@ jobs:
   # REL-023 — the gate is a GATE: the release job cannot run unless the boundary
   # and version gate here passes. The gate job and the release job were two
   # independent workflows whose verdicts could disagree unnoticed (a red
-  # release-gate shipped v3.4.0 and v3.4.1 anyway). The boundary and version
-  # gates below are the same checks release-gate.yml runs, but placed BEFORE the
-  # release in the same workflow so a red gate skips publication instead of
-  # running beside it. CONTRACT.md section "Release gate and release
-  # relationship (REL-023)" states the decision.
+  # release-gate shipped v3.4.0 and v3.4.1 anyway). Nothing couples the two
+  # workflows: one push tag starts both, and neither invokes the other, waits
+  # on the other, nor reads the other's result. So the gates below must live
+  # here, in the same workflow as the release, for `needs: gate` to make them
+  # load-bearing: a red gate here skips publication instead of running beside
+  # it. They are the same checks release-gate.yml runs.
+  #
+  # RFL-021 — the release-object writer is the engine alone: this workflow's
+  # only writer is ReleaseHandler.publish_release in the Create Release step,
+  # and no other workflow creates or edits a release object. The version
+  # refusal stays on the release path, and it checks the tag the release will
+  # actually use: github.ref_name on a tag push, the requested tag_name on
+  # workflow_dispatch (where GITHUB_REF is refs/heads/main, not a tag).
+  # CONTRACT.md section "Release gate and release relationship (REL-023)"
+  # states the decision.
   gate:
     runs-on: ubuntu-latest
     steps:
@@ -96,9 +106,14 @@ jobs:
             --ci-env "$CI_ENV_VOCAB" \
             --dest-hosts "$DEST_HOSTS"
       - name: Check tag against the declared version
+        env:
+          # The same tag source the release steps use. Under a tag push this is
+          # github.ref_name (the tag); under workflow_dispatch GITHUB_REF is
+          # refs/heads/main, so the requested tag_name is what gets checked.
+          TAG_NAME: "${{ github.event.inputs.tag_name || github.ref_name }}"
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF##refs/tags/}"
+          tag="$TAG_NAME"
           args=(check-tag "$tag")
           version="${tag#v}"
           if [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z.-]+$ ]]; then
