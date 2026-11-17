@@ -23,13 +23,13 @@ jobs:
   # it. They are the same checks release-gate.yml runs.
   #
   # RFL-021 — the release-object writer is the engine alone: this workflow's
-  # only writer is ReleaseHandler.publish_release in the Create Release step,
-  # and no other workflow creates or edits a release object. The version
-  # refusal stays on the release path, and it checks the tag the release will
-  # actually use: github.ref_name on a tag push, the requested tag_name on
-  # workflow_dispatch (where GITHUB_REF is refs/heads/main, not a tag).
-  # CONTRACT.md section "Release gate and release relationship (REL-023)"
-  # states the decision.
+  # only writer is ReleaseHandler.publish_release, called from the release
+  # step below, and no other workflow creates or edits a release object. The
+  # version refusal stays on the release path, and it checks the tag the
+  # release will actually use: github.ref_name on a tag push, the requested
+  # tag_name on workflow_dispatch (where GITHUB_REF is refs/heads/main, not a
+  # tag). CONTRACT.md section "Release gate and release relationship
+  # (REL-023)" states the decision.
   gate:
     runs-on: ubuntu-latest
     steps:
