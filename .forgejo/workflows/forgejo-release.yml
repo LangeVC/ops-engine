@@ -15,12 +15,12 @@ jobs:
   # REL-023 — the gate is a GATE: the release job cannot run unless the boundary
   # and version gate here passes. The gate job and the release job were two
   # independent workflows whose verdicts could disagree unnoticed (a red
-  # release-gate shipped v3.4.0 and v3.4.1 anyway). Nothing couples the two
-  # workflows: one push tag starts both, and neither invokes the other, waits
-  # on the other, nor reads the other's result. So the gates below must live
-  # here, in the same workflow as the release, for `needs: gate` to make them
-  # load-bearing: a red gate here skips publication instead of running beside
-  # it. They are the same checks release-gate.yml runs.
+  # release-gate shipped v3.4.0 and v3.4.1 anyway). One push tag starts both
+  # and neither waits on the other, so a verdict there cannot stop a release
+  # here: the gates below must live in this workflow, in the job `needs: gate`
+  # binds, or they are advice rather than a gate. They are the same checks
+  # release-gate.yml runs, placed here so a red gate skips publication
+  # instead of running beside it.
   #
   # RFL-021 — the release-object writer is the engine alone: this workflow's
   # only writer is ReleaseHandler.publish_release, called from the release
