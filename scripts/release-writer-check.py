@@ -36,6 +36,20 @@ that names a release endpoint, and a GET download of a release asset (for
 example the OSV scanner binary under ``/releases/download/``), out of the
 census.
 
+This is a line-oriented census of known writer shapes, not a parser of the
+forge API. It recognises the shapes enumerated above and nothing else: a
+publication written some other way (``curl -d`` without ``-X``,
+``curl --request=POST``, ``curl -T``, ``wget --post-data``, or an endpoint
+further than three rows below the write marker) passes it. Its job is to keep
+the sanctioned path from regressing, not to prove that no writer exists in
+any form.
+
+A named directory that does not exist contributes no file, and is announced
+on its own line rather than passed over: a repository may publish to only one
+forge, so its absence is not an offence, but a census must never read as
+green over a tree it never looked at. The census refuses only when no
+directory yielded any file at all.
+
 Exit codes:
   0  no direct release-object writer outside the engine path
   1  at least one direct writer; each offence is printed as file:line
@@ -200,14 +214,18 @@ def inspect_file(path: str) -> tuple[list[str], list[str]]:
     return offences, engine_calls
 
 
-def _workflow_files(root: str, directories) -> list[str]:
-    """Every workflow file under ``directories``, sorted; refusal on a bad path."""
+def _workflow_files(root: str, directories) -> tuple[list[str], list[str]]:
+    """Return ``(files, absent_roots)``; refusal on a path that cannot be read."""
     files: list[str] = []
+    absent: list[str] = []
     for directory in directories:
         full = directory if os.path.isabs(directory) else os.path.join(root, directory)
         if not os.path.exists(full):
-            # A forge with no workflow directory contributes nothing; the
-            # absence of BOTH is a refusal, checked by the caller.
+            # A repository may publish to only one forge, so an absent root is
+            # not an offence -- but it is never silent: the caller announces
+            # every root that contributed nothing, and the total of zero is a
+            # refusal. A census must not read as green over files it never saw.
+            absent.append(full)
             continue
         if not os.path.isdir(full):
             raise _Refusal(f"{full}: not a directory")
@@ -219,7 +237,7 @@ def _workflow_files(root: str, directories) -> list[str]:
             path = os.path.join(full, name)
             if name.endswith(_WORKFLOW_SUFFIXES) and os.path.isfile(path):
                 files.append(path)
-    return files
+    return files, absent
 
 
 class _Refusal(Exception):
@@ -240,7 +258,7 @@ def main(argv=None) -> int:
     directories = args.dirs or list(DEFAULT_DIRS)
 
     try:
-        files = _workflow_files(args.root, directories)
+        files, absent = _workflow_files(args.root, directories)
         if not files:
             raise _Refusal(
                 "no workflow files found under "
@@ -261,6 +279,8 @@ def main(argv=None) -> int:
 
     print(f"release-writer-check: scanned {len(files)} workflow file(s) under "
           f"{', '.join(directories)}")
+    for root in absent:
+        print(f"release-writer-check: absent root not scanned: {root}")
     for call in engine_calls:
         print(f"ENGINE {call} (sanctioned)")
     if offences:

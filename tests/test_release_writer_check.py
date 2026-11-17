@@ -188,3 +188,18 @@ def test_nothing_to_scan_is_a_named_refusal(tmp_path: Path):
     assert result.returncode == 2, result.stdout + result.stderr
     assert "no workflow files found" in result.stderr
     assert "Traceback" not in result.stderr
+
+
+def test_absent_forge_root_is_announced_never_silent(tmp_path: Path):
+    """A one-forge tree is green, but the root it never read is named."""
+    _tree(tmp_path, ".forgejo/workflows/release.yml", (
+        "jobs:\n"
+        "  r:\n"
+        "    steps:\n"
+        "      - run: echo ok\n"
+    ))
+    result = run_check("--root", str(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "scanned 1 workflow file(s)" in result.stdout
+    assert "absent root not scanned" in result.stdout
+    assert ".github/workflows" in result.stdout
