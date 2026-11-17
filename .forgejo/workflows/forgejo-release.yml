@@ -15,15 +15,38 @@ jobs:
   # REL-023 — the gate is a GATE: the release job cannot run unless the boundary
   # and version gate here passes. The gate job and the release job were two
   # independent workflows whose verdicts could disagree unnoticed (a red
-  # release-gate shipped v3.4.0 and v3.4.1 anyway). The boundary and version
-  # gates below are the same checks release-gate.yml runs, but placed BEFORE the
-  # release in the same workflow so a red gate skips publication instead of
-  # running beside it. CONTRACT.md section "Release gate and release
-  # relationship (REL-023)" states the decision.
+  # release-gate shipped v3.4.0 and v3.4.1 anyway). One push tag starts both
+  # and neither waits on the other, so a verdict there cannot stop a release
+  # here: the gates below must live in this workflow, in the job `needs: gate`
+  # binds, or they are advice rather than a gate. They are the same checks
+  # release-gate.yml runs, placed here so a red gate skips publication
+  # instead of running beside it.
+  #
+  # RFL-021 — the release-object writer is the engine alone: this workflow's
+  # only writer is ReleaseHandler.publish_release, called from the release
+  # step below, and no other workflow creates or edits a release object. That
+  # was already true at the base of this lane (one writer then too, the same
+  # engine call); what was missing was anything that held it true. The census
+  # below is that guard: scripts/release-writer-check.py scans every workflow
+  # of BOTH forges (.forgejo/workflows and .github/workflows) and refuses a
+  # direct writer, and tests/test_release_writer_check.py proves it red against
+  # a synthetic writer. A red probe against the base is impossible by
+  # construction, because the base carries no second writer to be red about.
+  # The version refusal stays on the release path, and it checks the tag the
+  # release will actually use: github.ref_name on a tag push, the requested
+  # tag_name on workflow_dispatch (where GITHUB_REF is refs/heads/main, not a
+  # tag). CONTRACT.md section "Release gate and release relationship
+  # (REL-023)" states the decision.
   gate:
     runs-on: ubuntu-latest
     steps:
       - uses: https://github.com/actions/checkout@v4
+      - name: Refuse a release-object writer outside the engine path
+        run: |
+          set -euo pipefail
+          python3 scripts/release-writer-check.py \
+            --dir .forgejo/workflows \
+            --dir .github/workflows
       - name: Refuse a forge destination outside the config layer
         run: |
           set -euo pipefail
@@ -96,9 +119,14 @@ jobs:
             --ci-env "$CI_ENV_VOCAB" \
             --dest-hosts "$DEST_HOSTS"
       - name: Check tag against the declared version
+        env:
+          # The same tag source the release steps use. Under a tag push this is
+          # github.ref_name (the tag); under workflow_dispatch GITHUB_REF is
+          # refs/heads/main, so the requested tag_name is what gets checked.
+          TAG_NAME: "${{ github.event.inputs.tag_name || github.ref_name }}"
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF##refs/tags/}"
+          tag="$TAG_NAME"
           args=(check-tag "$tag")
           version="${tag#v}"
           if [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z.-]+$ ]]; then
