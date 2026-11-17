@@ -13,13 +13,15 @@ on:
 
 jobs:
   # REL-023 — the gate is a GATE: the release job cannot run unless the boundary
-  # and version gate here passes. The gate job and the release job were two
-  # independent workflows whose verdicts could disagree unnoticed (a red
-  # release-gate shipped v3.4.0 and v3.4.1 anyway). The boundary and version
-  # gates below are the same checks release-gate.yml runs, but placed BEFORE the
-  # release in the same workflow so a red gate skips publication instead of
-  # running beside it. CONTRACT.md section "Release gate and release
-  # relationship (REL-023)" states the decision.
+  # gate here passes. The gate job and the release job were two independent
+  # workflows whose verdicts could disagree unnoticed (a red release-gate
+  # shipped v3.4.0 and v3.4.1 anyway). The boundary gates below are the same
+  # checks release-gate.yml runs, but placed BEFORE the release in the same
+  # workflow so a red gate skips publication instead of running beside it.
+  # RFL-021 — the version gate runs only in release-gate.yml: one code path on
+  # the same tag push, not a copy. The boundary gates stay here so the release
+  # job is still hard-blocked (needs: gate). CONTRACT.md section "Release gate
+  # and release relationship (REL-023)" states the decision.
   gate:
     runs-on: ubuntu-latest
     steps:
@@ -95,16 +97,6 @@ jobs:
             --org-vocab "$ORG_VOCAB" \
             --ci-env "$CI_ENV_VOCAB" \
             --dest-hosts "$DEST_HOSTS"
-      - name: Check tag against the declared version
-        run: |
-          set -euo pipefail
-          tag="${GITHUB_REF##refs/tags/}"
-          args=(check-tag "$tag")
-          version="${tag#v}"
-          if [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z.-]+$ ]]; then
-            args+=(--allow-prereleases)
-          fi
-          python3 scripts/version-sync.py "${args[@]}"
   release:
     needs: gate
     runs-on: ubuntu-latest
