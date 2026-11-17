@@ -7,8 +7,14 @@
 # Checks:
 #   1. The workflow .forgejo/workflows/release-gate.yml exists, triggers on v*
 #      tags, and invokes scripts/version-sync.py check-tag exactly once.
-#   2. check-tag is invoked by exactly one workflow file — main and dev share
-#      the gate, they do not each carry a copy.
+#   2. REL-023: the version gate is deliberately present in BOTH workflows.
+#      release-gate.yml is the standalone gate a tag push starts; the gate job
+#      inside forgejo-release.yml is the one the release job needs, and a
+#      release-gate verdict cannot stop a release because the two push-triggered
+#      workflows do not wait on each other. Each file invokes check-tag exactly
+#      once, so neither carries a copied code path inside itself. What must NOT
+#      exist anywhere is a second release-object WRITER: that property is
+#      checked here through scripts/release-writer-check.py over both forges.
 #   3. Red proof: a tag whose declared version lags turns the gate red before
 #      any release step is reached.
 #   4. Dev rc proof: a prerelease tag is refused unless --allow-prereleases is
@@ -55,22 +61,41 @@ else
     bad "workflow never derives the --allow-prereleases flag for the dev rc run"
 fi
 
-# --- 2. one code path, not a copy -------------------------------------------
-gate_files=()
-while IFS= read -r f; do
-    [[ -n "$f" ]] && gate_files+=("$f")
-done < <(grep -rl 'check-tag' .forgejo/workflows/ 2>/dev/null || true)
-if [[ ${#gate_files[@]} -eq 1 && "${gate_files[0]}" == "$WORKFLOW" ]]; then
-    ok "check-tag is invoked by exactly one workflow ($WORKFLOW)"
+# --- 2. REL-023: the gate in both workflows, the writer only in the engine ---
+# The version gate is intentionally present in both files: release-gate.yml for
+# a tag push, and the gate job inside forgejo-release.yml whose release job
+# declares `needs: gate`. Both invoke the same check-tag script once each; the
+# duplication that FFR-600-9 forbids is a copied gate WITHIN one file, and a
+# second release-object writer ANYWHERE. The first is checked per file below;
+# the second is delegated to the committed census script.
+RELEASE_WORKFLOW=".forgejo/workflows/forgejo-release.yml"
+
+for wf in "$WORKFLOW" "$RELEASE_WORKFLOW"; do
+    if [[ -f "$wf" ]]; then
+        ok "version gate workflow exists: $wf"
+    else
+        bad "version gate workflow missing: $wf"
+        continue
+    fi
+    n_invocations=$(grep -c 'check-tag' "$wf")
+    if [[ "$n_invocations" -eq 1 ]]; then
+        ok "$wf invokes check-tag once (one code path per file)"
+    else
+        bad "$wf invokes check-tag $n_invocations times; expected one code path, not a copy"
+    fi
+done
+
+if grep -A2 '^  release:' "$RELEASE_WORKFLOW" | grep -q 'needs: gate'; then
+    ok "the release job needs the in-file gate (REL-023)"
 else
-    bad "check-tag must be invoked by exactly $WORKFLOW, found: ${gate_files[*]:-none}"
+    bad "the release job does not declare needs: gate (a red gate could not stop it)"
 fi
 
-n_invocations=$(grep -c 'check-tag' "$WORKFLOW")
-if [[ "$n_invocations" -eq 1 ]]; then
-    ok "check-tag appears once in the workflow (single code path)"
+if python3 scripts/release-writer-check.py >"$TMP/writer" 2>&1; then
+    ok "no release-object writer outside the engine path (both forges)"
 else
-    bad "check-tag appears $n_invocations times; expected one code path, not a copy"
+    cat "$TMP/writer" >&2
+    bad "a workflow writes a release object outside the engine path"
 fi
 
 # --- 3. red proof: mismatched version turns the gate red before release -----
