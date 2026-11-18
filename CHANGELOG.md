@@ -1,5 +1,12 @@
 # Changelog
 
+## 3.6.3
+
+No change to the engine's behaviour. Release tooling of this repository only.
+
+- The repository's own release workflows no longer write a release object; the release handler of the engine writes it on every destination.
+- A durable check over the workflow trees of both forges fails when a workflow writes a release object, and the releasing workflow keeps its version gate.
+
 ## 3.6.2
 
 A `name_template` declared in a release block was ignored. Neither `RepoConfig` nor `ReleaseConfig` declared the field, so pydantic dropped it, and a release was titled by the derived default instead of the product title the release title policy requires. The field is now declared on the model that both a layover `config.yml` release block and a repository `.ops.yaml` release block populate, and the webhook path resolves and gates it for each repository.
