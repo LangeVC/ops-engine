@@ -14,6 +14,7 @@ from typing import Any, Optional
 import yaml
 from pydantic import (
     BaseModel,
+    ConfigDict,
     Field,
     ValidationError,
     ValidationInfo,
@@ -233,8 +234,44 @@ class DependencyTriggerConfig(BaseModel):
 # --- v2 Config Models ---
 
 
+ASSET_DECLARATION_TYPES: tuple[str, ...] = (
+    "capacium_exchange",
+    "ghcr_image",
+    "github_release_tarball",
+    "github_release_zip",
+)
+
+
+class _AssetDeclaration(BaseModel):
+    """One entry of a release block's ``assets`` list (REA-010).
+
+    Private on purpose: consumers see the declarations through
+    ``ReleaseConfig.assets``, and the entry shape is not a promised export.
+    ``extra="forbid"`` makes a typo inside a declaration a refusal instead of
+    a silently ignored key.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: str
+    name: Optional[str] = None
+    via: Optional[str] = None
+    frameworks: list[str] = Field(default_factory=list)
+
+
 class ReleaseConfig(BaseModel):
-    """Configuration for automatic release creation."""
+    """Configuration for automatic release creation.
+
+    ``assets`` (REA-010) is an optional declaration of the artifacts a release
+    must carry. It is deliberately not a model field: it survives as an extra,
+    parsed by the validator below, so a release block that does not declare it
+    is unchanged and a block that does is read instead of dropped. An absent
+    key, a YAML ``null`` and the fleet's bare ``assets: none`` all mean "no
+    required assets".
+    """
+
+    model_config = ConfigDict(extra="allow")
+
     enabled: bool = Field(default=False)
     trigger: str = Field(default="tag_push")  # "tag_push" | "merge_label" | "both"
     tag_pattern: str = Field(default="v*")
@@ -258,6 +295,81 @@ class ReleaseConfig(BaseModel):
     # Switch for the release reconcile cycle (OE-010): false disables it, so a
     # tag pushed while the layover was stopped gets no release from the cycle.
     reconcile: bool = Field(default=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _parse_assets(cls, data: Any) -> Any:
+        """Refuse a malformed ``assets`` declaration, naming the key.
+
+        The validator runs before pydantic's own field handling so the reason
+        names ``release.assets`` rather than an opaque model error; the callers
+        that wrap a ``ValidationError`` (``load_ops_yaml`` and
+        ``OpsEngineConfig.load``) then add the source file or section. Runs
+        only on the raw mapping, so a model built from an already-parsed
+        instance is left as-is.
+        """
+        if not isinstance(data, dict) or "assets" not in data:
+            return data
+        raw = data["assets"]
+        if raw is None or raw == "none":
+            # Record the declaration explicitly as None rather than dropping
+            # the key: a Layer-3 ``assets: none`` REPLACES a Layer-2
+            # declaration, so the merged config must carry "no required
+            # assets" instead of silently keeping the Layer-2 list.
+            overridden = dict(data)
+            overridden["assets"] = None
+            return overridden
+        if not isinstance(raw, list):
+            raise ValueError(
+                "release.assets must be a list of asset declarations or the "
+                f"string 'none', got {type(raw).__name__}"
+            )
+        parsed: list[_AssetDeclaration] = []
+        for index, entry in enumerate(raw):
+            if not isinstance(entry, dict):
+                raise ValueError(
+                    f"release.assets[{index}] must be a mapping, "
+                    f"got {type(entry).__name__}"
+                )
+            asset_type = entry.get("type")
+            if asset_type not in ASSET_DECLARATION_TYPES:
+                raise ValueError(
+                    f"release.assets[{index}] has unknown type {asset_type!r}; "
+                    f"expected one of {list(ASSET_DECLARATION_TYPES)}"
+                )
+            try:
+                declaration = _AssetDeclaration.model_validate(entry)
+            except ValidationError as exc:
+                raise ValueError(
+                    f"release.assets[{index}] ({asset_type}) is malformed: "
+                    f"{exc.errors()[0]['msg']}"
+                ) from exc
+            if asset_type == "capacium_exchange":
+                if not declaration.via:
+                    raise ValueError(
+                        f"release.assets[{index}] (capacium_exchange) is "
+                        "missing 'via'"
+                    )
+            elif not declaration.name:
+                raise ValueError(
+                    f"release.assets[{index}] ({asset_type}) is missing 'name'"
+                )
+            parsed.append(declaration)
+        overridden = dict(data)
+        overridden["assets"] = tuple(parsed)
+        return overridden
+
+    @property
+    def assets(self) -> Optional[tuple[_AssetDeclaration, ...]]:
+        """The parsed ``release.assets`` declarations, or None for no requirement.
+
+        Read through the extras mapping so the value set by
+        :meth:`_parse_assets` reaches callers while staying out of
+        ``model_fields`` (an existing block that carries the key keeps loading,
+        and its absence is still the default).
+        """
+        extra = self.__pydantic_extra__ or {}
+        return extra.get("assets")
 
 
 class ReconcileConfig(BaseModel):
