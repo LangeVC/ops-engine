@@ -15,6 +15,13 @@ nothing on that destination.
 Criterion 3: RED PROOF — a softprops-style object (the tag name as title, an
 empty body) stays that way on the base commit and is converged by the change.
 
+Decision D1 also supersedes P36-003's "a release of another publisher is only
+recorded": an object the engine is told (``publisher_login``) was authored by
+another account is converged too — title, body and missing assets — while
+``report.publishers`` still names the publisher. With a ``publisher_login``
+given on the base commit that object returns early untouched; the red proof
+below fails there and passes with the change, for both forges.
+
 The softprops shape (wrong title AND empty body) exists in no older fixture, so
 the fixtures of P36-017/P36-018/OE-042a keep their exact PATCH assertions.
 
@@ -43,6 +50,8 @@ INSTALL_BLOCK = "pip install ops-engine"
 CHANGELOG_PATH = "CHANGELOG.md"
 FILES = ["ops_engine-3.5.1-py3-none-any.whl", "SHA256SUMS"]
 RELEASE_ID = 77
+ENGINE_LOGIN = "dev.bot_langevc"
+OTHER_LOGIN = "github-actions[bot]"
 
 
 def _full_body() -> str:
@@ -106,6 +115,9 @@ def _softprops_release(**over) -> dict:
         "zipball_url": f"https://forge.invalid/{REPO}/archive/{TAG}.zip",
     }
     release.update(over)
+    author = over.get("author")
+    if isinstance(author, str):
+        release["author"] = {"login": author}
     return release
 
 
@@ -183,12 +195,15 @@ def _make_artifacts(tmp_path) -> None:
 
 
 async def _publish(forge, adapter, tmp_path, *, release_body=FULL_BODY,
-                   ticket_prefixes=None, adapters=None, config=None):
+                   ticket_prefixes=None, adapters=None, config=None,
+                   publisher_login=""):
     _make_artifacts(tmp_path)
     audit: list[str] = []
     kwargs = {"release_body": release_body} if release_body is not None else {}
     if ticket_prefixes is not None:
         kwargs["ticket_prefixes"] = ticket_prefixes
+    if publisher_login:
+        kwargs["publisher_login"] = publisher_login
     report = await ReleaseHandler.publish_release(
         config if config is not None else _config(forge=forge),
         REPO, TAG, NOTES, tmp_path / "dist",
@@ -286,6 +301,49 @@ async def test_a_converged_object_is_complete_and_a_rerun_is_a_noop(
     assert dest.creates() == 0
     assert report.skipped == [label]
     assert report.failed == []
+
+
+# --- D1 supersedes P36-003: another publisher's object is converged too -----
+
+
+@pytest.mark.parametrize("forge,make", [("forgejo", _forgejo), ("github", _github)])
+@pytest.mark.asyncio
+async def test_another_publishers_softprops_object_is_converged_too(
+    forge, make, tmp_path
+):
+    """D1 (supersedes C1 / P36-003): a softprops-style object authored by
+    ANOTHER account, with ``publisher_login`` given, is converged exactly like
+    one without an author — the title to the template title, the body to the
+    CHANGELOG body, the missing files attached. ``report.publishers`` still
+    names the publisher, and nothing is created or deleted.
+
+    RED PROOF: on the base commit ``_judge_existing_release`` returns after
+    recording the destination ``up_to_date`` for an author that is not the
+    engine; no PATCH and no upload happen, so this test fails there."""
+    dest = FakeDestination(_softprops_release(author=OTHER_LOGIN))
+    report, audit = await _publish(
+        forge, make(dest), tmp_path, publisher_login=ENGINE_LOGIN,
+    )
+
+    label = f"{forge}:{REPO}"
+    patched = {}
+    for body in dest.patches:
+        patched.update(body)
+    assert patched.get("name") == GATED_TITLE
+    assert patched.get("body") == FULL_BODY
+    assert sorted(dest.uploads) == sorted(FILES)
+    assert dest.creates() == 0
+    assert not any(m == "DELETE" for m, _ in dest.calls)
+    assert report.supplemented == [label]
+    assert report.failed == []
+    assert report.up_to_date == []
+    # Attribution survives convergence: the publisher is still named.
+    assert report.publishers == {label: "other"}
+    # The audit names the old and the new title and says it was converged.
+    assert len(audit) == 1
+    assert "result=supplemented" in audit[0]
+    assert repr(TAG_TITLE) in audit[0]
+    assert repr(GATED_TITLE) in audit[0]
 
 
 # --- criterion 2: the audience gate runs before the write ------------------
