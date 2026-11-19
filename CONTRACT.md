@@ -1083,12 +1083,14 @@ serializes that state to a plain dict so a cockpit (or an operator) can see
 that a mirror is behind without parsing log lines.
 
 `PublicationReport` also carries three additive fields for the one-publisher
-contract (P36-003):
+contract (P36-003, as amended by decision D1):
 
-- `up_to_date` — destinations whose release for the tag already exists from
-  **another** publisher (the release's `author.login` does not name the engine's
-  own account). These destinations are recorded, never edited and never
-  duplicated.
+- `up_to_date` — destinations whose existing release for the tag already **is**
+  the intended state, so nothing was written. That includes a release from
+  **another** publisher (its `author.login` does not name the engine's own
+  account): under D1 such an object is judged and converged like any other (see
+  below), so only one that is already complete lands here. These destinations
+  are recorded, never edited and never duplicated.
 - `publishers` — a `dict[str, str]` mapping each destination label to `"engine"`
   (the release names the engine's own account) or `"other"`.
 - `publisher` — a convenience property returning `dict(self.publishers)`: the
@@ -1101,10 +1103,14 @@ one plain `str` used for every destination, or a `dict[str, str]` mapping
 credential-variable names to logins — the per-destination shape (P36-003 design
 C1). In the dict shape each destination is attributed from its own credential;
 a missing or empty entry fails that destination by name, and nothing there is
-supplemented, edited or duplicated. When `publisher_login` is absent (the empty
-string), the engine cannot attribute a release and falls back to the
-pre-P36-003 behaviour — a pre-existing release from any author is judged as
-before and may be edited, supplemented or failed. The production workflow
+supplemented, edited or duplicated. Attribution is a report fact, not a write
+gate: under D1 a release authored by another account is converged like any
+other — the intended title, the CHANGELOG body and any missing files are
+written, the old and new value are audited, and the object is never deleted or
+re-created — while `publishers` still names the publisher. When
+`publisher_login` is absent (the empty string), the engine cannot attribute a
+release and simply never fills `publishers`; the judgement of a pre-existing
+release is unchanged. The production workflow
 derives one login per destination credential, each from its own forge's
 identity endpoint: `GET /api/v1/user` for the Forgejo token and `GET /user` for
 the GitHub token. No operator-provisioned secret is required. The derivation is
@@ -1145,12 +1151,18 @@ against the supplied `release_body`, not the raw notes:
 
 - A destination release that does not exist is created with that body.
 - One that already exists with an empty body gets the body supplemented (patched
-  in, not re-created).
+  in, not re-created), and its title is set to the intended title.
+- An existing release missing files declared for the tag gets them uploaded;
+  nothing is deleted or re-created.
 - An existing release whose body does not contain the tag's CHANGELOG section
   is left untouched and fails that destination with a named error that names the
   difference — the same rule as the title and notes handling.
 - An existing release whose body already matches (the tag's CHANGELOG section is
   present) is left alone.
+- Attribution does not change those outcomes (D1): a release authored by
+  another account is judged and converged the same way, while `publishers`
+  still names the publisher. The only outcome specific to a foreign release is
+  a complete one, which is recorded `up_to_date` without a write.
 
 The `release_body` parameter is keyword-only and optional. When it is `None` or
 absent, the existing behaviour is unchanged: the body is the raw release notes,
@@ -1183,13 +1195,16 @@ create or supplement call. A private destination is not skipped.
 ### Run summary body state (P36-018)
 
 `PublicationReport.body_states` is a `dict[str, str]` mapping each destination
-label to one of four body-state values produced during publication:
+label to one of five body-state values produced during publication:
 
 - `"written"` — the release was created with the full body.
 - `"supplemented"` — the release existed with an empty body; the body was
-  patched in.
+  patched in. The same value records a foreign release that was converged
+  (title, body or missing files) under D1.
 - `"already_equal"` — the release existed and its body already contained the
   tag's CHANGELOG section.
+- `"up_to_date"` — the existing release already was the intended state; nothing
+  was written. This is the only outcome a complete foreign release can have.
 - `"failed: <detail>"` — the body lacked the CHANGELOG section; the destination
   is failed and the detail names the difference.
 
