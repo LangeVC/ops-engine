@@ -136,9 +136,12 @@ class FakeDestination:
             request.method == "GET"
             and path.endswith(f"/releases/{RELEASE_ID}/assets")
         ):
+            # Assets come back on the first page only: the adapters walk pages
+            # until one is empty.
             assets = list((self.release or {}).get("assets") or [])
             self.read_assets.append(assets)
-            return httpx.Response(200, json=assets)
+            page = request.url.params.get("page", "1")
+            return httpx.Response(200, json=assets if page == "1" else [])
         if request.method == "PATCH" and path.endswith(f"/releases/{RELEASE_ID}"):
             body = json.loads(request.content)
             self.release = {**(self.release or {}), **body}
@@ -149,9 +152,7 @@ class FakeDestination:
             name = request.url.params.get("name")
             data = request.content
             asset = {"name": name, "size": len(data)}
-            asset["digest"] = (
-                f"sha256:{_sha256(data)}" if self.forge == "github" else None
-            )
+            asset["digest"] = _sha256(data) if self.forge == "github" else None
             asset.update(self.tamper.get(name, {}))
             if name not in self.hidden:
                 self.uploaded.append(asset)
@@ -493,7 +494,7 @@ async def test_verification_reads_the_asset_list_and_downloads_nothing(tmp_path)
     )
 
     assert dest.read_assets, "the asset list was never read back"
-    assert all(name in dest.uploaded for name in FILES)
+    assert all(name in {a["name"] for a in dest.uploaded} for name in FILES)
     assert Counter(a["name"] for a in dest.uploaded) == Counter(
         {name: 1 for name in FILES}
     )
