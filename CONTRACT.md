@@ -1286,8 +1286,8 @@ out of the body.
 
 **Implementation (REA-018).** `compose_release_body` is the one composer
 (`src/ops_engine/modules/release.py:103`); `publish_release` calls it from the
-prologue (`:571`) after `_declared_release_body_parts` (`:1736`) has read the
-declaration, and the per-destination gate (`:786`) judges the result.
+prologue (`:585`) after `_declared_release_body_parts` (`:1736`) has read the
+declaration, and the per-destination gate (`:788`) judges the result.
 `_declared_tracker_prefixes` (`:1766`) supplies the declared vocabulary.
 `_release_tag` calls the same composer instead of building the string itself.
 The shipped workflow (`.forgejo/workflows/forgejo-release.yml`) now only carries
