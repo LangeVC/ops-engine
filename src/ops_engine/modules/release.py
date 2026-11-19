@@ -17,6 +17,7 @@ from ops_engine.modules.mirror import resolve_destinations
 from ops_engine.modules.notification import NotificationHandler
 from ops_engine.modules.release_gates import (
     MissingChangelogEntryError,
+    ReleaseNotesAudienceError,
     ReleaseTitleError,
     check_release_notes_audience,
     check_release_title,
@@ -102,16 +103,19 @@ class PublicationReport:
     published: list[str] = field(default_factory=list)
     failed: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
-    # Destinations whose existing release (made by someone else, with the notes
-    # of this build) got its title corrected and its missing files uploaded.
-    # Not failures: they are not in ``failed``.
+    # Destinations whose existing release was converged to the intended state
+    # (D1): title, body or missing files written. An object authored by
+    # another account is converged the same way. Not failures: they are not in
+    # ``failed``.
     supplemented: list[str] = field(default_factory=list)
     # label -> what an operator needs to read: the HTTP status and the
     # destination's existing release id (409/422), or what differs on an
     # existing release (incomplete). Both labels are also in ``failed``.
     failure_details: dict[str, str] = field(default_factory=dict)
-    # Destinations whose release for the tag already exists from ANOTHER
-    # publisher: recorded as up to date, never edited and never duplicated.
+    # Destinations whose existing release for the tag already is the intended
+    # state, so nothing was written: recorded as up to date, never edited and
+    # never duplicated. A release from ANOTHER publisher is converged like any
+    # other (D1, superseding P36-003); only a complete one lands here.
     # Not failures: they are not in ``failed``.
     up_to_date: list[str] = field(default_factory=list)
     # destination label -> who made the release found for the tag there:
@@ -398,24 +402,44 @@ class ReleaseHandler:
         than ``already_exists``) is a failure and carries ``http=<status>
         existing_release_id=<id>``, in the audit line and in the notification.
 
-        An existing release with the notes of this build (equal after
-        stripping) and a title equal to the gated title ignoring case and
-        whitespace is supplemented, not failed: the title is corrected and
-        exactly the missing files are uploaded; it is listed in
-        ``supplemented`` and the audit line reads ``result=supplemented``.
-        Files already attached are untouched; nothing is re-created or deleted. When any destination failed, one warning line is logged for
-        the whole call (the engine has no event log, D20).
+        An existing release is converged to the intended state (REA-012,
+        decision D1, which supersedes C1's "existing object only recorded"):
+        for the declared tag the title is set per the name template and the
+        body to the CHANGELOG body, and the object is never deleted or
+        re-created. An object with another title is PATCHed to the template
+        title; an empty body is filled with the CHANGELOG body; the audit line
+        names the old and the new title and lists the files attached. When the
+        title is equal ignoring case and whitespace, the notes of this build
+        (equal after stripping) are in place and only files are missing, it is
+        supplemented: the title is corrected and exactly the missing files are
+        uploaded. It is then listed in ``supplemented`` and the audit line
+        reads ``result=supplemented``. Files already attached are untouched;
+        nothing is re-created or deleted. When any destination failed, one
+        warning line is logged for the whole call (the engine has no event
+        log, D20).
+
+        ``release_body`` is the composed body (title, notes, install and
+        CHANGELOG link). With ``ticket_prefixes`` given, the external-audience
+        gate runs on that final body per destination before any write: a body
+        that names the author's tracker writes nothing on that destination and
+        fails it by name, while a destination with a clean body still
+        publishes. ``process_event`` keeps raising the refusal from its own
+        gate before any destination is considered; this path records it.
 
         ``publisher_login`` is the login the engine publishes as (P36-003). A
         repository can have two publishers — the engine and a repository-local
-        workflow — so a release that already exists on a destination is only
-        the engine's to touch when the release object's own ``author.login``
-        names that account. When it names another account the release is
-        recorded in ``up_to_date`` and neither edited nor duplicated; the
-        report's ``publisher`` says ``engine`` or ``other``. Without the
-        parameter the engine cannot attribute a release and every release found
-        is judged as before. An undeterminable author degrades to ``other``,
-        never to a false ``engine``.
+        workflow — so the release object's own ``author.login`` is read and
+        the report's ``publisher`` says ``engine`` or ``other``. Attribution
+        does NOT exempt an object from judgement: decision D1 supersedes
+        P36-003's "recorded only", so a release authored by another account is
+        converged to the intended state (title per the template, the CHANGELOG
+        body, the missing files) exactly like one without an author; it is
+        edited in place, never deleted or duplicated. A foreign release that
+        already IS the intended state writes nothing and is recorded in
+        ``up_to_date``. Without the parameter the engine cannot
+        attribute a release and every release found is judged as before. An
+        undeterminable author degrades to ``other``, never to a false
+        ``engine``.
 
         A ``dict[str, str]`` maps credential-variable names to logins (one
         login per destination, P36-003 design C1). Any dict (including an
@@ -496,13 +520,6 @@ class ReleaseHandler:
         # summary lists the reason.
         _is_rc = _RC_TAG_RE.match(tag_name)
 
-        # P36-017 criterion 3: the external-audience gate runs on the
-        # FINAL body before any destination write. The gate runs here
-        # because the shipped workflow calls publish_release directly
-        # and composes the body itself — the gate must be in this path.
-        if release_body is not None and ticket_prefixes:
-            check_release_notes_audience(release_body, ticket_prefixes)
-
         for destination, adapter in paired:
             label = _destination_label(destination)
             # A release destination without explicit visibility is public
@@ -539,6 +556,23 @@ class ReleaseHandler:
                                   f"publisher_login unavailable for "
                                   f"credential_variable {destination.credential_variable!r}")
                 continue
+            # REA-012 (D1): the external-audience gate runs on the FINAL body
+            # before any write on this destination, and only this destination
+            # is refused when the body names the author's tracker. The gate
+            # runs here because the shipped workflow calls publish_release
+            # directly and composes the body itself — the gate must be in this
+            # path — and per destination because one refused body must not
+            # stop another destination whose body is clean.
+            if release_body is not None and ticket_prefixes:
+                try:
+                    check_release_notes_audience(release_body, ticket_prefixes)
+                except ReleaseNotesAudienceError as exc:
+                    logger.error(f"partial publication: {label} failed: {exc}")
+                    report.failed.append(label)
+                    report.body_states[label] = f"failed: {exc}"
+                    report.failure_details[label] = str(exc)
+                    _audit_destination(audit, tag_name, label, "failed", str(exc))
+                    continue
             try:
                 if skip_existing and await adapter.release_exists(
                     destination.repo, tag_name
@@ -786,39 +820,41 @@ async def _judge_existing_release(
     judgement — skipped, incomplete or supplemented — so the duplicate answer
     is named next to the destination. The pre-flight path passes nothing.
 
-    With ``publisher_login`` given, a release the destination already holds and
-    that names ANOTHER account as its author is one publisher's release per
-    repository (P36-003): recorded in ``up_to_date``, neither edited nor
-    duplicated, and the publisher is named per destination. Any other release
-    is judged as before — supplemented, incomplete, or skipped.
+    With ``publisher_login`` given, the release the destination already holds
+    is attributed to ``engine`` or ``other`` in ``report.publishers``. An
+    author that is another account does NOT exempt the object from judgement:
+    decision D1 (which supersedes C1 / P36-003) converges it like any other —
+    title, body and missing assets — and never deletes or re-creates it. Only
+    a foreign release that already is complete (nothing to write) is recorded
+    in ``up_to_date``; the publisher is named per destination either way.
 
     With ``release_body`` given (P36-017), an existing release whose body is
     empty gets the body supplemented (patched in), and one whose body does not
     contain the tag's CHANGELOG section is left untouched and fails that
     destination with a named error.
     """
+    # Attributing the release to a publisher is a report fact, not a write
+    # gate: it never exempts the object from convergence (D1 supersedes
+    # P36-003). Only a release that NAMES another account is provably
+    # someone else's; one without an author is attributed ``other`` but keeps
+    # the historical judgement.
+    foreign = False
     if publisher_login:
         found = await adapter.find_release(destination.repo, tag_name)
         if isinstance(found, dict) and found:
             publisher = _publisher_of(found, publisher_login)
             report.publishers[label] = publisher
-            # Only a release that NAMES another account is someone else's; one
-            # without an author proves nothing and is judged as before.
-            if publisher == "other" and _release_author(found):
+            foreign = publisher == "other" and bool(_release_author(found))
+            if foreign:
                 logger.info(
                     f"Release {tag_name} on {label} was published by another "
-                    "publisher, leaving it untouched"
+                    "publisher; converging it to the intended state (D1)"
                 )
-                report.up_to_date.append(label)
-                report.body_states[label] = "up_to_date"
-                _audit_destination(
-                    audit, tag_name, label, "up-to-date", f"publisher={publisher}"
-                )
-                return
     if release_body is not None:
         if await _try_supplement_body(
             adapter, destination, report, audit, tag_name, label,
-            release_body, release_notes, artifacts, duplicate_detail=duplicate_detail,
+            release_name, release_body, release_notes, artifacts,
+            duplicate_detail=duplicate_detail,
         ):
             return
         # Body already contains the CHANGELOG section.  Use the existing
@@ -843,6 +879,21 @@ async def _judge_existing_release(
             report, audit, tag_name, label, problems, duplicate_detail=duplicate_detail
         )
         return
+    if foreign:
+        # Nothing differs from what this build would write, and the object was
+        # authored by another account: recorded up to date without a write.
+        # Under D1 that is the only outcome left for a foreign release — an
+        # incomplete one is converged above, never left behind.
+        logger.info(
+            f"Release {tag_name} on {label} already holds the intended state"
+        )
+        report.up_to_date.append(label)
+        report.body_states[label] = "up_to_date"
+        _audit_destination(
+            audit, tag_name, label, "up-to-date",
+            _with_duplicate(duplicate_detail, "publisher=other"),
+        )
+        return
     logger.info(f"Release {tag_name} already exists on {label}, skipping")
     report.skipped.append(label)
     report.body_states.setdefault(label, "skipped")
@@ -856,23 +907,27 @@ async def _try_supplement_body(
     audit: Optional[list[str]],
     tag_name: str,
     label: str,
+    release_name: str,
     release_body: str,
     release_notes: str,
     artifacts: list[tuple[str, bytes]],
     duplicate_detail: str = "",
 ) -> bool:
-    """Judge an existing release with the body-writer rule (P36-017).
+    """Judge an existing release with the body-writer rule (P36-017, REA-012).
 
-    Returns True when the destination was handled (body supplemented or
-    failed); False means the caller should continue with the existing
+    Returns True when the destination was handled (converged, failed, or
+    retitled); False means the caller should continue with the existing
     supplement/title/asset logic.
 
-    Rule: when the existing release has an empty body, the full body is
-    patched in and the destination is recorded as supplemented. When the
-    body does not contain the tag's CHANGELOG section, the destination is
-    failed with a named error that names the difference. Otherwise
-    (body already contains the CHANGELOG), the caller keeps judging as
-    before.
+    Rule (REA-012 / D1): an existing release with an empty body is converged —
+    the title to ``release_name`` per the template when it differs, the body
+    to ``release_body`` (the CHANGELOG section under heading and install
+    block), and exactly the files of this build that are not attached. An
+    object whose body is already exactly ``release_body`` is retitled when its
+    title differs and left alone otherwise. When the body does not contain
+    the tag's CHANGELOG section, the destination is failed with a named error
+    that names the difference and nothing is written there. Nothing is
+    re-created or deleted.
     """
     found = await adapter.find_release(destination.repo, tag_name)
     if not isinstance(found, dict) or found.get("id") is None:
@@ -880,25 +935,47 @@ async def _try_supplement_body(
     existing_body = (found.get("body") or "").strip()
 
     if not existing_body:
-        # Empty body: supplement with the full body.
+        # REA-012 (D1): converge the object — the title per the template and
+        # the body to the CHANGELOG section. The two adapter calls stay
+        # single-field writes (the adapter API exposes one field per call),
+        # and the title is written first so a failure leaves the body as
+        # found. Nothing is deleted or re-created.
+        title = found.get("name")
+        retitle = not (isinstance(title, str) and title == release_name)
+        attached = {
+            a.get("name") for a in (found.get("assets") or []) if isinstance(a, dict)
+        }
+        missing = [(n, d) for n, d in artifacts if n not in attached]
         try:
+            if retitle:
+                await adapter.update_release_title(
+                    destination.repo, found["id"], release_name
+                )
             await adapter.update_release_body(
                 destination.repo, found["id"], release_body
             )
+            for name, data in missing:
+                await adapter.upload_release_asset(
+                    repo_full_name=destination.repo,
+                    release_id=found["id"],
+                    asset_name=name,
+                    data=data,
+                )
         except NotImplementedError:
             return False
-        logger.info(
-            f"Release {tag_name} on {label} body supplemented "
-            f"(was empty)"
-        )
+        parts = [f"existing_release_id={found['id']}"]
+        if retitle:
+            parts.append(f"title corrected from {title!r} to {release_name!r}")
+        parts.append("body supplemented (was empty)")
+        if missing:
+            parts.append("uploaded: " + ", ".join(n for n, _ in missing))
+        detail = "; ".join(parts)
+        logger.info(f"Release {tag_name} on {label} converged: {detail}")
         report.supplemented.append(label)
         report.body_states[label] = "supplemented"
         _audit_destination(
             audit, tag_name, label, "supplemented",
-            _with_duplicate(
-                duplicate_detail,
-                f"existing_release_id={found['id']} body supplemented (was empty)",
-            ),
+            _with_duplicate(duplicate_detail, detail),
         )
         return True
 
@@ -920,7 +997,47 @@ async def _try_supplement_body(
         )
         return True
 
-    # Body already contains the CHANGELOG section: already equal.
+    # Body already contains the CHANGELOG section: already equal. REA-012
+    # (D1): when it is exactly the body this call would write and the title
+    # differs, the title is converged to the template and the missing files
+    # are attached — the whole object converges, not only an empty one.
+    title = found.get("name")
+    if existing_body == release_body.strip() and not (
+        isinstance(title, str) and title == release_name
+    ):
+        attached = {
+            a.get("name") for a in (found.get("assets") or []) if isinstance(a, dict)
+        }
+        missing = [(n, d) for n, d in artifacts if n not in attached]
+        try:
+            await adapter.update_release_title(
+                destination.repo, found["id"], release_name
+            )
+            for name, data in missing:
+                await adapter.upload_release_asset(
+                    repo_full_name=destination.repo,
+                    release_id=found["id"],
+                    asset_name=name,
+                    data=data,
+                )
+        except NotImplementedError:
+            return False
+        parts = [
+            f"existing_release_id={found['id']}",
+            f"title corrected from {title!r} to {release_name!r}",
+        ]
+        if missing:
+            parts.append("uploaded: " + ", ".join(n for n, _ in missing))
+        detail = "; ".join(parts)
+        logger.info(f"Release {tag_name} on {label} converged: {detail}")
+        report.supplemented.append(label)
+        report.body_states[label] = "supplemented"
+        _audit_destination(
+            audit, tag_name, label, "supplemented",
+            _with_duplicate(duplicate_detail, detail),
+        )
+        return True
+
     # The body_states entry is recorded here, but we return False so the
     # caller continues with the existing supplement/title/asset logic
     # (P36-017/P36-003). The body_states entry is kept even if the
