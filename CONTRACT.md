@@ -1336,6 +1336,80 @@ The change is **additive**: `PublicationReport` gains an optional
 `verified` field defaulting to `{}`; `to_dict()` keeps its existing keys; and
 a run with no declaration emits exactly the audit lines it did before.
 
+### Release manifest: producer and destination per piece (REA-016)
+
+`release.manifest` (`ReleaseConfig.manifest`, an optional key, default absent)
+is the **additive extension** of the REA-010 `release.assets` declaration. It
+names, per piece, the forge that produces it and the destinations that must
+hold it:
+
+```yaml
+release:
+  manifest:
+    deadline_minutes: 60          # optional, default 60, overridable per repo
+    assets:
+      - type: github_release_tarball      # github_release_zip | github_release_tarball
+        name: ops-engine-tool-<version>-linux-amd64.tar.gz
+        producer: github                  # forgejo | github (default forgejo)
+        destinations: ['github:langevc/ops-engine']   # default: <producer>:<repo>
+    channels:
+      - channel: pypi                     # pypi | ghcr | homebrew | winget
+        name: ops-engine
+        producer: github
+```
+
+An **absent block** means every asset is forgejo-produced and required at once
+— exactly the REA-014 behaviour, unchanged. A piece's `name` takes the same
+`<version>`/`<tag>` placeholders as `release.assets`, rendered from the tag.
+`producer` is one of `forgejo`/`github`; an unknown producer, a channel that
+is not one of the four, or a non-release-object type (e.g. `ghcr_image`) under
+`manifest.assets` is refused, naming `release.manifest`. A `ghcr_image` is a
+*channel*, declared under `manifest.channels`, not a release-object asset.
+
+Per destination, after create/converge/attach:
+
+- **Forgejo-produced piece absent** — required at once. The destination fails
+  and the detail names the piece and the producer. This holds for a channel
+  too: a forgejo-published PyPI package, image or tap is red on absence, with
+  no grace.
+- **GitHub-produced piece absent, deadline not passed** — *pending*, not an
+  error. The destination stays in `published`; `PublicationReport.pending`
+  records `"<name> producer=github since=<iso>"` for it and the audit line is
+  `release-publish tag=<tag> dest=<forge:repo> result=pending <pieces>`.
+- **GitHub-produced piece absent, deadline passed** — red. The destination is
+  moved to `failed`, and `failure_details` names the piece, its producer and
+  the destination label; the audit line is
+  `result=manifest-failed manifest not satisfied on <label>: <pieces>`.
+- **Piece present** — verified like any declared file: `PublicationReport.verified`
+  gains `"<name> sha256:<hex>"` and the destination's line is `result=verified`.
+
+The deadline is `manifest.deadline_minutes` (default 60) and runs from the
+release object's own `created_at` on the destination that carries the run's
+release; a destination without a timestamp starts the clock at the run. A
+manifest destination this run does not publish to (D4: a GitHub-built binary on
+a GitHub destination another workflow owns) is still named, but this run never
+reads it and therefore holds no evidence against any piece there: its pieces
+are recorded as `pending`, never red, and never on another destination's clock.
+
+The channels are read **read-only**, the way capacium's `verify-channels` step
+reads them (`ops_engine.modules.asset_manifest.evaluate_channels`): a present
+channel is satisfied; an absent `github`-produced channel is pending within the
+deadline and failed after it, while an absent `forgejo`-produced channel is
+failed at once (the producer rule of the release-object pieces); an unprobeable
+one (`winget`, or any read error) is `manual` and is never a failure — unknown
+is not a verdict. A channel is labelled `<channel>:<name>`; a satisfied one is
+audited as `result=channel-satisfied` and a manual one as
+`result=channel-manual`, while a pending or failed one uses the same
+`result=pending`/`result=manifest-failed` lines and report buckets as a
+release-object piece. `HttpxChannelReader` issues `GET` only; a caller may
+inject its own reader through the `channel_reader` keyword of
+`publish_release` (and `ReleaseContext.channel_reader`).
+
+The change is **additive**: `PublicationReport` gains an optional `pending`
+field defaulting to `{}`; `to_dict()` keeps its existing keys; and a run with
+no manifest (or with only forgejo-produced pieces) emits exactly the audit
+lines it did before.
+
 `RepoConfig.release_body_install_block: str = ""`
 `RepoConfig.release_body_assets_line: str = ""`
 
