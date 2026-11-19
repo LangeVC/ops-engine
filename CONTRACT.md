@@ -401,6 +401,40 @@ under the same name; a refusal names the repository whose release block declared
 the template, and the other repositories of the same run keep running. Without a
 configured template the release keeps the derived default.
 
+## Release assets declaration
+
+`release.assets` (`ReleaseConfig.assets`, an optional key, default absent) is a
+repository's declaration of the artifacts a release must carry. It is
+**additive and optional**: an absent key, a YAML `null`, and the bare string
+`none` the layover writes all mean "no required assets", so a config that does
+not declare it behaves exactly as before. An explicit `none`/`null` is still a
+declaration: in a Layer-3 `.ops.yaml` it clears a Layer-2 `assets` list instead
+of leaving it in force. The key is not a `model_fields`
+entry — it is read and validated as it is parsed, and exposed through
+`ReleaseConfig.assets`, which is `None` or a sequence of declarations.
+
+A declaration is a mapping with a required `type`, one of
+`github_release_zip`, `github_release_tarball`, `ghcr_image` and
+`capacium_exchange`. `github_release_*`, `ghcr_image` and any other type
+require `name`; `capacium_exchange` requires `via` (the workflow step that
+publishes it) instead. `frameworks` is an optional list for the types that
+fan out over a matrix. Any other key inside a declaration is refused: a typo
+is a refusal, never a silently ignored key.
+
+The declarations belong to the release block, so they take part in the layer
+merge as that block's value: a Layer-3 `.ops.yaml` that declares
+`release.assets` makes the resolved config carry those declarations, replacing
+the Layer-2 release block whole. An unknown type, a declaration missing the key
+its type requires, an unknown key inside a declaration, or an `assets` value
+that is neither a list nor `none`/`null` is refused. From a `.ops.yaml` the
+refusal is `OpsYamlError` naming the `.ops.yaml` file; from the layover
+`config.yml` it is `ConfigSectionError` naming the `release` section. In both
+cases the detail names `release.assets` and the offending entry.
+
+The change is a **minor** bump: it adds an optional key to a previously-sealed
+config model and removes nothing, so a consumer pinned to the current version
+is unaffected until it chooses to read the key.
+
 ## Release reconcile entry point
 
 `ReconcileHandler.reconcile_release_tags` (`ReconcileHandler` is a `contract`
