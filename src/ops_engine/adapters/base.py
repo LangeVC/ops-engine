@@ -123,6 +123,20 @@ class ForgeAdapter(ABC):
         """
         return None
 
+    async def list_release_assets(
+        self, repo_full_name: str, release_id: int
+    ) -> list[dict[str, Any]]:
+        """Return the assets attached to a release, every page.
+
+        Each item is the forge's own asset object: ``name`` and ``size``, and
+        where the forge exposes it a ``digest`` (``sha256:<hex>`` on GitHub;
+        Forgejo reports ``null``). Not abstract: the default answers an empty
+        list, meaning "no asset details known", so a caller never invents a
+        mismatch for an adapter that cannot list them. An implementation must
+        walk every page — a page limit must never truncate the list.
+        """
+        return []
+
     async def update_release_title(
         self, repo_full_name: str, release_id: int, name: str
     ) -> dict[str, Any]:

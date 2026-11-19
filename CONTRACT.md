@@ -1177,6 +1177,48 @@ async method on the internal adapter base class, implemented by
 forge's API to update the body field of an existing release; neither re-creates
 or deletes the release object.
 
+### Release asset attachment (REA-013)
+
+Each file of the build is attached to the release on every destination, by
+name, idempotently. `ForgeAdapter.list_release_assets(repo_full_name,
+release_id)` is an async method on the internal adapter base class that returns
+the release's assets, **every page**: each item is the forge's own asset
+object, `{"name": ..., "size": ...}` and, where the forge exposes it, a
+`"digest"`. It is **not abstract** and its default answers `[]` ("no asset
+details known"), so an adapter — or a test fake — that cannot list assets keeps
+working for every other call and a caller never invents a mismatch from a
+missing list. `ForgejoAdapter` and `GithubAdapter` both implement it as
+`GET /repos/{repo}/releases/{id}/assets` through the shared page walker (a page
+limit never truncates the list).
+
+The comparison against the build's own bytes, which are on disk and never
+downloaded (REL-010), comes from a SHA-256 computed locally:
+
+- **GitHub** asset objects expose `digest` as `sha256:<hex>`; a name present
+  with a different digest is a **conflict**.
+- **Forgejo** asset objects report `digest: null` (measured 2026-07-28) but
+  expose `size`; the comparison falls back to `size`, and a different size is a
+  conflict.
+- An asset that carries neither a digest nor a size (the bare `{"name": ...}`
+  shape of older fixtures) cannot be proven different and stays a **no-op**.
+
+The outcomes per destination:
+
+- A name absent from the release is uploaded once — on a freshly created
+  release, on an empty-body supplement, on a title correction, and on a rerun
+  that finds only some names attached.
+- A name present with the same digest (or the same size where no digest is
+  exposed) is a no-op: attaching twice leaves one asset per name and writes
+  nothing on the second run.
+- A name present with **another** digest fails that destination **by name**,
+  and the existing asset is unchanged: no upload, no patch, no delete. The
+  failure detail names the file and both the recorded and the expected digest
+  (or size), beside any title or body difference.
+
+The change is **additive**: `list_release_assets` is a new, non-abstract read
+method; `upload_release_asset` keeps its shape; and the existing upload path
+(create then attach) now uploads only the names the release lacks.
+
 `RepoConfig.release_body_install_block: str = ""`
 `RepoConfig.release_body_assets_line: str = ""`
 

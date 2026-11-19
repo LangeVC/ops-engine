@@ -184,6 +184,16 @@ class ForgejoAdapter(ForgeAdapter):
         )
         return resp.json()
 
+    async def list_release_assets(
+        self, repo_full_name: str, release_id: int
+    ) -> list[dict[str, Any]]:
+        # GET /repos/{repo}/releases/{id}/assets, every page. A Forgejo asset
+        # object carries ``name`` and ``size`` and reports ``digest`` as null
+        # (measured 2026-07-28), so a comparison must fall back to ``size``.
+        return await self._list_all_pages(
+            f"/repos/{repo_full_name}/releases/{release_id}/assets"
+        )
+
     async def update_release_title(
         self, repo_full_name: str, release_id: int, name: str
     ) -> dict[str, Any]:

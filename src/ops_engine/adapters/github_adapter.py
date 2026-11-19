@@ -175,6 +175,15 @@ class GithubAdapter(ForgeAdapter):
         )
         return resp.json()
 
+    async def list_release_assets(
+        self, repo_full_name: str, release_id: int
+    ) -> list[dict[str, Any]]:
+        # GET /repos/{repo}/releases/{id}/assets, every page. GitHub's asset
+        # objects carry ``name``, ``size`` and a ``digest`` ("sha256:<hex>").
+        return await self._list_all_pages(
+            f"/repos/{repo_full_name}/releases/{release_id}/assets"
+        )
+
     async def update_release_title(
         self, repo_full_name: str, release_id: int, name: str
     ) -> dict[str, Any]:
