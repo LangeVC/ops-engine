@@ -1188,6 +1188,29 @@ it.
 
 ### Release body (P36-017)
 
+**Measurement at 2f5c255 (REA-018).** The P36-017 writer **exists** at
+`2f5c25588dfd3bcad304438d6df5d1e7bb32dae7`: it is fully implemented there and
+`tests/test_release_body_writer.py` is green (15 passed) against a clean
+`git archive` of that commit. file:line at 2f5c255:
+
+- `src/ops_engine/modules/release.py:226-227` — `ReleaseContext`
+  `release_body_install_block` / `release_body_assets_line`.
+- `src/ops_engine/modules/release.py:1188-1198` — the per-repository
+  declaration read through `load_ops_yaml` at the tag.
+- `src/ops_engine/modules/release.py:1230-1248` — the five-part composition and
+  `check_release_notes_audience(body, ...)` on the final body.
+- `src/ops_engine/config_loader.py:470-471` — the two `RepoConfig` fields;
+  `:848-849` — their merge into the resolved repo config.
+- `.forgejo/workflows/forgejo-release.yml:941-983` — the workflow composing the
+  same body itself and passing it as `release_body`.
+
+The writer is therefore not the gap. The composition lives in the **callers**
+(`_release_tag` in the webhook path and the shipped workflow), not in
+`publish_release`; a caller that passes raw notes without a composed
+`release_body` (for example the attach path) still produces a body without the
+declared install block. REA-018 moves the composition into the engine so every
+caller and every destination gets it.
+
 `publish_release` accepts an optional keyword-only `release_body: str | None`
 parameter. When given, it is used as the full release body on every destination
 instead of the raw release notes. The body is composed by the caller (the
