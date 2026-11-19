@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -91,8 +92,6 @@ def request_from_args(
         AttachUsageError: the config file cannot be read or parsed, or the
             artifact directory is not a directory.
     """
-    import os
-
     env = os.environ if environment is None else environment
     try:
         config = load_config_file(args.config)
@@ -117,11 +116,14 @@ def request_from_args(
             credentials[variable] = Credential(token=token)
 
     notes = ""
-    if args.notes_file:
-        notes = Path(args.notes_file).read_text(encoding="utf-8")
     release_body = None
-    if args.body_file:
-        release_body = Path(args.body_file).read_text(encoding="utf-8")
+    try:
+        if args.notes_file:
+            notes = Path(args.notes_file).read_text(encoding="utf-8")
+        if args.body_file:
+            release_body = Path(args.body_file).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise AttachUsageError(f"cannot read a text input: {exc}") from exc
 
     return AttachRequest(
         config=config,

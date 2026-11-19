@@ -490,3 +490,36 @@ async def test_a_superseded_skipped_line_does_not_survive_a_verify_failure(tmp_p
     assert len(label_lines) == 1, label_lines
     assert "result=verify-failed" in label_lines[0]
     assert "not-built-3.5.1.zip" in label_lines[0]
+
+
+# --- Named input errors are the usage exit code, never a traceback ----------
+
+
+def test_a_missing_artifact_directory_is_a_named_usage_error(tmp_path, monkeypatch, capsys):
+    """Exit 2: the run cannot start; the JSON says why and there is no
+    destination entry."""
+    monkeypatch.setenv("OPS_TOKEN", "rw-token")
+    argv = _argv(tmp_path, _config_file(tmp_path, "forgejo", assets=DECLARED))
+    argv[argv.index("--artifacts") + 1] = str(tmp_path / "absent")
+
+    code = main(argv, adapters=[])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 2
+    assert payload["ok"] is False and payload["exit_code"] == 2
+    assert "artifact directory" in payload["error"]
+    assert payload["destinations"] == []
+
+
+def test_an_unreadable_config_is_a_named_usage_error(tmp_path, capsys):
+    """Exit 2: a config file that does not parse is refused by name."""
+    bad = tmp_path / "bad.yml"
+    bad.write_text("orgs: [\n", encoding="utf-8")
+    argv = _argv(tmp_path, bad)
+    _artifacts(tmp_path)
+
+    code = main(argv, adapters=[])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 2
+    assert payload["error"].startswith("cannot load config")
