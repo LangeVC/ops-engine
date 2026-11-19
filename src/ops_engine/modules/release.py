@@ -6,6 +6,7 @@ import logging
 import re
 import tempfile
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -13,7 +14,14 @@ import httpx
 
 from ops_engine.adapters.base import ForgeAdapter
 from ops_engine.adapters.factory import Credential, MissingCredentialError, adapters_for
-from ops_engine.config_loader import Destination, OpsEngineConfig, ReleaseConfig, load_ops_yaml
+from ops_engine.config_loader import (
+    AssetManifest,
+    Destination,
+    OpsEngineConfig,
+    ReleaseConfig,
+    load_ops_yaml,
+)
+from ops_engine.modules.asset_manifest import deadline_passed, parse_timestamp
 from ops_engine.modules.mirror import resolve_destinations
 from ops_engine.modules.notification import NotificationHandler
 from ops_engine.modules.release_gates import (
@@ -132,6 +140,10 @@ class PublicationReport:
     # read-back, each as ``"<name> sha256:<hex>"`` of the build's own bytes.
     # Empty when the repo declares no release-object asset.
     verified: dict[str, list[str]] = field(default_factory=dict)
+    # REA-016: destination label -> the manifest pieces still on their way,
+    # each as ``"<name> producer=<forge> since=<iso>"``. A pending piece is
+    # not a failure: it is a github-produced asset inside the deadline.
+    pending: dict[str, list[str]] = field(default_factory=dict)
 
     @property
     def publisher(self) -> dict[str, str]:
@@ -474,21 +486,76 @@ class ReleaseHandler:
         # Empty: nothing to verify, and the destination keeps its historic
         # single audit line.
         declared = _declared_release_asset_names(config, repo, repo_dir, tag_name)
+        # REA-016: the manifest's pieces per destination label. None means the
+        # repo declares no manifest, so every asset is forgejo-produced and
+        # required at once (the REA-014 behaviour, unchanged).
+        manifest = _resolved_manifest(config, repo, repo_dir)
+        requirements = (
+            _manifest_requirements(manifest, repo, tag_name)
+            if manifest is not None else {}
+        )
+        now = datetime.now(timezone.utc)
 
         report = PublicationReport(repo=repo, tag_name=tag_name)
 
         async def _verify(adapter: ForgeAdapter, destination: Destination,
-                          label: str) -> None:
-            # Nothing declared: nothing to check. A destination the judgement
-            # just failed (an incomplete object) is not verified — its outcome
-            # already names the difference, and a second line saying the set
-            # looked right would contradict it.
-            if not declared or label in report.failed:
-                return
-            await _verify_destination_assets(
-                adapter, destination, report, audit, tag_name, label,
-                declared, artifacts,
+                          label: str) -> bool:
+            """Check a destination after publication; True if it audited itself.
+
+            Without a manifest this is the REA-014 read-back: every declared
+            file must be attached, and a failure is ``verify-failed``. With a
+            manifest each piece carries a producer: a github-produced piece
+            still on its way is pending inside the deadline and red after it,
+            while a forgejo-produced piece is required at once (D4/D5).
+            """
+            # A destination the judgement just failed (an incomplete object) is
+            # not verified — its outcome already names the difference, and a
+            # second line saying the set looked right would contradict it.
+            if label in report.failed:
+                return True
+            # No manifest: the REA-014 read-back, unchanged. With nothing
+            # declared either there is nothing to check and the destination
+            # keeps its historic single ``published`` line.
+            if manifest is None:
+                if not declared:
+                    return False
+                await _verify_destination_assets(
+                    adapter, destination, report, audit, tag_name, label,
+                    declared, artifacts,
+                )
+                return True
+            # A manifest that names no piece for this destination leaves it
+            # alone (D4: a GitHub-built binary stays on GitHub). A declared
+            # REA-010 file is still a build file and is still read back.
+            pieces = requirements.get(label, ())
+            if not pieces and not declared:
+                return False
+            try:
+                found = await adapter.find_release(destination.repo, tag_name)
+                if not isinstance(found, dict) or found.get("id") is None:
+                    _fail_verification(
+                        report, audit, tag_name, label,
+                        [f"release for {tag_name} not found after publication"],
+                    )
+                    return True
+                assets = await adapter.list_release_assets(
+                    destination.repo, found["id"]
+                )
+            except Exception as exc:  # noqa: BLE001 (record — the report, not abort)
+                _fail_verification(
+                    report, audit, tag_name, label, [f"read-back failed: {exc}"]
+                )
+                return True
+            # The pending deadline runs from the release object's own creation
+            # time; a destination that does not report one starts the clock at
+            # this run, which can only make a piece pending for longer, never
+            # red sooner.
+            since = parse_timestamp(found.get("created_at")) or now
+            await _judge_manifest_pieces(
+                adapter, destination, audit, report, tag_name, label,
+                manifest, pieces, declared, assets, artifacts, since, now,
             )
+            return True
 
         if adapters is not None:
             if len(adapters) != len(destinations):
@@ -649,8 +716,8 @@ class ReleaseHandler:
                 # REA-014: check the published set on read-back before the
                 # destination counts as published. With nothing declared this
                 # skips and the line stays ``result=published``.
-                await _verify(adapter, destination, label)
-                if not declared:
+                audited = await _verify(adapter, destination, label)
+                if not audited:
                     _audit_destination(audit, tag_name, label, "published")
 
         if report.partial:

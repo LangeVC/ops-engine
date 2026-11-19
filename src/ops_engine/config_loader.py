@@ -259,6 +259,79 @@ class _AssetDeclaration(BaseModel):
     frameworks: list[str] = Field(default_factory=list)
 
 
+# REA-016: the manifest declares, per piece, who produces it and which
+# destinations must hold it. Only these two types are assets OF the release
+# object; a ghcr image and the capacium exchange are channels (published
+# elsewhere) and are declared under ``manifest.channels``.
+RELEASE_MANIFEST_ASSET_TYPES: tuple[str, ...] = (
+    "github_release_tarball",
+    "github_release_zip",
+)
+MANIFEST_PRODUCERS: tuple[str, ...] = ("forgejo", "github")
+# The channels capacium's ``verify-channels`` step reads read-only. winget has
+# no read-only probe and is reported as manual, never as a failure.
+MANIFEST_CHANNELS: tuple[str, ...] = ("pypi", "ghcr", "homebrew", "winget")
+
+
+def _require_manifest_producer(entry: dict, where: str) -> None:
+    """Refuse a manifest piece whose producer is not a known forge."""
+    producer = entry.get("producer", "forgejo")
+    if producer not in MANIFEST_PRODUCERS:
+        raise ValueError(
+            f"{where} declares producer {producer!r}; release.manifest accepts "
+            f"one of {list(MANIFEST_PRODUCERS)}"
+        )
+
+
+class ReleaseManifestAsset(BaseModel):
+    """One piece of ``release.manifest.assets`` (REA-016).
+
+    ``producer`` names the forge that builds the piece; a ``github``-produced
+    piece is pending until the manifest's deadline, a ``forgejo``-produced one
+    is required at once. ``destinations`` lists the destination labels that
+    must hold it; empty means the producer's own forge (``github:org/repo``),
+    so a GitHub-built binary stays on GitHub (D4).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: str
+    name: str
+    producer: str = Field(default="forgejo")
+    destinations: list[str] = Field(default_factory=list)
+
+
+class ReleaseManifestChannel(BaseModel):
+    """One channel of ``release.manifest.channels`` (REA-016).
+
+    Channels are read read-only, the way capacium's ``verify-channels`` step
+    reads them: presence and nothing else.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    channel: str
+    name: str
+    producer: str = Field(default="forgejo")
+
+
+class AssetManifest(BaseModel):
+    """The parsed ``release.manifest`` block (REA-016).
+
+    ``deadline_minutes`` is how long a github-produced piece may be pending
+    before the run is red; 60 by default, overridable per repository. The block
+    is the additive, optional extension of the REA-010 ``release.assets``
+    declaration: an absent block means every asset is forgejo-produced and
+    required at once.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    deadline_minutes: int = Field(default=60, ge=0)
+    assets: list[ReleaseManifestAsset] = Field(default_factory=list)
+    channels: list[ReleaseManifestChannel] = Field(default_factory=list)
+
+
 class ReleaseConfig(BaseModel):
     """Configuration for automatic release creation.
 
@@ -268,6 +341,11 @@ class ReleaseConfig(BaseModel):
     is unchanged and a block that does is read instead of dropped. An absent
     key, a YAML ``null`` and the fleet's bare ``assets: none`` all mean "no
     required assets".
+
+    ``manifest`` (REA-016) is the optional extension of that declaration: per
+    piece, its producer and the destinations that must hold it, plus the
+    channels. It is an extra for the same reason as ``assets``: an absent block
+    leaves the release block exactly as it was.
     """
 
     model_config = ConfigDict(extra="allow")
@@ -359,6 +437,105 @@ class ReleaseConfig(BaseModel):
         overridden["assets"] = tuple(parsed)
         return overridden
 
+    @model_validator(mode="before")
+    @classmethod
+    def _parse_manifest(cls, data: Any) -> Any:
+        """Refuse a malformed ``release.manifest`` block, naming the key.
+
+        The manifest is the REA-016 extension of ``release.assets``: it declares
+        per piece its producer and the destinations that must hold it. It is
+        parsed here, before pydantic's field handling, so the reason names
+        ``release.manifest`` rather than an opaque model error — the callers
+        that wrap a ``ValidationError`` then add the source file or section.
+        """
+        if not isinstance(data, dict) or "manifest" not in data:
+            return data
+        raw = data["manifest"]
+        if raw is None:
+            return data
+        if not isinstance(raw, dict):
+            raise ValueError(
+                "release.manifest must be a mapping with 'deadline_minutes', "
+                f"'assets' and/or 'channels', got {type(raw).__name__}"
+            )
+        overridden = dict(data)
+        parsed: dict[str, Any] = {}
+        if "deadline_minutes" in raw:
+            parsed["deadline_minutes"] = raw["deadline_minutes"]
+        assets = raw.get("assets") or []
+        if not isinstance(assets, list):
+            raise ValueError(
+                "release.manifest.assets must be a list of asset declarations, "
+                f"got {type(assets).__name__}"
+            )
+        parsed_assets: list[ReleaseManifestAsset] = []
+        for index, entry in enumerate(assets):
+            if not isinstance(entry, dict):
+                raise ValueError(
+                    f"release.manifest.assets[{index}] must be a mapping, "
+                    f"got {type(entry).__name__}"
+                )
+            asset_type = entry.get("type")
+            if asset_type not in RELEASE_MANIFEST_ASSET_TYPES:
+                if asset_type in ASSET_DECLARATION_TYPES:
+                    raise ValueError(
+                        f"release.manifest.assets[{index}] has type "
+                        f"{asset_type!r}, which is not a release-object asset; "
+                        "declare a ghcr image or the capacium exchange under "
+                        "release.manifest.channels"
+                    )
+                raise ValueError(
+                    f"release.manifest.assets[{index}] has unknown type "
+                    f"{asset_type!r}; expected one of "
+                    f"{list(RELEASE_MANIFEST_ASSET_TYPES)}"
+                )
+            _require_manifest_producer(entry, f"release.manifest.assets[{index}]")
+            try:
+                parsed_assets.append(ReleaseManifestAsset.model_validate(entry))
+            except ValidationError as exc:
+                raise ValueError(
+                    f"release.manifest.assets[{index}] ({asset_type}) is "
+                    f"malformed: {exc.errors()[0]['msg']}"
+                ) from exc
+        parsed["assets"] = tuple(parsed_assets)
+        channels = raw.get("channels") or []
+        if not isinstance(channels, list):
+            raise ValueError(
+                "release.manifest.channels must be a list of channel "
+                f"declarations, got {type(channels).__name__}"
+            )
+        parsed_channels: list[ReleaseManifestChannel] = []
+        for index, entry in enumerate(channels):
+            if not isinstance(entry, dict):
+                raise ValueError(
+                    f"release.manifest.channels[{index}] must be a mapping, "
+                    f"got {type(entry).__name__}"
+                )
+            channel = entry.get("channel")
+            if channel not in MANIFEST_CHANNELS:
+                raise ValueError(
+                    f"release.manifest.channels[{index}] has unknown channel "
+                    f"{channel!r}; expected one of {list(MANIFEST_CHANNELS)}"
+                )
+            _require_manifest_producer(
+                entry, f"release.manifest.channels[{index}]"
+            )
+            try:
+                parsed_channels.append(ReleaseManifestChannel.model_validate(entry))
+            except ValidationError as exc:
+                raise ValueError(
+                    f"release.manifest.channels[{index}] ({channel}) is "
+                    f"malformed: {exc.errors()[0]['msg']}"
+                ) from exc
+        parsed["channels"] = tuple(parsed_channels)
+        try:
+            overridden["manifest"] = AssetManifest.model_validate(parsed)
+        except ValidationError as exc:
+            raise ValueError(
+                f"release.manifest is malformed: {exc.errors()[0]['msg']}"
+            ) from exc
+        return overridden
+
     @property
     def assets(self) -> Optional[tuple[_AssetDeclaration, ...]]:
         """The parsed ``release.assets`` declarations, or None for no requirement.
@@ -370,6 +547,16 @@ class ReleaseConfig(BaseModel):
         """
         extra = self.__pydantic_extra__ or {}
         return extra.get("assets")
+
+    @property
+    def manifest(self) -> Optional[AssetManifest]:
+        """The parsed ``release.manifest`` block, or None when absent.
+
+        Read through the extras mapping for the same reason as :attr:`assets`:
+        an absent block leaves a previously loaded release block unchanged.
+        """
+        extra = self.__pydantic_extra__ or {}
+        return extra.get("manifest")
 
 
 class ReconcileConfig(BaseModel):
