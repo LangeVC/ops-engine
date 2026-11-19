@@ -52,7 +52,7 @@ def _full_body():
 FULL_BODY = _full_body()
 
 
-def _config(*, install_block="", assets_line="", forge="forgejo"):
+def _config(*, install_block="", assets_line="", tracker_prefixes=(), forge="forgejo"):
     repos = {
         "ops-engine": {
             "destinations": [
@@ -70,6 +70,35 @@ def _config(*, install_block="", assets_line="", forge="forgejo"):
         repos["ops-engine"]["release_body_install_block"] = install_block
     if assets_line:
         repos["ops-engine"]["release_body_assets_line"] = assets_line
+    if tracker_prefixes:
+        repos["ops-engine"]["tracker_prefixes"] = list(tracker_prefixes)
+    return OpsEngineConfig.load({"orgs": {"langevc": {"repositories": repos}}})
+
+
+def _two_destination_config(*, install_block=""):
+    """One repo published outward to a GitHub and a Forgejo destination."""
+    repos = {
+        "ops-engine": {
+            "destinations": [
+                {
+                    "forge": "github",
+                    "repo": REPO,
+                    "role": "release",
+                    "visibility": "public",
+                    "credential_variable": "OPS_TOKEN",
+                },
+                {
+                    "forge": "forgejo",
+                    "repo": REPO,
+                    "role": "release",
+                    "visibility": "public",
+                    "credential_variable": "OPS_TOKEN",
+                },
+            ]
+        }
+    }
+    if install_block:
+        repos["ops-engine"]["release_body_install_block"] = install_block
     return OpsEngineConfig.load({"orgs": {"langevc": {"repositories": repos}}})
 
 
@@ -156,7 +185,8 @@ def _github(dest):
     return adapter
 
 
-async def _publish(forge, adapter, tmp_path, *, release_body=None, tag_name=None, **over):
+async def _publish(forge, adapter, tmp_path, *, release_body=None, tag_name=None,
+                   config=None, adapters=None, **over):
     art = tmp_path / "dist"
     art.mkdir(exist_ok=True)
     for name in FILES:
@@ -164,8 +194,10 @@ async def _publish(forge, adapter, tmp_path, *, release_body=None, tag_name=None
     audit = []
     kwargs = {"release_body": release_body, **over} if release_body else over
     report = await ReleaseHandler.publish_release(
-        _config(forge=forge), REPO, tag_name or TAG, NOTES, art,
-        adapters=[adapter], skip_existing=True, audit=audit, **kwargs,
+        config if config is not None else _config(forge=forge),
+        REPO, tag_name or TAG, NOTES, art,
+        adapters=adapters if adapters is not None else [adapter],
+        skip_existing=True, audit=audit, **kwargs,
     )
     return report, audit
 
@@ -564,6 +596,84 @@ async def test_audience_gate_runs_through_publish_release_call_shape(tmp_path):
     assert "LVC-999" in report.failure_details[label]
     assert len(audit) == 1
     assert "result=failed" in audit[0] and "LVC-999" in audit[0]
+
+
+# ---------------------------------------------------------------------------
+# REA-018: the engine composes the body; callers stop repeating the block
+# ---------------------------------------------------------------------------
+#
+# RED at 2f5c255: that commit composed only in the callers (_release_tag and
+# the shipped workflow). publish_release had no composer, so a caller that
+# passed raw CHANGELOG notes and no release_body — the attach path's shape —
+# wrote a body without the declared install block. These tests drive exactly
+# that shape and fail there: the raw-notes test asserts the block is present,
+# and the gate test asserts the engine-composed body is judged.
+
+
+@pytest.mark.asyncio
+async def test_attach_path_composes_declared_install_block(tmp_path):
+    """REA-018-C2: a caller that passes ONLY the CHANGELOG notes gets the
+    declared install block in the body, on every destination. This is the
+    attach path's call shape (release_attach.run_attach passes notes and no
+    release_body): the author writes the change once in the CHANGELOG and does
+    not repeat the install instructions there."""
+    github_dest, forgejo_dest = FakeDestination(), FakeDestination()
+    config = _two_destination_config(install_block=INSTALL_BLOCK)
+
+    report, _ = await _publish(
+        None, None, tmp_path,
+        config=config,
+        adapters=[_github(github_dest), _forgejo(forgejo_dest)],
+    )
+
+    for dest in (github_dest, forgejo_dest):
+        assert dest.created_body is not None
+        # The notes the author wrote are there — and only they were supplied.
+        assert NOTES.strip() in dest.created_body
+        assert "### Install" in dest.created_body
+        assert INSTALL_BLOCK in dest.created_body
+        # The block came from the declaration, not from the notes.
+        assert INSTALL_BLOCK not in NOTES
+
+    assert len(report.published) == 2
+    assert report.failed == []
+
+
+@pytest.mark.asyncio
+async def test_attach_path_without_declaration_keeps_raw_notes(tmp_path):
+    """The 2f5c255 behaviour for a repository that declares nothing: with no
+    install block, no assets line and no changelog_url, the body is the raw
+    notes. The change is scoped to repositories that declared body parts —
+    nobody's existing body is rewritten behind their back."""
+    dest = FakeDestination()
+    report, _ = await _publish("forgejo", _forgejo(dest), tmp_path)
+
+    assert dest.created_body == NOTES
+    assert report.published == [f"forgejo:{REPO}"]
+    assert report.failed == []
+
+
+@pytest.mark.asyncio
+async def test_declared_gate_refuses_engine_composed_body(tmp_path):
+    """REA-018-C3: the audience gate runs on the FINAL body the engine composes,
+    using the repository's declared vocabulary. The notes are clean and only
+    the declared install block names the tracker, so a gate on raw notes would
+    pass — here nothing is written and the destination is failed by name."""
+    dest = FakeDestination()
+    config = _config(
+        install_block="Fix LVC-999 in installer",
+        tracker_prefixes=["LVC"],
+    )
+
+    label = f"forgejo:{REPO}"
+    report, audit = await _publish("forgejo", _forgejo(dest), tmp_path,
+                                   config=config)
+
+    assert dest.writes() == []
+    assert dest.creates() == 0
+    assert report.failed == [label]
+    assert "LVC-999" in report.failure_details[label]
+    assert len(audit) == 1 and "result=failed" in audit[0]
 
 
 # ---------------------------------------------------------------------------
