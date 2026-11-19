@@ -110,9 +110,12 @@ async def evaluate_channels(
 ) -> ChannelVerdict:
     """Judge the manifest's channels read-only against the deadline.
 
-    A channel the reader proves present is satisfied; one it proves absent is
-    pending within the deadline and failed after it; one it cannot probe
-    (winget, or a read error) is manual — unknown is never a failure.
+    A channel the reader proves present is satisfied. One it proves absent
+    follows its producer, exactly like a release-object piece: a
+    ``github``-produced channel is pending within the deadline and failed
+    after it, while a ``forgejo``-produced channel is required at once. One it
+    cannot probe (winget, or a read error) is manual — unknown is never a
+    failure.
     """
     reader = reader if reader is not None else HttpxChannelReader()
     version = version_of(tag_name)
@@ -128,7 +131,12 @@ async def evaluate_channels(
         if present:
             verdict.satisfied.append(label)
             continue
-        red = deadline_passed(moment, manifest.deadline_minutes, now)
+        # A github-produced channel carries the same grace as a github-produced
+        # asset (D5); a forgejo-produced one is required at once. A manual
+        # producer would be meaningless here — the forge names what it builds.
+        red = entry.producer != "github" or deadline_passed(
+            moment, manifest.deadline_minutes, now
+        )
         piece = Piece(
             name=entry.name,
             producer=entry.producer,

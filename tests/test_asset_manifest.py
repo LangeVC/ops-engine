@@ -646,6 +646,33 @@ async def test_a_channel_absent_after_the_deadline_is_red_naming_producer():
 
 
 @pytest.mark.asyncio
+async def test_a_forgejo_produced_channel_is_required_at_once():
+    """Red proof for the producer rule on the channel path: a forgejo-produced
+    PyPI package carries no grace. Absent, it is red even inside the deadline,
+    while the same absence a github produces stays pending."""
+    from ops_engine.modules import asset_manifest
+
+    config = _config(
+        "forgejo",
+        manifest={
+            "channels": [
+                {"channel": "pypi", "name": "ops-engine", "producer": "forgejo"}
+            ]
+        },
+    )
+    verdict = await asset_manifest.evaluate_channels(
+        _manifest_object(config),
+        TAG,
+        reader=_FakeChannelReader(set()),
+        since=_minutes_ago(5),
+    )
+
+    assert verdict.pending == []
+    assert len(verdict.failed) == 1
+    assert "pypi:ops-engine" in verdict.failed[0].as_text()
+
+
+@pytest.mark.asyncio
 async def test_a_present_channel_is_satisfied_and_winget_is_manual():
     """A channel the reader proves present is satisfied; winget has no
     read-only probe (capacium records it as a manual ``:grey_question:``), so
@@ -681,7 +708,7 @@ async def test_the_default_channel_reader_only_issues_reads():
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append((request.method, request.url.path))
-        if request.url.path == f"/pypi/ops-engine/json":
+        if request.url.path == "/pypi/ops-engine/json":
             return httpx.Response(200, json={"info": {"version": VERSION}})
         if request.url.path == "/token":
             return httpx.Response(200, json={"token": "anon"})

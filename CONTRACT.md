@@ -1300,7 +1300,9 @@ is not one of the four, or a non-release-object type (e.g. `ghcr_image`) under
 Per destination, after create/converge/attach:
 
 - **Forgejo-produced piece absent** — required at once. The destination fails
-  and the detail names the piece and the producer.
+  and the detail names the piece and the producer. This holds for a channel
+  too: a forgejo-published PyPI package, image or tap is red on absence, with
+  no grace.
 - **GitHub-produced piece absent, deadline not passed** — *pending*, not an
   error. The destination stays in `published`; `PublicationReport.pending`
   records `"<name> producer=github since=<iso>"` for it and the audit line is
@@ -1322,10 +1324,11 @@ published.
 
 The channels are read **read-only**, the way capacium's `verify-channels` step
 reads them (`ops_engine.modules.asset_manifest.evaluate_channels`): a present
-channel is satisfied; an absent one is pending within the deadline and failed
-after it; an unprobeable one (`winget`, or any read error) is `manual` and is
-never a failure — unknown is not a verdict. `HttpxChannelReader` issues `GET`
-only.
+channel is satisfied; an absent `github`-produced channel is pending within the
+deadline and failed after it, while an absent `forgejo`-produced channel is
+failed at once (the producer rule of the release-object pieces); an unprobeable
+one (`winget`, or any read error) is `manual` and is never a failure — unknown
+is not a verdict. `HttpxChannelReader` issues `GET` only.
 
 The change is **additive**: `PublicationReport` gains an optional `pending`
 field defaulting to `{}`; `to_dict()` keeps its existing keys; and a run with
