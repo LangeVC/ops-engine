@@ -73,7 +73,10 @@ class AttachRequest:
     name_template: str
     notes: str
     release_body: Optional[str]
-    ticket_prefixes: list[str]
+    # None means "not supplied": the engine then falls back to the repository's
+    # declared tracker_prefixes (REA-018). An empty list would instead say
+    # "supplied, and it names nothing".
+    ticket_prefixes: Optional[list[str]]
     credentials: dict[str, Credential]
 
 
@@ -134,7 +137,7 @@ def request_from_args(
         name_template=args.name_template or DEFAULT_NAME_TEMPLATE,
         notes=notes,
         release_body=release_body,
-        ticket_prefixes=list(args.ticket_prefix or []),
+        ticket_prefixes=list(args.ticket_prefix) if args.ticket_prefix else None,
         credentials=credentials,
     )
 
@@ -302,8 +305,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--ticket-prefix",
         action="append",
-        default=[],
-        help="an external tracker prefix the body must not name (repeatable)",
+        default=None,
+        help=(
+            "an external tracker prefix the body must not name (repeatable); "
+            "absent, the repository's declared tracker_prefixes arm the gate"
+        ),
     )
     return parser
 

@@ -100,6 +100,48 @@ def render_release_name(template: str, repo: str, tag_name: str) -> str:
     return template.format_map(_TemplateDict(values))
 
 
+def compose_release_body(
+    repo: str,
+    tag_name: str,
+    notes: str,
+    *,
+    name_template: str = DEFAULT_NAME_TEMPLATE,
+    install_block: str = "",
+    assets_line: str = "",
+    changelog_path: str = "CHANGELOG.md",
+    changelog_url: str = "",
+) -> str:
+    """Compose the release body from its parts (P36-017), in a fixed order.
+
+    The five parts, in order: the product heading rendered from
+    ``name_template``, the CHANGELOG ``notes``, the optional ``### Install``
+    block, the optional assets line, and the CHANGELOG link. The install block
+    and assets line are business data (a per-repository declaration), never
+    engine defaults: an empty value contributes nothing, not an empty heading.
+
+    The composer lives in the engine so that every caller — the webhook path,
+    the shipped workflow and the attach CLI — gets the same body without
+    restating it, and so that :meth:`ReleaseHandler.publish_release` can run the
+    audience gate on the FINAL body on every destination (REA-018, REA-012 D1).
+
+    ``changelog_url`` is supplied by the caller: the engine holds no canonical
+    host. When it is empty the CHANGELOG link is omitted rather than invented —
+    a body without a link is still the composed body and still carries the
+    declared install block.
+    """
+    body = f"## {render_release_name(name_template, repo, tag_name)}\n\n{notes}\n"
+    if install_block:
+        body += f"### Install\n{install_block}\n\n"
+    if assets_line:
+        body += f"{assets_line}\n\n"
+    if changelog_url:
+        body += (
+            f"See [{changelog_path}]({changelog_url})"
+            f" for all changes.\n"
+        )
+    return body
+
+
 @dataclass
 class PublicationReport:
     """Queryable record of one release published outward to its destinations.
@@ -374,6 +416,7 @@ class ReleaseHandler:
         release_body: str | None = None,
         ticket_prefixes: Iterable[str] | None = None,
         channel_reader: object = None,
+        changelog_url: str = "",
     ) -> "PublicationReport":
         """Publish a built release to every destination resolved from config.
 
@@ -444,13 +487,30 @@ class ReleaseHandler:
         warning line is logged for the whole call (the engine has no event
         log, D20).
 
-        ``release_body`` is the composed body (title, notes, install and
-        CHANGELOG link). With ``ticket_prefixes`` given, the external-audience
-        gate runs on that final body per destination before any write: a body
-        that names the author's tracker writes nothing on that destination and
-        fails it by name, while a destination with a clean body still
-        publishes. ``process_event`` keeps raising the refusal from its own
-        gate before any destination is considered; this path records it.
+        The body is composed by the ENGINE (REA-018): the product heading, the
+        ``release_notes``, the ``### Install`` block and assets line declared by
+        the repository (``release_body_install_block`` /
+        ``release_body_assets_line``, read through the same Layer 2 + Layer-3
+        merge the destinations come from) and, when ``changelog_url`` is
+        given, the CHANGELOG link. A caller that passes no ``release_body``
+        therefore still publishes the declared install block — the author does
+        not repeat it in the CHANGELOG.
+
+        ``release_body`` is an optional override: when given, it is written
+        verbatim instead of the composed body (a caller that has already
+        composed a body and wants exactly that one). ``release_notes`` remains
+        the CHANGELOG section, and the supplement rule compares against
+        whichever body this call writes.
+
+        With ``ticket_prefixes`` given, the external-audience gate runs on that
+        final body per destination before any write: a body that names the
+        author's tracker writes nothing on that destination and fails it by
+        name, while a destination with a clean body still publishes.
+        ``process_event`` keeps raising the refusal from its own gate before
+        any destination is considered; this path records it. When
+        ``ticket_prefixes`` is omitted, the repository's declared
+        ``tracker_prefixes`` (Layer 2 + Layer 3) are used — an empty
+        declaration refuses nothing.
 
         ``publisher_login`` is the login the engine publishes as (P36-003). A
         repository can have two publishers — the engine and a repository-local
@@ -507,6 +567,40 @@ class ReleaseHandler:
         requirements = (
             _manifest_requirements(manifest, repo, tag_name)
             if manifest is not None else {}
+        )
+        # REA-018: the body is composed HERE, in the engine, from the parts the
+        # repository declares (Layer 2 merged with its ``.ops.yaml``). A caller
+        # that passes raw notes and no body therefore still publishes the
+        # declared install block on every destination — the author does not
+        # repeat it in the CHANGELOG. A caller that supplies ``release_body``
+        # overrides the composition verbatim. With nothing declared (and no
+        # ``changelog_url``) the historical path stands: the body is the raw
+        # notes and the supplement check keys on them.
+        install_block, assets_line, changelog_path = _declared_release_body_parts(
+            config, repo, repo_dir
+        )
+        if release_body is not None:
+            effective_body: str | None = release_body
+        elif install_block or assets_line or changelog_url:
+            effective_body = compose_release_body(
+                repo,
+                tag_name,
+                release_notes,
+                name_template=name_template or DEFAULT_NAME_TEMPLATE,
+                install_block=install_block,
+                assets_line=assets_line,
+                changelog_path=changelog_path,
+                changelog_url=changelog_url,
+            )
+        else:
+            effective_body = None
+        # The gate vocabulary: an explicit argument wins; omitted, the
+        # repository's own declaration (Layer 2 + Layer 3) is used, and an
+        # empty declaration refuses nothing.
+        gate_prefixes = (
+            list(ticket_prefixes)
+            if ticket_prefixes is not None
+            else _declared_tracker_prefixes(config, repo, repo_dir)
         )
         now = datetime.now(timezone.utc)
 
@@ -682,14 +776,16 @@ class ReleaseHandler:
                 continue
             # REA-012 (D1): the external-audience gate runs on the FINAL body
             # before any write on this destination, and only this destination
-            # is refused when the body names the author's tracker. The gate
-            # runs here because the shipped workflow calls publish_release
-            # directly and composes the body itself — the gate must be in this
-            # path — and per destination because one refused body must not
-            # stop another destination whose body is clean.
-            if release_body is not None and ticket_prefixes:
+            # is refused when the body names the author's tracker. REA-018
+            # moved composition into this function, so the body judged here is
+            # the one this call writes, on every destination — a body a caller
+            # passed (§ override) or one composed from the repository's
+            # declaration — and it is judged per destination because one
+            # refused body must not stop another destination whose body is
+            # clean.
+            if effective_body is not None and gate_prefixes:
                 try:
-                    check_release_notes_audience(release_body, ticket_prefixes)
+                    check_release_notes_audience(effective_body, gate_prefixes)
                 except ReleaseNotesAudienceError as exc:
                     logger.error(f"partial publication: {label} failed: {exc}")
                     report.failed.append(label)
@@ -704,7 +800,7 @@ class ReleaseHandler:
                     await _judge_existing_release(
                         adapter, destination, report, audit, tag_name, label,
                         release_name, release_notes, artifacts, per_dest_login,
-                        release_body=release_body,
+                        release_body=effective_body,
                     )
                     await _verify(adapter, destination, label)
                     continue
@@ -717,7 +813,7 @@ class ReleaseHandler:
                     artifacts=artifacts,
                     draft=draft,
                     prerelease=prerelease,
-                    body_override=release_body,
+                    body_override=effective_body,
                 )
                 if duplicate_detail is not None:
                     # The create call answered a duplicate: the destination
@@ -728,7 +824,7 @@ class ReleaseHandler:
                     await _judge_existing_release(
                         adapter, destination, report, audit, tag_name, label,
                         release_name, release_notes, artifacts, per_dest_login,
-                        release_body=release_body,
+                        release_body=effective_body,
                         duplicate_detail=duplicate_detail,
                     )
                     await _verify(adapter, destination, label)
@@ -1637,6 +1733,55 @@ def _resolved_manifest(
     return release_config.manifest
 
 
+def _declared_release_body_parts(
+    config: OpsEngineConfig,
+    repo: str,
+    repo_dir: str | Path | None,
+) -> tuple[str, str, str]:
+    """The repo's declared body parts, Layer 2 merged with its ``.ops.yaml``.
+
+    Returns ``(install_block, assets_line, changelog_path)``. The same path
+    the destinations and the REA-014 declaration come from, so a declaration
+    in the repository at the tag is the one composed into the body. The two
+    body parts are business data: empty here means the declaration says
+    nothing, and the composed body omits that part (REA-018).
+    """
+    org, _, name = repo.partition("/")
+    layer2 = config.get_repo_config(org, name)
+    if repo_dir is not None:
+        layer3 = load_ops_yaml(repo_dir)
+        if layer3 is not None:
+            layer2 = layer2.merge_layer3(layer3)
+    release_config = layer2.release
+    changelog_path = (
+        release_config.changelog_path if release_config is not None else "CHANGELOG.md"
+    )
+    return (
+        layer2.release_body_install_block,
+        layer2.release_body_assets_line,
+        changelog_path,
+    )
+
+
+def _declared_tracker_prefixes(
+    config: OpsEngineConfig,
+    repo: str,
+    repo_dir: str | Path | None,
+) -> list[str]:
+    """The repo's declared audience-gate vocabulary, Layer 2 + Layer 3.
+
+    Empty means the repository declares no tracker prefixes, so the gate
+    refuses nothing (the same rule as an empty ``ticket_prefixes`` argument).
+    """
+    org, _, name = repo.partition("/")
+    layer2 = config.get_repo_config(org, name)
+    if repo_dir is not None:
+        layer3 = load_ops_yaml(repo_dir)
+        if layer3 is not None:
+            layer2 = layer2.merge_layer3(layer3)
+    return list(layer2.tracker_prefixes)
+
+
 async def _destination_clock(
     adapter: ForgeAdapter,
     destination: Destination,
@@ -2040,21 +2185,23 @@ async def _release_tag(
 
         identity = context.identity
 
-        # Compose the full release body (P36-017).  The install block and
-        # assets line come from the per-repository declaration at the tag,
-        # never from engine defaults.
+        # Compose the full release body (P36-017) with the engine's composer,
+        # from the per-repository declaration at the tag — never from engine
+        # defaults. The same composer runs inside ``publish_release``, so the
+        # body judged here is the body published there.
         canonical_url = identity.canonical_url.removesuffix(".git")
         changelog_url = (
             f"{canonical_url}/src/tag/{tag_name}/{config.changelog_path}"
         )
-        body = f"## {render_release_name(name_template, repo, tag_name)}\n\n{notes}\n"
-        if install_block:
-            body += f"### Install\n{install_block}\n\n"
-        if assets_line:
-            body += f"{assets_line}\n\n"
-        body += (
-            f"See [{config.changelog_path}]({changelog_url})"
-            f" for all changes.\n"
+        body = compose_release_body(
+            repo,
+            tag_name,
+            notes,
+            name_template=name_template,
+            install_block=install_block,
+            assets_line=assets_line,
+            changelog_path=config.changelog_path,
+            changelog_url=changelog_url,
         )
 
         # The external-audience gate runs on the FINAL body before any

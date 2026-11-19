@@ -1188,35 +1188,78 @@ it.
 
 ### Release body (P36-017)
 
-`publish_release` accepts an optional keyword-only `release_body: str | None`
-parameter. When given, it is used as the full release body on every destination
-instead of the raw release notes. The body is composed by the caller (the
-webhook path in `_release_tag`, and the workflow path in
-`.forgejo/workflows/forgejo-release.yml`) from these parts, in this order:
+**Measurement at 2f5c255 (REA-018).** The P36-017 writer **exists** at
+`2f5c25588dfd3bcad304438d6df5d1e7bb32dae7`: it is fully implemented there and
+`tests/test_release_body_writer.py` is green (15 passed) against a clean
+`git archive` of that commit. file:line at 2f5c255:
+
+- `src/ops_engine/modules/release.py:226-227` — `ReleaseContext`
+  `release_body_install_block` / `release_body_assets_line`.
+- `src/ops_engine/modules/release.py:1188-1198` — the per-repository
+  declaration read through `load_ops_yaml` at the tag.
+- `src/ops_engine/modules/release.py:1230-1248` — the five-part composition and
+  `check_release_notes_audience(body, ...)` on the final body.
+- `src/ops_engine/config_loader.py:470-471` — the two `RepoConfig` fields;
+  `:848-849` — their merge into the resolved repo config.
+- `.forgejo/workflows/forgejo-release.yml:941-983` — the workflow composing the
+  same body itself and passing it as `release_body`.
+
+The writer was therefore not the gap; at 2f5c255 the composition lived in the
+**callers** (`_release_tag` in the webhook path and the shipped workflow), not
+in `publish_release`, so a caller that passed raw notes without a composed
+`release_body` — for example the attach path (`release_attach.run_attach`) —
+still produced a body without the declared install block. **REA-018 moved the
+composition into the engine** (`compose_release_body`, called from
+`publish_release`), so every caller and every destination gets it: the author
+writes the change once in the CHANGELOG and does not repeat the install
+instructions there.
+
+`publish_release` composes the body itself from the parts the repository
+declares, in this order:
 
 1. **Product heading** — rendered from the configured `name_template`.
 2. **Release notes** — the CHANGELOG section extracted by the gate.
 3. **Install block** — when the per-repository declaration
-   `release_body_install_block` in `.ops.yaml` is non-empty, a `### Install`
-   heading followed by its value.
+   `release_body_install_block` is non-empty, a `### Install` heading followed
+   by its value.
 4. **Assets line** — when the per-repository declaration
-   `release_body_assets_line` in `.ops.yaml` is non-empty, appended verbatim.
-5. **CHANGELOG link** — a markdown link to the tag's CHANGELOG.md on the
-   canonical forge.
+   `release_body_assets_line` is non-empty, appended verbatim.
+5. **CHANGELOG link** — when the caller supplies `changelog_url`, a markdown
+   link to the tag's CHANGELOG.md. The engine holds no canonical host, so it
+   omits the link rather than inventing one.
 
 The install block and assets line are **business data**, never engine defaults:
-both come from the per-repository declaration at the tag (a key in the
-repository's `.ops.yaml`), read via `load_ops_yaml` in the webhook path and via
-`getattr(layer3, ...)` in the workflow path. An empty install block produces no
-`### Install` heading; an empty assets line produces no line.
+both come from the per-repository declaration (Layer 2 merged with the
+repository's `.ops.yaml`, read by `_declared_release_body_parts`). An empty
+install block produces no `### Install` heading; an empty assets line produces
+no line.
 
-**Audience gate.** `check_release_notes_audience` runs on the **final** body —
-after the install block and assets line are composed in — so a tracker reference
-introduced only by the install block (not by the raw notes) is still refused
-before any destination write.
+**When the engine composes.** Composition runs when the repository declares an
+install block or an assets line, or the caller supplies a `changelog_url`. With
+nothing declared and no link, `effective_body` stays `None` and the historical
+path stands: the body is the raw release notes and the supplement check keys on
+them — a repository that declares nothing sees no change.
+
+**Override.** `release_body` remains a keyword-only, optional override: when
+given, it is written verbatim instead of the composed body (a caller that has
+already composed and wants exactly that one).
+
+**Audience gate.** `check_release_notes_audience` runs per destination on the
+**final** body this call writes — the composed body or the caller's override,
+after the install block and assets line are in — so a tracker reference
+introduced only by the install block (not by the raw notes) is refused before
+any write on that destination. The gate vocabulary is the explicit
+`ticket_prefixes` argument when given, otherwise the repository's declared
+`tracker_prefixes` (Layer 2 + Layer 3); an empty declaration refuses nothing.
+The shipped console script delivers that distinction: `--ticket-prefix`
+defaults to `None` when absent (`src/ops_engine/release_attach.py:306`) and
+`request_from_args` keeps it `None` (`:140`), so an operator who passes no flag
+gets the repository's declared vocabulary instead of an empty list. `_release_tag`
+still raises from its own gate on the same composed body before any destination
+is considered.
 
 **Effect on existing releases.** An existing release on a destination is judged
-against the supplied `release_body`, not the raw notes:
+against the body this call writes, not the raw notes:
 
 - A destination release that does not exist is created with that body.
 - One that already exists with an empty body gets the body supplemented (patched
@@ -1233,10 +1276,49 @@ against the supplied `release_body`, not the raw notes:
   still names the publisher. The only outcome specific to a foreign release is
   a complete one, which is recorded `up_to_date` without a write.
 
-The `release_body` parameter is keyword-only and optional. When it is `None` or
-absent, the existing behaviour is unchanged: the body is the raw release notes,
-and the supplement check keys on those notes. This is a backwards-compatible
-extension: a caller that omits the parameter sees no change.
+The `release_body` parameter is keyword-only and optional. Omitting it does not
+mean "raw notes": the engine composes the body from the repository's
+declaration (above). The raw-notes path survives only for a repository that
+declares no install block or assets line and passes no `changelog_url`, so a
+caller that omits the parameter on such a repository sees no change. This keeps
+the extension backwards-compatible without leaving the declared install block
+out of the body.
+
+**Implementation (REA-018).** `compose_release_body` is the one composer
+(`src/ops_engine/modules/release.py:103`); `publish_release` calls it from the
+prologue (`:585`) after `_declared_release_body_parts` (`:1736`) has read the
+declaration, and the per-destination gate (`:788`) judges the result.
+`_declared_tracker_prefixes` (`:1766`) supplies the declared vocabulary.
+`_release_tag` calls the same composer instead of building the string itself.
+The shipped workflow (`.forgejo/workflows/forgejo-release.yml`) now only carries
+the declaration into its `OpsEngineConfig` (`:776`) and supplies the CHANGELOG
+link (`:959`), passing `changelog_url` to `publish_release` (`:979`); it no
+longer composes. The RED proof is in `tests/test_release_body_writer.py`: the
+attach-path call shape (`release_attach.run_attach` passes notes and no body)
+writes the declared block on both destinations
+(`test_attach_path_composes_declared_install_block`, `:614`), a repository that
+declares nothing keeps the raw notes
+(`test_attach_path_without_declaration_keeps_raw_notes`, `:643`), and the
+declared-vocabulary gate refuses a body only the engine composed
+(`test_declared_gate_refuses_engine_composed_body`, `:657`). Against a clean
+`git archive` of 2f5c255 three tests are red — the attach-path composition
+(`:614`, the created body is the raw notes), the declared-vocabulary gate
+(`:657`, the destination is written), and the pre-existing
+`test_audience_gate_runs_through_publish_release_call_shape` (`:569`, which
+raises out of `publish_release` instead of recording a failed destination) —
+for `3 failed, 15 passed`. `test_attach_path_without_declaration_keeps_raw_notes`
+is green in both (the scoping control), and the file is `15 passed` at 2f5c255
+and `18 passed` here. The seven release files listed in the attempt report move
+`115 -> 120`; adding `tests/test_release_webhook_path.py` gives `140 -> 145`.
+
+The shipped console script is covered on its own path in
+`tests/test_release_attach_cli.py`: with no `--ticket-prefix` the declared
+`tracker_prefixes` arm the gate against the engine-composed block and nothing is
+written (`test_the_cli_arms_the_gate_from_the_declared_prefixes`, `:467`,
+**red** against the pre-change `release_attach.py`, whose empty-list default
+disarmed the gate — the run exited 0 and wrote); an explicit `--ticket-prefix`
+wins while the declared block still composes on both destinations
+(`test_an_explicit_prefix_wins_and_the_declared_block_still_composes`, `:501`).
 
 **Write surface.** The release body is written on every release destination,
 GitHub included. `ForgeAdapter.update_release_body(repo, release_id, body)` is an

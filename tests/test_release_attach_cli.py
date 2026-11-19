@@ -64,7 +64,14 @@ DECLARED = [
 ]
 
 
-def _config(forge: str, *, second: str | None = None, assets=None) -> OpsEngineConfig:
+def _config(
+    forge: str,
+    *,
+    second: str | None = None,
+    assets=None,
+    tracker_prefixes=None,
+    install_block=None,
+) -> OpsEngineConfig:
     destinations = [
         {
             "forge": forge,
@@ -85,16 +92,16 @@ def _config(forge: str, *, second: str | None = None, assets=None) -> OpsEngineC
     release = {"enabled": True}
     if assets is not None:
         release["assets"] = assets
+    repository = {"destinations": destinations, "release": release}
+    if tracker_prefixes is not None:
+        repository["tracker_prefixes"] = tracker_prefixes
+    if install_block is not None:
+        repository["release_body_install_block"] = install_block
     return OpsEngineConfig.load(
         {
             "orgs": {
                 "langevc": {
-                    "repositories": {
-                        "ops-engine": {
-                            "destinations": destinations,
-                            "release": release,
-                        }
-                    }
+                    "repositories": {"ops-engine": repository}
                 }
             }
         }
@@ -260,7 +267,14 @@ def _objects(dest: FakeDestination) -> dict:
     }
 
 
-def _config_file(tmp_path, forge: str, *, assets=None) -> "object":
+def _config_file(
+    tmp_path,
+    forge: str,
+    *,
+    assets=None,
+    tracker_prefixes=None,
+    install_block=None,
+) -> "object":
     path = tmp_path / "config.yml"
     lines = [
         "orgs:",
@@ -280,6 +294,12 @@ def _config_file(tmp_path, forge: str, *, assets=None) -> "object":
         for asset in assets:
             lines.append(f"            - type: {asset['type']}")
             lines.append(f"              name: '{asset['name']}'")
+    if tracker_prefixes:
+        lines.append("        tracker_prefixes:")
+        for prefix in tracker_prefixes:
+            lines.append(f"          - {prefix}")
+    if install_block:
+        lines.append(f"        release_body_install_block: '{install_block}'")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
 
@@ -296,8 +316,8 @@ def _body_file(tmp_path):
     return path
 
 
-def _argv(tmp_path, config_path) -> list[str]:
-    return [
+def _argv(tmp_path, config_path, *, body_file=True) -> list[str]:
+    argv = [
         "--config",
         str(config_path),
         "--repo",
@@ -312,9 +332,10 @@ def _argv(tmp_path, config_path) -> list[str]:
         TEMPLATE,
         "--notes-file",
         str(_notes_file(tmp_path)),
-        "--body-file",
-        str(_body_file(tmp_path)),
     ]
+    if body_file:
+        argv += ["--body-file", str(_body_file(tmp_path))]
+    return argv
 
 
 # --- Criterion 1: the same command from either runner -----------------------
@@ -436,6 +457,75 @@ def test_a_named_failure_exits_non_zero_and_names_file_and_destination(
     assert entry["outcome"] == "failed"
     assert "SHA256SUMS" in entry["failure"]
     assert label in entry["failure"]
+
+
+# --- REA-018: the declared body and the gate on the CLI path ----------------
+
+TRACKER_IN_BLOCK = "Fix LVC-999 in the installer"
+
+
+def test_the_cli_arms_the_gate_from_the_declared_prefixes(tmp_path, monkeypatch, capsys):
+    """REA-018 C3 on the shipped console script: with no ``--ticket-prefix``,
+    the repository's declared ``tracker_prefixes`` arm the gate, and the gate
+    judges the body the engine composed (the install block, not a body file)."""
+    monkeypatch.setenv("OPS_TOKEN", "rw-token")
+    dest = FakeDestination(forge="forgejo")
+    _artifacts(tmp_path)
+
+    code = main(
+        _argv(
+            tmp_path,
+            _config_file(
+                tmp_path,
+                "forgejo",
+                assets=DECLARED,
+                tracker_prefixes=["LVC"],
+                install_block=TRACKER_IN_BLOCK,
+            ),
+            body_file=False,
+        ),
+        adapters=[_make(dest)],
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    label = f"forgejo:{REPO}"
+    assert code != 0
+    assert payload["ok"] is False
+    entry = payload["destinations"][0]
+    assert entry["destination"] == label and entry["outcome"] == "failed"
+    assert "LVC-999" in entry["failure"]
+    assert dest.writes() == [], "the gate must refuse before any destination write"
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_prefix_wins_and_the_declared_block_still_composes(tmp_path):
+    """An explicit ``--ticket-prefix`` overrides the declared vocabulary; the
+    declared install block still reaches both destinations without a body
+    file (REA-018 C2 on the CLI path)."""
+    first = FakeDestination(forge="forgejo")
+    second = FakeDestination(forge="github")
+
+    report = await run_attach(
+        _config(
+            "forgejo",
+            second="github",
+            tracker_prefixes=["LVC"],
+            install_block=TRACKER_IN_BLOCK,
+        ),
+        REPO,
+        TAG,
+        tmp_path / "dist",
+        adapters=[_make(first), _make(second)],
+        repo_dir=tmp_path,
+        name_template=TEMPLATE,
+        notes=NOTES,
+        ticket_prefixes=["REL"],
+    )
+
+    assert report.failed == []
+    for dest in (first, second):
+        assert f"### Install\n{TRACKER_IN_BLOCK}" in dest.release["body"]
+        assert TRACKER_IN_BLOCK not in NOTES
 
 
 # --- The CLI wires the REA-014 verification ---------------------------------
