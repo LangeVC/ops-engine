@@ -497,6 +497,13 @@ class ReleaseHandler:
         now = datetime.now(timezone.utc)
 
         report = PublicationReport(repo=repo, tag_name=tag_name)
+        # Destinations this run read back, and the release clock the pending
+        # deadline runs from: the first release object's own created_at. A
+        # manifest destination this run does not visit (a github-built piece on
+        # a github destination, published by another workflow) is still judged
+        # against that clock after the loop.
+        seen: set[str] = set()
+        observed_since: list[Optional[datetime]] = [None]
 
         async def _verify(adapter: ForgeAdapter, destination: Destination,
                           label: str) -> bool:
@@ -529,6 +536,12 @@ class ReleaseHandler:
             # REA-010 file is still a build file and is still read back.
             pieces = requirements.get(label, ())
             if not pieces and not declared:
+                # Nothing is required on this destination, but its release
+                # object still carries the clock the pending deadline runs
+                # from. Read it (read-only) and leave the destination alone.
+                await _observe_since(
+                    adapter, destination, tag_name, observed_since
+                )
                 return False
             try:
                 found = await adapter.find_release(destination.repo, tag_name)
@@ -551,9 +564,12 @@ class ReleaseHandler:
             # this run, which can only make a piece pending for longer, never
             # red sooner.
             since = parse_timestamp(found.get("created_at")) or now
-            await _judge_manifest_pieces(
-                adapter, destination, audit, report, tag_name, label,
-                manifest, pieces, declared, assets, artifacts, since, now,
+            if observed_since[0] is None:
+                observed_since[0] = since
+            seen.add(label)
+            _judge_manifest_pieces(
+                report, audit, tag_name, label, manifest, pieces, declared,
+                assets, artifacts, since, now,
             )
             return True
 
@@ -719,6 +735,36 @@ class ReleaseHandler:
                 audited = await _verify(adapter, destination, label)
                 if not audited:
                     _audit_destination(audit, tag_name, label, "published")
+
+        # REA-016: a manifest destination this run did not visit (D4: the
+        # github-built piece on a github destination another workflow owns) is
+        # still judged. It only ever reads — the piece is absent from this
+        # run's release — so it can be pending or red, never published, and
+        # the deadline runs from the release clock observed above.
+        if manifest is not None and requirements:
+            since = observed_since[0] or now
+            for label, pieces in requirements.items():
+                if (
+                    label in seen
+                    or label in report.failed
+                    or label in report.rc_skipped
+                ):
+                    continue
+                pending: list[str] = []
+                problems: list[str] = []
+                for name, producer in pieces:
+                    if producer == "github" and not deadline_passed(
+                        since, manifest.deadline_minutes, now
+                    ):
+                        pending.append(
+                            f"{name} producer={producer} since={since.isoformat()}"
+                        )
+                    else:
+                        problems.append(f"{name} missing producer={producer}")
+                if problems:
+                    _fail_manifest(report, audit, tag_name, label, problems)
+                elif pending:
+                    _record_pending(report, audit, tag_name, label, pending)
 
         if report.partial:
             logger.warning(
@@ -1526,6 +1572,209 @@ def _declared_release_asset_names(
             continue
         names.append(_render_asset_name(declaration.name, tag_name))
     return names
+
+
+def _resolved_manifest(
+    config: OpsEngineConfig,
+    repo: str,
+    repo_dir: str | Path | None,
+) -> Optional[AssetManifest]:
+    """The repo's ``release.manifest``, Layer 2 merged with its ``.ops.yaml``.
+
+    The same path the destinations and the REA-014 declaration come from, so
+    a manifest declared in the repository at the tag is the one judged. None
+    means the repo declares no manifest: every asset is forgejo-produced and
+    required at once, exactly the REA-014 behaviour (backward compatible).
+    """
+    org, _, name = repo.partition("/")
+    layer2 = config.get_repo_config(org, name)
+    if repo_dir is not None:
+        layer3 = load_ops_yaml(repo_dir)
+        if layer3 is not None:
+            layer2 = layer2.merge_layer3(layer3)
+    release_config = layer2.release
+    if release_config is None:
+        return None
+    return release_config.manifest
+
+
+async def _observe_since(
+    adapter: ForgeAdapter,
+    destination: Destination,
+    tag_name: str,
+    observed: list[Optional[datetime]],
+) -> None:
+    """Read a destination's release clock without judging the destination.
+
+    The pending deadline runs from the release object's own ``created_at``.
+    A manifest may name a destination this run does not publish to (D4: a
+    github-built piece on a github destination another workflow owns), so the
+    clock is observed wherever a release exists. Any read error, or a release
+    without a timestamp, changes nothing: the caller falls back to ``now``.
+    """
+    if observed[0] is not None:
+        return
+    try:
+        found = await adapter.find_release(destination.repo, tag_name)
+    except Exception:  # noqa: BLE001 (the clock is a courtesy, never a gate)
+        return
+    if not isinstance(found, dict):
+        return
+    since = parse_timestamp(found.get("created_at"))
+    if since is not None:
+        observed[0] = since
+
+
+def _producer_destination(producer: str, repo: str) -> str:
+    """Where a piece with no ``destinations`` is expected: its own forge."""
+    return f"{producer}:{repo}"
+
+
+def _manifest_requirements(
+    manifest: AssetManifest,
+    repo: str,
+    tag_name: str,
+) -> dict[str, tuple[tuple[str, str], ...]]:
+    """Group the manifest's release-object assets by destination label.
+
+    Each entry is ``(rendered name, producer)``. An asset with no explicit
+    ``destinations`` is expected on its producer's own forge (D4), so a
+    github-produced binary does not burden the forgejo destination. Channel
+    pieces are judged read-only by :mod:`ops_engine.modules.asset_manifest`,
+    never here: they are not on a release object.
+    """
+    requirements: dict[str, list[tuple[str, str]]] = {}
+    for entry in manifest.assets:
+        name = _render_asset_name(entry.name, tag_name)
+        targets = entry.destinations or [_producer_destination(entry.producer, repo)]
+        for label in targets:
+            requirements.setdefault(label, []).append((name, entry.producer))
+    return {label: tuple(pieces) for label, pieces in requirements.items()}
+
+
+def _judge_manifest_pieces(
+    report: "PublicationReport",
+    audit: Optional[list[str]],
+    tag_name: str,
+    label: str,
+    manifest: AssetManifest,
+    pieces: tuple[tuple[str, str], ...],
+    declared: list[str],
+    assets: Iterable[object],
+    artifacts: list[tuple[str, bytes]],
+    since: datetime,
+    now: datetime,
+) -> None:
+    """Judge one destination's manifest pieces against the deadline.
+
+    A piece the destination holds is verified like any declared file; a
+    forgejo-produced piece is required at once, so a missing one fails the
+    destination by name. A github-produced piece missing inside the deadline
+    leaves the destination pending (D5), red only once the deadline passed.
+    """
+    attached = {
+        asset.get("name"): asset
+        for asset in assets or ()
+        if isinstance(asset, dict) and asset.get("name") is not None
+    }
+    requirements = {name: producer for name, producer in pieces}
+    problems: list[str] = []
+    pending: list[str] = []
+    entries: list[str] = []
+    # The manifest may extend the REA-014 declaration; a declared file that is
+    # not a manifest piece is still read back as before.
+    for name in declared:
+        if name in requirements:
+            continue
+        existing = attached.get(name)
+        if existing is None:
+            problems.append(f"{name} missing")
+            continue
+        data = dict(artifacts).get(name)
+        if data is None:
+            entries.append(name)
+            continue
+        difference = _asset_difference(existing, data)
+        if difference is not None:
+            problems.append(f"{name} differs ({difference})")
+            continue
+        entries.append(f"{name} {_asset_sha256(data)}")
+    for name, producer in requirements.items():
+        existing = attached.get(name)
+        if existing is None:
+            if producer == "github" and not deadline_passed(
+                since, manifest.deadline_minutes, now
+            ):
+                pending.append(
+                    f"{name} producer={producer} since={since.isoformat()}"
+                )
+                continue
+            problems.append(f"{name} missing producer={producer}")
+            continue
+        data = dict(artifacts).get(name)
+        if data is None:
+            entries.append(name)
+            continue
+        difference = _asset_difference(existing, data)
+        if difference is not None:
+            problems.append(f"{name} differs ({difference})")
+            continue
+        entries.append(f"{name} {_asset_sha256(data)}")
+    if problems:
+        _fail_manifest(report, audit, tag_name, label, problems)
+        return
+    if entries:
+        report.verified[label] = entries
+    if pending:
+        _record_pending(report, audit, tag_name, label, pending)
+        return
+    if entries:
+        _audit_destination(audit, tag_name, label, "verified", ", ".join(entries))
+
+
+def _fail_manifest(
+    report: "PublicationReport",
+    audit: Optional[list[str]],
+    tag_name: str,
+    label: str,
+    problems: list[str],
+) -> None:
+    """Fail a destination whose manifest piece is absent or wrong.
+
+    The detail names the piece, its producer and the destination, so an
+    operator reading the report alone knows all three.
+    """
+    detail = (
+        f"manifest not satisfied on {label}: " + "; ".join(problems)
+    )
+    logger.error(f"partial publication: {label} failed: {detail}")
+    report.failed.append(label)
+    report.failure_details[label] = detail
+    report.body_states.setdefault(label, f"failed: {detail}")
+    for bucket in (
+        report.published,
+        report.skipped,
+        report.supplemented,
+        report.up_to_date,
+    ):
+        if label in bucket:
+            bucket.remove(label)
+    report.verified.pop(label, None)
+    report.pending.pop(label, None)
+    _audit_destination(audit, tag_name, label, "manifest-failed", detail)
+
+
+def _record_pending(
+    report: "PublicationReport",
+    audit: Optional[list[str]],
+    tag_name: str,
+    label: str,
+    pending: list[str],
+) -> None:
+    """Record a destination whose github-produced pieces are still on their
+    way: not a failure, but a state an operator can read."""
+    report.pending[label] = pending
+    _audit_destination(audit, tag_name, label, "pending", "; ".join(pending))
 
 
 async def _verify_destination_assets(
