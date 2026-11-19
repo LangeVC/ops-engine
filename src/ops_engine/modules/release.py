@@ -103,16 +103,19 @@ class PublicationReport:
     published: list[str] = field(default_factory=list)
     failed: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
-    # Destinations whose existing release (made by someone else, with the notes
-    # of this build) got its title corrected and its missing files uploaded.
-    # Not failures: they are not in ``failed``.
+    # Destinations whose existing release was converged to the intended state
+    # (D1): title, body or missing files written. An object authored by
+    # another account is converged the same way. Not failures: they are not in
+    # ``failed``.
     supplemented: list[str] = field(default_factory=list)
     # label -> what an operator needs to read: the HTTP status and the
     # destination's existing release id (409/422), or what differs on an
     # existing release (incomplete). Both labels are also in ``failed``.
     failure_details: dict[str, str] = field(default_factory=dict)
-    # Destinations whose release for the tag already exists from ANOTHER
-    # publisher: recorded as up to date, never edited and never duplicated.
+    # Destinations whose existing release for the tag already is the intended
+    # state, so nothing was written: recorded as up to date, never edited and
+    # never duplicated. A release from ANOTHER publisher is converged like any
+    # other (D1, superseding P36-003); only a complete one lands here.
     # Not failures: they are not in ``failed``.
     up_to_date: list[str] = field(default_factory=list)
     # destination label -> who made the release found for the tag there:
@@ -425,14 +428,18 @@ class ReleaseHandler:
 
         ``publisher_login`` is the login the engine publishes as (P36-003). A
         repository can have two publishers — the engine and a repository-local
-        workflow — so a release that already exists on a destination is only
-        the engine's to touch when the release object's own ``author.login``
-        names that account. When it names another account the release is
-        recorded in ``up_to_date`` and neither edited nor duplicated; the
-        report's ``publisher`` says ``engine`` or ``other``. Without the
-        parameter the engine cannot attribute a release and every release found
-        is judged as before. An undeterminable author degrades to ``other``,
-        never to a false ``engine``.
+        workflow — so the release object's own ``author.login`` is read and
+        the report's ``publisher`` says ``engine`` or ``other``. Attribution
+        does NOT exempt an object from judgement: decision D1 supersedes
+        P36-003's "recorded only", so a release authored by another account is
+        converged to the intended state (title per the template, the CHANGELOG
+        body, the missing files) exactly like one without an author; it is
+        edited in place, never deleted or duplicated. A foreign release that
+        already IS the intended state writes nothing and is recorded in
+        ``up_to_date``. Without the parameter the engine cannot
+        attribute a release and every release found is judged as before. An
+        undeterminable author degrades to ``other``, never to a false
+        ``engine``.
 
         A ``dict[str, str]`` maps credential-variable names to logins (one
         login per destination, P36-003 design C1). Any dict (including an
@@ -813,35 +820,36 @@ async def _judge_existing_release(
     judgement — skipped, incomplete or supplemented — so the duplicate answer
     is named next to the destination. The pre-flight path passes nothing.
 
-    With ``publisher_login`` given, a release the destination already holds and
-    that names ANOTHER account as its author is one publisher's release per
-    repository (P36-003): recorded in ``up_to_date``, neither edited nor
-    duplicated, and the publisher is named per destination. Any other release
-    is judged as before — supplemented, incomplete, or skipped.
+    With ``publisher_login`` given, the release the destination already holds
+    is attributed to ``engine`` or ``other`` in ``report.publishers``. An
+    author that is another account does NOT exempt the object from judgement:
+    decision D1 (which supersedes C1 / P36-003) converges it like any other —
+    title, body and missing assets — and never deletes or re-creates it. Only
+    a foreign release that already is complete (nothing to write) is recorded
+    in ``up_to_date``; the publisher is named per destination either way.
 
     With ``release_body`` given (P36-017), an existing release whose body is
     empty gets the body supplemented (patched in), and one whose body does not
     contain the tag's CHANGELOG section is left untouched and fails that
     destination with a named error.
     """
+    # Attributing the release to a publisher is a report fact, not a write
+    # gate: it never exempts the object from convergence (D1 supersedes
+    # P36-003). Only a release that NAMES another account is provably
+    # someone else's; one without an author is attributed ``other`` but keeps
+    # the historical judgement.
+    foreign = False
     if publisher_login:
         found = await adapter.find_release(destination.repo, tag_name)
         if isinstance(found, dict) and found:
             publisher = _publisher_of(found, publisher_login)
             report.publishers[label] = publisher
-            # Only a release that NAMES another account is someone else's; one
-            # without an author proves nothing and is judged as before.
-            if publisher == "other" and _release_author(found):
+            foreign = publisher == "other" and bool(_release_author(found))
+            if foreign:
                 logger.info(
                     f"Release {tag_name} on {label} was published by another "
-                    "publisher, leaving it untouched"
+                    "publisher; converging it to the intended state (D1)"
                 )
-                report.up_to_date.append(label)
-                report.body_states[label] = "up_to_date"
-                _audit_destination(
-                    audit, tag_name, label, "up-to-date", f"publisher={publisher}"
-                )
-                return
     if release_body is not None:
         if await _try_supplement_body(
             adapter, destination, report, audit, tag_name, label,
@@ -869,6 +877,21 @@ async def _judge_existing_release(
     if problems:
         _record_incomplete(
             report, audit, tag_name, label, problems, duplicate_detail=duplicate_detail
+        )
+        return
+    if foreign:
+        # Nothing differs from what this build would write, and the object was
+        # authored by another account: recorded up to date without a write.
+        # Under D1 that is the only outcome left for a foreign release — an
+        # incomplete one is converged above, never left behind.
+        logger.info(
+            f"Release {tag_name} on {label} already holds the intended state"
+        )
+        report.up_to_date.append(label)
+        report.body_states[label] = "up_to_date"
+        _audit_destination(
+            audit, tag_name, label, "up-to-date",
+            _with_duplicate(duplicate_detail, "publisher=other"),
         )
         return
     logger.info(f"Release {tag_name} already exists on {label}, skipping")
