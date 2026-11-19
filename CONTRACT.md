@@ -435,6 +435,75 @@ The change is a **minor** bump: it adds an optional key to a previously-sealed
 config model and removes nothing, so a consumer pinned to the current version
 is unaffected until it chooses to read the key.
 
+## Release attach CLI
+
+`ops-engine-release-attach` is the one command a repository workflow runs after
+its build (`console_scripts` entry point in `pyproject.toml`, module
+`ops_engine.release_attach`). It takes a tag and an artifact directory and, for
+every declared release destination, finds or creates the release, converges it
+(REA-012), attaches the files (REA-013) and verifies the declared asset set by
+reading the release back (REA-014). It works the same from a Forgejo runner and
+a GitHub runner: the argv does not name a forge, and each destination is
+resolved from the same Layer-2 + `.ops.yaml` merge the engine uses.
+
+```text
+ops-engine-release-attach --config config.yml --repo org/name --tag v1.2.3 \
+    --artifacts dist [--repo-dir .] [--name-template T] \
+    [--notes-file F] [--body-file F] [--ticket-prefix P ...]
+```
+
+The credentials come from the environment variables each destination declares
+(`credential_variable`); the runner populates the ones it holds. `--repo-dir`
+is the repository root holding `.ops.yaml`; it is always passed to the engine,
+so `release.assets` is read and verified. The command writes nothing of its
+own: it is a wire around `ReleaseHandler.publish_release`, which remains the
+one publication function (*One release path*).
+
+**Report schema v1** (`ops-engine-release-attach-report/v1`) is printed to
+stdout as JSON, one run per invocation:
+
+```json
+{
+  "schema": "ops-engine-release-attach-report/v1",
+  "repo": "org/name",
+  "tag_name": "v1.2.3",
+  "ok": true,
+  "exit_code": 0,
+  "destinations": [
+    {
+      "destination": "forgejo:org/name",
+      "outcome": "published",
+      "verified": ["name-1.2.3.whl sha256:<hex>", "SHA256SUMS sha256:<hex>"],
+      "failure": null
+    }
+  ]
+}
+```
+
+`destinations` has one entry per destination the run touched, in the engine's
+order. `outcome` is one of `published`, `converged`, `skipped`, `up-to-date`,
+`rc-skipped`, `verified` or `failed`. `verified` lists each declared
+release-object file found on read-back with the build's own SHA-256 (empty when
+the repository declares none). `failure` is `null` on success and otherwise
+names the destination and the failing file(s). The schema is **additive**: new
+keys may appear; existing keys keep their meaning.
+
+Two defect fixes from the REA-014 review ride in this change:
+`body_states` records `failed: <detail>` for a destination that failed
+verification (it no longer keeps its pre-verification state), and the
+judgement's earlier audit line for that destination (`result=skipped`,
+`incomplete`, `supplemented`) is superseded, so one destination carries one
+audit line.
+
+Exit codes (this is the promise; a consumer reads `exit_code` in the report for
+the same value):
+
+| Code | Meaning |
+| ---- | ------- |
+| 0 | Every destination is done: published, converged, already equal or verified. |
+| 1 | At least one destination failed by name; `failure` names the file and the destination. |
+| 2 | The run could not start: an unreadable config, a missing artifact directory, or an error that escaped the engine. The report is still JSON, with `error` set and `destinations` empty. |
+
 ## Release reconcile entry point
 
 `ReconcileHandler.reconcile_release_tags` (`ReconcileHandler` is a `contract`

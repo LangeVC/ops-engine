@@ -673,6 +673,21 @@ def _audit_destination(
         audit.append(f"{line} {detail}" if detail else line)
 
 
+def _supersede_audit(
+    audit: Optional[list[str]], tag_name: str, label: str
+) -> None:
+    """Drop earlier audit lines for the same destination of the same tag.
+
+    A destination gets one outcome: when verification fails a destination
+    whose judgement already appended a line, that line described a superseded
+    state and must not stay beside ``result=verify-failed``.
+    """
+    if audit is None:
+        return
+    prefix = f"release-publish tag={tag_name} dest={label} "
+    audit[:] = [line for line in audit if not line.startswith(prefix)]
+
+
 def _with_duplicate(duplicate_detail: str, detail: str) -> str:
     """Put the duplicate answer first: ``http=<status>
     existing_release_id=<id>``, then what the existing release holds.
@@ -1538,7 +1553,10 @@ def _fail_verification(
     logger.error(f"partial publication: {label} failed: {detail}")
     report.failed.append(label)
     report.failure_details[label] = detail
-    report.body_states.setdefault(label, f"failed: {detail}")
+    # The state is the verification outcome, not the pre-verification one: a
+    # destination that published (``written``) and then failed the read-back
+    # must not keep reporting that it was written.
+    report.body_states[label] = f"failed: {detail}"
     for bucket in (
         report.published,
         report.skipped,
@@ -1548,6 +1566,10 @@ def _fail_verification(
         if label in bucket:
             bucket.remove(label)
     report.verified.pop(label, None)
+    # One line per destination: the judgement's earlier line (``skipped``,
+    # ``incomplete``, ``supplemented``) described a state this failure
+    # supersedes, so it is removed rather than left beside the failure.
+    _supersede_audit(audit, tag_name, label)
     _audit_destination(audit, tag_name, label, "verify-failed", detail)
     return False
 

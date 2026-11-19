@@ -18,6 +18,13 @@ dependencies = [
     "pyyaml>=6.0",
 ]
 
+[project.scripts]
+# REA-015: one entry point a repository workflow calls after its build. It
+# finds or creates the release, converges it, attaches the files and verifies
+# the declared asset set on every destination (CONTRACT.md, "Release attach
+# CLI").
+ops-engine-release-attach = "ops_engine.release_attach:main"
+
 [project.optional-dependencies]
 # The `dev` extra is for DEVELOPING THE SOURCE CHECKOUT in this repository: it
 # installs the test/lint tooling its suite runs. A checkout carries tests/;
