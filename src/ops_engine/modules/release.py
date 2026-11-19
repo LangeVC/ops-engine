@@ -1,6 +1,7 @@
 """CORE-002: ReleaseHandler — Create releases from tag pushes or labeled merges."""
 
 import fnmatch
+import hashlib
 import logging
 import re
 import tempfile
@@ -691,10 +692,12 @@ async def _existing_release_problems(
 ) -> list[str]:
     """What differs between the destination's release and this build.
 
-    Compares the title with the gated ``release_name`` and the attached asset
-    names with the artifacts of this build. An adapter that shows no release
-    details (``find_release`` not a dict) gives no problems. Empty list: the
-    existing release is the one this build would have made.
+    Compares the title with the gated ``release_name`` and the assets with the
+    artifacts of this build: a missing name, and a name attached with another
+    digest (or, where the forge exposes no digest, another size). An adapter
+    that shows no release details (``find_release`` not a dict) gives no
+    problems. Empty list: the existing release is the one this build would
+    have made.
 
     When ``release_notes`` is given, a release whose notes differ (text after
     stripping) is reported as ``notes differ`` so the failure names it.
@@ -714,15 +717,72 @@ async def _existing_release_problems(
     title = found.get("name")
     if title != release_name:
         problems.append(f"title is {title!r}, expected {release_name!r}")
-    attached = {
-        a.get("name") for a in (found.get("assets") or []) if isinstance(a, dict)
-    }
-    missing = [name for name, _ in artifacts if name not in attached]
+    missing, conflicts = _plan_attachments(found.get("assets"), artifacts)
     if missing:
-        problems.append(f"missing assets: {', '.join(missing)}")
+        problems.append(f"missing assets: {', '.join(n for n, _ in missing)}")
+    problems.extend(conflicts)
     if problems:
         problems.insert(0, f"existing_release_id={found.get('id', 'unknown')}")
     return problems
+
+
+def _asset_sha256(data: bytes) -> str:
+    """The build's own SHA-256, ``sha256:<hex>``, as GitHub reports a digest.
+
+    Free: the bytes are on disk (REL-010), so no asset is ever downloaded to
+    compute it.
+    """
+    return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+def _asset_difference(existing: dict, data: bytes) -> Optional[str]:
+    """Why an attached asset is not the build's file, or None when it cannot
+    be proven different.
+
+    The forge's ``digest`` is compared where it is exposed (GitHub:
+    ``sha256:<hex>``); a null or absent digest falls back to ``size``
+    (Forgejo reports ``digest: null`` but ``size`` — measured 2026-07-28). An
+    asset that carries neither cannot be proven different and stays a no-op;
+    nothing is downloaded to try (REL-010).
+    """
+    digest = existing.get("digest")
+    if isinstance(digest, str) and digest:
+        expected = _asset_sha256(data)
+        if digest.lower() != expected.lower():
+            return f"digest is {digest}, expected {expected}"
+        return None
+    size = existing.get("size")
+    if isinstance(size, int) and size != len(data):
+        return f"size is {size}, expected {len(data)}"
+    return None
+
+
+def _plan_attachments(
+    assets: Iterable[object], artifacts: list[tuple[str, bytes]]
+) -> tuple[list[tuple[str, bytes]], list[str]]:
+    """Split the build's files into what to upload and what conflicts.
+
+    A name attached with the same digest (or the same size where the forge
+    exposes no digest) is a no-op; the same name with another digest is a
+    conflict and is never overwritten. Only names absent from the release are
+    uploaded. Returns ``(missing, conflicts)``; both in artifact order.
+    """
+    attached = {
+        a.get("name"): a
+        for a in (assets or ())
+        if isinstance(a, dict) and a.get("name") is not None
+    }
+    missing: list[tuple[str, bytes]] = []
+    conflicts: list[str] = []
+    for name, data in artifacts:
+        existing = attached.get(name)
+        if existing is None:
+            missing.append((name, data))
+            continue
+        difference = _asset_difference(existing, data)
+        if difference is not None:
+            conflicts.append(f"asset {name} differs ({difference})")
+    return missing, conflicts
 
 
 @dataclass
@@ -942,10 +1002,24 @@ async def _try_supplement_body(
         # found. Nothing is deleted or re-created.
         title = found.get("name")
         retitle = not (isinstance(title, str) and title == release_name)
-        attached = {
-            a.get("name") for a in (found.get("assets") or []) if isinstance(a, dict)
-        }
-        missing = [(n, d) for n, d in artifacts if n not in attached]
+        missing, conflicts = _plan_attachments(found.get("assets"), artifacts)
+        if conflicts:
+            # A name is attached with another digest: never overwritten, so
+            # the destination fails by name and writes nothing at all. The
+            # title difference, if any, is named beside it.
+            parts = [f"existing_release_id={found['id']}"]
+            if retitle:
+                parts.append(f"title is {title!r}, expected {release_name!r}")
+            detail = "; ".join([*parts, *conflicts])
+            logger.error(f"partial publication: {label} failed: {detail}")
+            report.failed.append(label)
+            report.failure_details[label] = detail
+            report.body_states[label] = f"failed: {detail}"
+            _audit_destination(
+                audit, tag_name, label, "failed",
+                _with_duplicate(duplicate_detail, detail),
+            )
+            return True
         try:
             if retitle:
                 await adapter.update_release_title(
@@ -1005,10 +1079,27 @@ async def _try_supplement_body(
     if existing_body == release_body.strip() and not (
         isinstance(title, str) and title == release_name
     ):
-        attached = {
-            a.get("name") for a in (found.get("assets") or []) if isinstance(a, dict)
-        }
-        missing = [(n, d) for n, d in artifacts if n not in attached]
+        missing, conflicts = _plan_attachments(found.get("assets"), artifacts)
+        if conflicts:
+            # Same rule as the empty-body branch: a conflicting name fails the
+            # destination by name and nothing is written. The title difference
+            # this branch exists for is named beside it.
+            detail = "; ".join(
+                [
+                    f"existing_release_id={found['id']}",
+                    f"title is {title!r}, expected {release_name!r}",
+                    *conflicts,
+                ]
+            )
+            logger.error(f"partial publication: {label} failed: {detail}")
+            report.failed.append(label)
+            report.failure_details[label] = detail
+            report.body_states[label] = f"failed: {detail}"
+            _audit_destination(
+                audit, tag_name, label, "failed",
+                _with_duplicate(duplicate_detail, detail),
+            )
+            return True
         try:
             await adapter.update_release_title(
                 destination.repo, found["id"], release_name
@@ -1109,10 +1200,11 @@ async def _plan_supplement(
     title = found.get("name")
     if not _same_title(title, release_name):
         return None
-    attached = {
-        a.get("name") for a in (found.get("assets") or []) if isinstance(a, dict)
-    }
-    missing = [(n, d) for n, d in artifacts if n not in attached]
+    missing, conflicts = _plan_attachments(found.get("assets"), artifacts)
+    if conflicts:
+        # A name attached with another digest is never overwritten: leave the
+        # judgement to the caller, which fails the destination by name.
+        return None
     retitle = title != release_name
     if not retitle and not missing:
         return None
