@@ -2,7 +2,8 @@
 
 The manifest is the additive, optional extension of the REA-010
 ``release.assets`` declaration (D4/D5): every asset and every channel names its
-producer (``forgejo`` or ``github``) and the destinations that must hold it.
+producer (``forgejo`` or ``github``); a release-object asset also names the
+destinations that must hold it.
 
 A github-produced piece is not an error while it is still on its way: it is
 pending until the manifest's deadline (60 minutes unless the repository
@@ -29,13 +30,21 @@ from ops_engine.config_loader import AssetManifest
 # The release object's own creation time is the clock the pending deadline runs
 # from. Destinations render it as ISO-8601, GitHub with a trailing ``Z``.
 def parse_timestamp(value: object) -> Optional[datetime]:
-    """Parse a destination's ISO-8601 timestamp, or return None."""
+    """Parse a destination's ISO-8601 timestamp, or return None.
+
+    The result is always timezone-aware: a value without a zone is taken as
+    UTC, which is how both forges render timestamps, so the deadline never
+    subtracts a naive datetime from an aware ``now``.
+    """
     if not isinstance(value, str) or not value:
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def version_of(tag_name: str) -> str:
@@ -53,12 +62,9 @@ def deadline_passed(
 ) -> bool:
     """True when ``since`` is at least ``deadline_minutes`` before ``now``."""
     now = now or datetime.now(timezone.utc)
+    if since.tzinfo is None:
+        since = since.replace(tzinfo=timezone.utc)
     return now - since >= timedelta(minutes=deadline_minutes)
-
-
-def piece_text(name: str, producer: str, since: datetime) -> str:
-    """The operator-facing form of one asset piece waiting on its producer."""
-    return f"{name} producer={producer} since={since.isoformat()}"
 
 
 @dataclass(frozen=True)
@@ -221,8 +227,12 @@ class HttpxChannelReader:
                     return None
                 return True
             if channel == "homebrew":
+                # A tap is a repository, and a raw file path is the only
+                # reliable read: ``/HEAD/`` is a directory index GitHub does
+                # not serve, so it would answer 404 for every real tap. The
+                # tap's generated README is the one file a tap always has.
                 response = await client.get(
-                    f"https://raw.githubusercontent.com/{name}/HEAD/"
+                    f"https://raw.githubusercontent.com/{name}/HEAD/README.md"
                 )
                 if response.status_code == 404:
                     return False
