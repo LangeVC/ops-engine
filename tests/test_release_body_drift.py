@@ -730,9 +730,14 @@ async def test_body_state_up_to_date(tmp_path):
     """F6 mutation guard: replacing the up_to_date body_states write in
     _judge_existing_release with `pass` must cause this test to fail.
 
-    A release authored by another publisher is recorded up to date and that
-    state must appear in body_states."""
-    dest = ExistingReleaseDestination(body=FULL_BODY, author=OTHER_LOGIN)
+    A foreign-authored release that already IS the intended state (title,
+    body and files) writes nothing, is recorded up to date, and that state
+    must appear in body_states. D1: a foreign release that differs is
+    converged instead, so the object here has nothing left to write."""
+    dest = ExistingReleaseDestination(
+        body=FULL_BODY, name=TITLE, assets=[{"name": n} for n in FILES],
+        author=OTHER_LOGIN,
+    )
     report, _ = await _publish("forgejo", _forgejo(dest), tmp_path,
                                release_body=FULL_BODY,
                                publisher_login=ENGINE_LOGIN)
