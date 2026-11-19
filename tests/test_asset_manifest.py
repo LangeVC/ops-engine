@@ -252,7 +252,9 @@ def _artifacts(tmp_path, extra: dict[str, bytes] | None = None) -> None:
         (art / name).write_bytes(data)
 
 
-async def _publish(destinations, tmp_path, *, config, repo_dir=None, extra=None):
+async def _publish(
+    destinations, tmp_path, *, config, repo_dir=None, extra=None, channel_reader=None
+):
     _artifacts(tmp_path, extra)
     audit: list[str] = []
     report = await ReleaseHandler.publish_release(
@@ -267,6 +269,7 @@ async def _publish(destinations, tmp_path, *, config, repo_dir=None, extra=None)
         audit=audit,
         repo_dir=repo_dir,
         release_body=BODY,
+        channel_reader=channel_reader,
     )
     return report, audit
 
@@ -721,3 +724,104 @@ async def test_the_default_channel_reader_only_issues_reads():
     assert await reader.present_at("pypi", "ops-engine", VERSION) is True
     assert await reader.present_at("ghcr", "langevc/engine", VERSION) is True
     assert seen and all(method == "GET" for method, _ in seen)
+
+
+# --- Regression: an unread destination is never red --------------------------
+
+
+@pytest.mark.asyncio
+async def test_an_unvisited_destination_is_pending_not_red_from_anothers_clock(
+    tmp_path,
+):
+    """A manifest destination this run never reads has no evidence against it.
+    The run's own release is 90 minutes old (past the deadline), but that
+    clock belongs to a different destination: the unvisited github destination
+    is pending and the destination that was read is still published."""
+    forgejo_dest = FakeDestination(forge="forgejo", created_at=_iso(_minutes_ago(90)))
+    report, audit = await _publish(
+        [forgejo_dest], tmp_path, config=_config("forgejo", manifest=MANIFEST)
+    )
+
+    label = f"github:{REPO}"
+    assert report.failed == []
+    assert report.partial is False
+    assert label in report.pending
+    assert f"forgejo:{REPO}" in report.published
+    assert not _failed_lines(audit)
+
+
+@pytest.mark.asyncio
+async def test_a_naive_created_at_is_read_as_utc_and_judged(tmp_path):
+    """Forgejo may render a release timestamp without a zone. That must not
+    crash the deadline (naive minus aware), and the age still decides the
+    piece: 90 minutes naive-UTC is red, 5 minutes is pending."""
+    old = _minutes_ago(90).replace(tzinfo=None).isoformat()
+    dest = FakeDestination(forge="github", created_at=old)
+    report, _ = await _publish(
+        [dest], tmp_path, config=_config("github", manifest=MANIFEST)
+    )
+    assert report.failed == [f"github:{REPO}"]
+
+    fresh = _minutes_ago(5).replace(tzinfo=None).isoformat()
+    dest = FakeDestination(forge="github", created_at=fresh)
+    report, _ = await _publish(
+        [dest], tmp_path, config=_config("github", manifest=MANIFEST)
+    )
+    assert report.failed == []
+    assert report.pending[f"github:{REPO}"][0].startswith(GITHUB_BINARY)
+
+
+# --- Regression: declared channels are judged in the release path ------------
+
+
+@pytest.mark.asyncio
+async def test_declared_channels_are_judged_in_the_release_path(tmp_path):
+    """`manifest.channels` is not bookkeeping: the shipped release path judges
+    it read-only. A present channel is satisfied; an unprobeable winget is
+    manual, never a failure."""
+    manifest = {
+        "channels": [
+            {"channel": "pypi", "name": "ops-engine", "producer": "github"},
+            {"channel": "winget", "name": "OpsEngine.OpsEngine", "producer": "github"},
+        ]
+    }
+    dest = FakeDestination(forge="forgejo", created_at=_iso(_minutes_ago(5)))
+    reader = _FakeChannelReader({"pypi:ops-engine"}, manual=True)
+    report, audit = await _publish(
+        [dest],
+        tmp_path,
+        config=_config("forgejo", manifest=manifest),
+        channel_reader=reader,
+    )
+
+    assert ("pypi", "ops-engine", VERSION) in reader.reads
+    assert report.failed == []
+    assert report.failed == [] and report.partial is False
+    assert [line for line in audit if "result=channel-satisfied" in line]
+    assert [line for line in audit if "result=channel-manual" in line]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_channel_turns_the_release_red_naming_producer(tmp_path):
+    """A github-produced channel absent after the deadline is red in the same
+    report, and the detail names the channel, the producer and the channel
+    form."""
+    manifest = {
+        "channels": [
+            {"channel": "homebrew", "name": "langevc/homebrew-tap", "producer": "github"}
+        ]
+    }
+    dest = FakeDestination(forge="forgejo", created_at=_iso(_minutes_ago(90)))
+    report, audit = await _publish(
+        [dest],
+        tmp_path,
+        config=_config("forgejo", manifest=manifest),
+        channel_reader=_FakeChannelReader(set()),
+    )
+
+    label = "homebrew:langevc/homebrew-tap"
+    assert label in report.failed
+    detail = report.failure_details[label]
+    assert "producer=github" in detail and "channel:homebrew" in detail
+    assert [line for line in audit if f"dest={label}" in line
+            and "result=manifest-failed" in line]

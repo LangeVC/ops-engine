@@ -1318,9 +1318,9 @@ The deadline is `manifest.deadline_minutes` (default 60) and runs from the
 release object's own `created_at` on the destination that carries the run's
 release; a destination without a timestamp starts the clock at the run. A
 manifest destination this run does not publish to (D4: a GitHub-built binary on
-a GitHub destination another workflow owns) is still judged: its release clock
-is read (read-only) and its pieces are pending or red in the same report, never
-published.
+a GitHub destination another workflow owns) is still named, but this run never
+reads it and therefore holds no evidence against any piece there: its pieces
+are recorded as `pending`, never red, and never on another destination's clock.
 
 The channels are read **read-only**, the way capacium's `verify-channels` step
 reads them (`ops_engine.modules.asset_manifest.evaluate_channels`): a present
@@ -1328,7 +1328,13 @@ channel is satisfied; an absent `github`-produced channel is pending within the
 deadline and failed after it, while an absent `forgejo`-produced channel is
 failed at once (the producer rule of the release-object pieces); an unprobeable
 one (`winget`, or any read error) is `manual` and is never a failure — unknown
-is not a verdict. `HttpxChannelReader` issues `GET` only.
+is not a verdict. A channel is labelled `<channel>:<name>`; a satisfied one is
+audited as `result=channel-satisfied` and a manual one as
+`result=channel-manual`, while a pending or failed one uses the same
+`result=pending`/`result=manifest-failed` lines and report buckets as a
+release-object piece. `HttpxChannelReader` issues `GET` only; a caller may
+inject its own reader through the `channel_reader` keyword of
+`publish_release` (and `ReleaseContext.channel_reader`).
 
 The change is **additive**: `PublicationReport` gains an optional `pending`
 field defaulting to `{}`; `to_dict()` keeps its existing keys; and a run with

@@ -21,7 +21,12 @@ from ops_engine.config_loader import (
     ReleaseConfig,
     load_ops_yaml,
 )
-from ops_engine.modules.asset_manifest import deadline_passed, parse_timestamp
+from ops_engine.modules.asset_manifest import (
+    HttpxChannelReader,
+    deadline_passed,
+    evaluate_channels,
+    parse_timestamp,
+)
 from ops_engine.modules.mirror import resolve_destinations
 from ops_engine.modules.notification import NotificationHandler
 from ops_engine.modules.release_gates import (
@@ -241,6 +246,9 @@ class ReleaseContext:
     credentials: Optional[dict[str, Credential]] = None
     audit: Optional[list[str]] = None
     publisher_login: str | dict[str, str] = ""
+    # REA-016: read-only channel probe, the same injection point as
+    # ``publish_release``'s. Omitted, the shipped HttpxChannelReader runs.
+    channel_reader: object = None
     # P36-017: per-repository release body parts. The install block and assets
     # line come from a per-repository declaration (business data, for example a
     # key in the repository's .ops.yaml), never from engine defaults.
@@ -365,6 +373,7 @@ class ReleaseHandler:
         publisher_login: str | dict[str, str] = "",
         release_body: str | None = None,
         ticket_prefixes: Iterable[str] | None = None,
+        channel_reader: object = None,
     ) -> "PublicationReport":
         """Publish a built release to every destination resolved from config.
 
@@ -471,6 +480,11 @@ class ReleaseHandler:
         versa (P36-002). Omitted or ``None`` falls back to the legacy shared
         ``token``/``webhook_secret`` pair.
 
+        ``channel_reader`` is an optional injection point for tests: an object
+        with ``async present_at(channel, name, version)``. Omitted, the shipped
+        read-only :class:`HttpxChannelReader` probes PyPI, ghcr and the
+        Homebrew tap with ``GET`` only.
+
         Raises:
             ValueError: a supplied ``adapters`` list does not match the resolved
                 destination count.
@@ -498,12 +512,14 @@ class ReleaseHandler:
 
         report = PublicationReport(repo=repo, tag_name=tag_name)
         # Destinations this run read back, and the release clock the pending
-        # deadline runs from: the first release object's own created_at. A
-        # manifest destination this run does not visit (a github-built piece on
-        # a github destination, published by another workflow) is still judged
-        # against that clock after the loop.
+        # deadline runs from: the first release object's own created_at.
         seen: set[str] = set()
         observed_since: list[Optional[datetime]] = [None]
+        # The clock the pending deadline runs from is the release object's own
+        # created_at. A manifest destination this run does not visit (a
+        # github-built piece on a github destination another workflow owns)
+        # has no object to read here: without a clock its pieces stay pending,
+        # never red and never on another destination's clock.
 
         async def _verify(adapter: ForgeAdapter, destination: Destination,
                           label: str) -> bool:
@@ -537,11 +553,13 @@ class ReleaseHandler:
             pieces = requirements.get(label, ())
             if not pieces and not declared:
                 # Nothing is required on this destination, but its release
-                # object still carries the clock the pending deadline runs
-                # from. Read it (read-only) and leave the destination alone.
-                await _observe_since(
-                    adapter, destination, tag_name, observed_since
-                )
+                # object is the run's release and therefore carries the clock
+                # the pending deadline runs from. Read it (read-only) and keep
+                # the destination's historic single ``published`` line.
+                if observed_since[0] is None:
+                    observed_since[0] = await _destination_clock(
+                        adapter, destination, tag_name
+                    )
                 return False
             try:
                 found = await adapter.find_release(destination.repo, tag_name)
@@ -738,11 +756,10 @@ class ReleaseHandler:
 
         # REA-016: a manifest destination this run did not visit (D4: the
         # github-built piece on a github destination another workflow owns) is
-        # still judged. It only ever reads — the piece is absent from this
-        # run's release — so it can be pending or red, never published, and
-        # the deadline runs from the release clock observed above.
+        # still named. This run holds no evidence about it — it never read
+        # that destination — so the piece is pending, never red and never
+        # published.
         if manifest is not None and requirements:
-            since = observed_since[0] or now
             for label, pieces in requirements.items():
                 if (
                     label in seen
@@ -750,21 +767,27 @@ class ReleaseHandler:
                     or label in report.rc_skipped
                 ):
                     continue
-                pending: list[str] = []
-                problems: list[str] = []
-                for name, producer in pieces:
-                    if producer == "github" and not deadline_passed(
-                        since, manifest.deadline_minutes, now
-                    ):
-                        pending.append(
-                            f"{name} producer={producer} since={since.isoformat()}"
-                        )
-                    else:
-                        problems.append(f"{name} missing producer={producer}")
-                if problems:
-                    _fail_manifest(report, audit, tag_name, label, problems)
-                elif pending:
-                    _record_pending(report, audit, tag_name, label, pending)
+                # This run read nothing on this destination, so there is no
+                # evidence that any piece is absent — only that it is not part
+                # of this run. Every piece is pending; an unread destination
+                # is never red, and never takes another destination's verdict.
+                since = observed_since[0] or now
+                pending = [
+                    f"{name} producer={producer} since={since.isoformat()}"
+                    for name, producer in pieces
+                ]
+                _record_pending(report, audit, tag_name, label, pending)
+
+        # REA-016: the manifest's channels are judged read-only — a present
+        # channel is satisfied, an absent one follows its producer, and an
+        # unprobeable one (winget, or any read error) is manual, never a
+        # failure. A channel has no release object of its own, so it runs on
+        # the run's clock when no release clock was observed.
+        if manifest is not None and manifest.channels:
+            await _judge_channels(
+                report, audit, tag_name, manifest, now, observed_since[0],
+                channel_reader,
+            )
 
         if report.partial:
             logger.warning(
@@ -1598,31 +1621,25 @@ def _resolved_manifest(
     return release_config.manifest
 
 
-async def _observe_since(
+async def _destination_clock(
     adapter: ForgeAdapter,
     destination: Destination,
     tag_name: str,
-    observed: list[Optional[datetime]],
-) -> None:
-    """Read a destination's release clock without judging the destination.
+) -> Optional[datetime]:
+    """Read ONE destination's own release clock, or None when it cannot be read.
 
     The pending deadline runs from the release object's own ``created_at``.
-    A manifest may name a destination this run does not publish to (D4: a
-    github-built piece on a github destination another workflow owns), so the
-    clock is observed wherever a release exists. Any read error, or a release
-    without a timestamp, changes nothing: the caller falls back to ``now``.
+    An unread clock is None — the caller must leave the destination pending,
+    never substitute another destination's clock and never assume red. Any
+    read error answers None: the clock is evidence, not a gate.
     """
-    if observed[0] is not None:
-        return
     try:
         found = await adapter.find_release(destination.repo, tag_name)
     except Exception:  # noqa: BLE001 (the clock is a courtesy, never a gate)
-        return
+        return None
     if not isinstance(found, dict):
-        return
-    since = parse_timestamp(found.get("created_at"))
-    if since is not None:
-        observed[0] = since
+        return None
+    return parse_timestamp(found.get("created_at"))
 
 
 def _producer_destination(producer: str, repo: str) -> str:
@@ -1771,10 +1788,53 @@ def _record_pending(
     label: str,
     pending: list[str],
 ) -> None:
-    """Record a destination whose github-produced pieces are still on their
-    way: not a failure, but a state an operator can read."""
+    """Record a destination whose pieces are still on their way: not a
+    failure, but a state an operator can read."""
     report.pending[label] = pending
     _audit_destination(audit, tag_name, label, "pending", "; ".join(pending))
+
+
+async def _judge_channels(
+    report: "PublicationReport",
+    audit: Optional[list[str]],
+    tag_name: str,
+    manifest: AssetManifest,
+    now: datetime,
+    since: Optional[datetime],
+    channel_reader: object,
+) -> None:
+    """Judge the manifest's channels read-only and fold them into the report.
+
+    A satisfied channel gets its own audit line. A pending or failed channel
+    is recorded under its ``<channel>:<name>`` label, so an operator sees the
+    channel as the subject and, for a failure, the producer and the channel
+    form in the same detail. Manual (unprobeable) channels are audited as
+    such and are never a failure — unknown is not a verdict.
+    """
+    unsatisfied: list[str] = []
+    verdict = await evaluate_channels(
+        manifest,
+        tag_name,
+        reader=channel_reader if channel_reader is not None else HttpxChannelReader(),
+        since=since,
+        now=now,
+        unsatisfied=unsatisfied,
+    )
+    for label in verdict.satisfied:
+        _audit_destination(audit, tag_name, label, "channel-satisfied")
+    for label in verdict.manual:
+        _audit_destination(audit, tag_name, label, "channel-manual")
+    for piece in verdict.pending:
+        label = f"{piece.channel}:{piece.name}"
+        _record_pending(report, audit, tag_name, label, [piece.as_text()])
+    for piece in verdict.failed:
+        label = f"{piece.channel}:{piece.name}"
+        _fail_manifest(report, audit, tag_name, label, [piece.as_text()])
+    if unsatisfied:
+        # A forgejo-produced channel is red on absence at once.
+        for entry in unsatisfied:
+            label = entry.split(" ", 1)[0]
+            _fail_manifest(report, audit, tag_name, label, [entry])
 
 
 async def _verify_destination_assets(
@@ -2011,6 +2071,7 @@ async def _release_tag(
             audit=context.audit,
             publisher_login=context.publisher_login,
             release_body=body,
+            channel_reader=context.channel_reader,
         )
     if report.partial:
         await _notify_partial(context.ops_config, repo, tag_name, report)
