@@ -479,7 +479,11 @@ class ReleaseHandler:
 
         async def _verify(adapter: ForgeAdapter, destination: Destination,
                           label: str) -> None:
-            if not declared:
+            # Nothing declared: nothing to check. A destination the judgement
+            # just failed (an incomplete object) is not verified — its outcome
+            # already names the difference, and a second line saying the set
+            # looked right would contradict it.
+            if not declared or label in report.failed:
                 return
             await _verify_destination_assets(
                 adapter, destination, report, audit, tag_name, label,
