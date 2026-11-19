@@ -52,11 +52,6 @@ def version_of(tag_name: str) -> str:
     return tag_name[1:] if tag_name.startswith("v") else tag_name
 
 
-def render_name(name: str, tag_name: str) -> str:
-    """Render the ``<version>``/``<tag>`` placeholders of a declared name."""
-    return name.replace("<version>", version_of(tag_name)).replace("<tag>", tag_name)
-
-
 def deadline_passed(
     since: datetime, deadline_minutes: int, now: Optional[datetime] = None
 ) -> bool:
@@ -163,7 +158,7 @@ class HttpxChannelReader:
     """Read-only presence probe for the manifest's channels.
 
     Only GET is ever issued: PyPI answers through its JSON API, ghcr through an
-    anonymous pull token followed by a manifest HEAD/GET, and a Homebrew tap is
+    anonymous pull token followed by a manifest GET, and a Homebrew tap is
     probed at its repository. winget has no read-only probe and answers None
     (manual). Any read error is None as well — an unknown answer must not fail
     a release.

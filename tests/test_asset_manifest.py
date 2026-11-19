@@ -293,6 +293,7 @@ async def test_a_github_produced_asset_absent_within_the_deadline_is_pending(
     """Criterion 1: the github-built binary is not in this build and not on
     the destination yet. Within the 60-minute deadline the release is pending,
     the report names the producer and since when, and nothing failed."""
+    started = datetime.now(timezone.utc)
     since = _minutes_ago(5)
     dest = FakeDestination(forge=forge, created_at=_iso(since))
     report, audit = await _publish(
@@ -302,14 +303,22 @@ async def test_a_github_produced_asset_absent_within_the_deadline_is_pending(
     label = f"github:{REPO}"
     assert report.failed == [], "a github-produced piece within the deadline is not an error"
     assert report.partial is False
-    assert report.pending[label] == [
-        f"{GITHUB_BINARY} producer=github since={since.isoformat()}"
-    ]
+    assert len(report.pending[label]) == 1
+    detail = report.pending[label][0]
+    assert detail.startswith(f"{GITHUB_BINARY} producer=github since=")
+    observed = _parse(detail.split("since=", 1)[1])
+    if forge == "github":
+        # The github destination was read: its release object is the clock.
+        assert observed == since
+    else:
+        # The github destination was never read: the run's own time stands,
+        # never the clock of the forgejo destination this run did read.
+        assert observed >= started - timedelta(minutes=1)
     lines = _pending_lines(audit)
     assert len(lines) == 1
     assert GITHUB_BINARY in lines[0]
     assert "producer=github" in lines[0]
-    assert f"since={since.isoformat()}" in lines[0]
+    assert f"since={observed.isoformat()}" in lines[0]
     assert label in lines[0]
     assert not _failed_lines(audit)
 
@@ -737,6 +746,7 @@ async def test_an_unvisited_destination_is_pending_not_red_from_anothers_clock(
     The run's own release is 90 minutes old (past the deadline), but that
     clock belongs to a different destination: the unvisited github destination
     is pending and the destination that was read is still published."""
+    started = datetime.now(timezone.utc)
     forgejo_dest = FakeDestination(forge="forgejo", created_at=_iso(_minutes_ago(90)))
     report, audit = await _publish(
         [forgejo_dest], tmp_path, config=_config("forgejo", manifest=MANIFEST)
@@ -748,6 +758,13 @@ async def test_an_unvisited_destination_is_pending_not_red_from_anothers_clock(
     assert label in report.pending
     assert f"forgejo:{REPO}" in report.published
     assert not _failed_lines(audit)
+
+    # The pending piece must run on the run's own clock: the branch is
+    # "since=<now>", not the 90-minute-old clock read on the other forge.
+    detail = report.pending[label][0]
+    since = _parse(detail.split("since=", 1)[1].split(" ", 1)[0])
+    assert since >= started - timedelta(minutes=1)
+    assert abs(since - _minutes_ago(90)) > timedelta(minutes=60)
 
 
 @pytest.mark.asyncio
@@ -796,7 +813,7 @@ async def test_declared_channels_are_judged_in_the_release_path(tmp_path):
 
     assert ("pypi", "ops-engine", VERSION) in reader.reads
     assert report.failed == []
-    assert report.failed == [] and report.partial is False
+    assert report.partial is False
     assert [line for line in audit if "result=channel-satisfied" in line]
     assert [line for line in audit if "result=channel-manual" in line]
 

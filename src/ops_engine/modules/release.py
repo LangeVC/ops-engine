@@ -770,10 +770,11 @@ class ReleaseHandler:
                 # This run read nothing on this destination, so there is no
                 # evidence that any piece is absent — only that it is not part
                 # of this run. Every piece is pending; an unread destination
-                # is never red, and never takes another destination's verdict.
-                since = observed_since[0] or now
+                # is never red, and never takes another destination's clock:
+                # the clock it would borrow was read elsewhere and says
+                # nothing about this destination, so the run's own time stands.
                 pending = [
-                    f"{name} producer={producer} since={since.isoformat()}"
+                    f"{name} producer={producer} since={now.isoformat()}"
                     for name, producer in pieces
                 ]
                 _record_pending(report, audit, tag_name, label, pending)
