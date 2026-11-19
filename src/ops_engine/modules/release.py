@@ -372,16 +372,20 @@ class ReleaseHandler:
         the tag there). ``roles`` keeps only destinations whose role is listed;
         ``None`` keeps all.
 
-        ``skip_existing`` makes publication idempotent per destination: when the
-        destination already holds a release for ``tag_name`` it is recorded in
-        ``skipped`` and nothing is created or uploaded there, so a redelivered
-        event is a no-op for it. The check runs on the destination's own
-        adapter (each destination answers for itself), and a create call the
-        forge answers as a duplicate (409 Forgejo, 422 GitHub) is recorded the
-        same way, so a release the by-tag lookup cannot see (a draft) is not a
-        failure. It is opt-in so callers
-        that publish to a known-empty destination keep their exact call
-        sequence.
+        ``skip_existing`` adds a pre-flight check that makes publication
+        idempotent per destination: when the destination already holds a release
+        for ``tag_name`` it is recorded in ``skipped`` and nothing is created or
+        uploaded there, so a redelivered event is a no-op for it. The check runs
+        on the destination's own adapter (each destination answers for itself).
+
+        A duplicate answer to the create call is continued from whether or not
+        ``skip_existing`` was given (REA-011): 409 on Forgejo, 422 on GitHub,
+        which mean the destination already holds a release for the tag in some
+        state — a draft, or a row the token's list does not show. The existing
+        release is resolved by tag for any state and judged like one the
+        pre-flight check found; the audit line of that judgement names the
+        duplicate answer (``http=<status> existing_release_id=<id>``), so this
+        is never a failure.
 
         ``audit`` follows the ``MirrorHandler.push_event`` convention: when a
         list is given, one line per destination is appended to it
@@ -389,8 +393,9 @@ class ReleaseHandler:
         A destination skipped because its release already exists is not a
         failure, unless that release is incomplete (its title is not the gated
         title, or it lacks assets of this build): it is then recorded in
-        ``failed`` and ``incomplete`` names what differs. A failure the
-        destination answered with 409 or 422 carries ``http=<status>
+        ``failed`` and ``incomplete`` names what differs. A 422 that is not a
+        duplicate answer (GitHub's generic validation failure, a code other
+        than ``already_exists``) is a failure and carries ``http=<status>
         existing_release_id=<id>``, in the audit line and in the notification.
 
         An existing release with the notes of this build (equal after
@@ -544,7 +549,7 @@ class ReleaseHandler:
                         release_body=release_body,
                     )
                     continue
-                created = await _publish_to_destination(
+                duplicate_detail = await _publish_to_destination(
                     adapter,
                     destination,
                     tag_name=tag_name,
@@ -553,17 +558,19 @@ class ReleaseHandler:
                     artifacts=artifacts,
                     draft=draft,
                     prerelease=prerelease,
-                    tolerate_existing=skip_existing,
                     body_override=release_body,
                 )
-                if not created:
-                    # The create call answered a duplicate: the release was
-                    # created between the lookup and the create. Same rule as
-                    # for a release the lookup showed (OE-042a).
+                if duplicate_detail is not None:
+                    # The create call answered a duplicate: the destination
+                    # already holds the release, whether or not the pre-flight
+                    # lookup could see it (a draft, or no write access to the
+                    # list). Continue with that object, the same judgement as
+                    # for a release the lookup showed (REA-011, OE-042a).
                     await _judge_existing_release(
                         adapter, destination, report, audit, tag_name, label,
                         release_name, release_notes, artifacts, per_dest_login,
                         release_body=release_body,
+                        duplicate_detail=duplicate_detail,
                     )
                     continue
             except Exception as exc:  # noqa: BLE001 (record — the report, not abort)
@@ -600,6 +607,16 @@ def _audit_destination(
     if audit is not None:
         line = f"release-publish tag={tag_name} dest={label} result={result}"
         audit.append(f"{line} {detail}" if detail else line)
+
+
+def _with_duplicate(duplicate_detail: str, detail: str) -> str:
+    """Put the duplicate answer first: ``http=<status>
+    existing_release_id=<id>``, then what the existing release holds.
+
+    ``duplicate_detail`` is empty on the pre-flight path, where the line keeps
+    exactly the detail it had before (REA-011).
+    """
+    return f"{duplicate_detail}; {detail}" if duplicate_detail else detail
 
 
 async def _conflict_detail(
@@ -759,8 +776,15 @@ async def _judge_existing_release(
     artifacts: list[tuple[str, bytes]],
     publisher_login: str = "",
     release_body: str | None = None,
+    duplicate_detail: str = "",
 ) -> None:
     """Record what ``destination`` already holds for ``tag_name``.
+
+    ``duplicate_detail`` is set when the release was found through a duplicate
+    answer to the create call (REA-011): ``http=<status>
+    existing_release_id=<id>``. It is carried into the audit line of that
+    judgement — skipped, incomplete or supplemented — so the duplicate answer
+    is named next to the destination. The pre-flight path passes nothing.
 
     With ``publisher_login`` given, a release the destination already holds and
     that names ANOTHER account as its author is one publisher's release per
@@ -794,7 +818,7 @@ async def _judge_existing_release(
     if release_body is not None:
         if await _try_supplement_body(
             adapter, destination, report, audit, tag_name, label,
-            release_body, release_notes, artifacts,
+            release_body, release_notes, artifacts, duplicate_detail=duplicate_detail,
         ):
             return
         # Body already contains the CHANGELOG section.  Use the existing
@@ -807,7 +831,7 @@ async def _judge_existing_release(
             release_notes = found_body["body"]
     if await _try_supplement(
         adapter, destination, report, audit, tag_name, label,
-        release_name, release_notes, artifacts,
+        release_name, release_notes, artifacts, duplicate_detail=duplicate_detail,
     ):
         return
     problems = await _existing_release_problems(
@@ -815,12 +839,14 @@ async def _judge_existing_release(
         release_notes,
     )
     if problems:
-        _record_incomplete(report, audit, tag_name, label, problems)
+        _record_incomplete(
+            report, audit, tag_name, label, problems, duplicate_detail=duplicate_detail
+        )
         return
     logger.info(f"Release {tag_name} already exists on {label}, skipping")
     report.skipped.append(label)
     report.body_states.setdefault(label, "skipped")
-    _audit_destination(audit, tag_name, label, "skipped")
+    _audit_destination(audit, tag_name, label, "skipped", duplicate_detail)
 
 
 async def _try_supplement_body(
@@ -833,6 +859,7 @@ async def _try_supplement_body(
     release_body: str,
     release_notes: str,
     artifacts: list[tuple[str, bytes]],
+    duplicate_detail: str = "",
 ) -> bool:
     """Judge an existing release with the body-writer rule (P36-017).
 
@@ -868,7 +895,10 @@ async def _try_supplement_body(
         report.body_states[label] = "supplemented"
         _audit_destination(
             audit, tag_name, label, "supplemented",
-            f"existing_release_id={found['id']} body supplemented (was empty)"
+            _with_duplicate(
+                duplicate_detail,
+                f"existing_release_id={found['id']} body supplemented (was empty)",
+            ),
         )
         return True
 
@@ -885,7 +915,9 @@ async def _try_supplement_body(
         report.failed.append(label)
         report.failure_details[label] = detail
         report.body_states[label] = f"failed: {detail}"
-        _audit_destination(audit, tag_name, label, "failed", detail)
+        _audit_destination(
+            audit, tag_name, label, "failed", _with_duplicate(duplicate_detail, detail)
+        )
         return True
 
     # Body already contains the CHANGELOG section: already equal.
@@ -907,6 +939,7 @@ async def _try_supplement(
     release_name: str,
     release_notes: str,
     artifacts: list[tuple[str, bytes]],
+    duplicate_detail: str = "",
 ) -> bool:
     """Supplement the existing release of ``destination`` when the rule applies.
 
@@ -925,7 +958,9 @@ async def _try_supplement(
     logger.info(f"Release {tag_name} on {label} supplemented: {detail}")
     report.supplemented.append(label)
     report.body_states.setdefault(label, "supplemented")
-    _audit_destination(audit, tag_name, label, "supplemented", detail)
+    _audit_destination(
+        audit, tag_name, label, "supplemented", _with_duplicate(duplicate_detail, detail)
+    )
     return True
 
 
@@ -1004,13 +1039,16 @@ def _record_incomplete(
     tag_name: str,
     label: str,
     problems: list[str],
+    duplicate_detail: str = "",
 ) -> None:
     detail = "; ".join(problems)
     logger.error(f"partial publication: {label} holds an incomplete release: {detail}")
     report.failed.append(label)
     report.failure_details[label] = f"incomplete existing release ({detail})"
     report.body_states[label] = f"incomplete: {detail}"
-    _audit_destination(audit, tag_name, label, "incomplete", detail)
+    _audit_destination(
+        audit, tag_name, label, "incomplete", _with_duplicate(duplicate_detail, detail)
+    )
 
 
 async def _notify_partial(
@@ -1054,17 +1092,17 @@ async def _publish_to_destination(
     artifacts: list[tuple[str, bytes]],
     draft: bool,
     prerelease: bool,
-    tolerate_existing: bool = False,
     body_override: str | None = None,
-) -> bool:
+) -> Optional[str]:
     """Create the release on one destination and attach every artifact to it.
 
-    Returns True when the release was created and its artifacts attached. With
-    ``tolerate_existing``, a create call the forge answers as a duplicate
-    (``adapter.release_conflict``: 409 on Forgejo, 422 on GitHub) means the
-    destination already holds the release in some state the by-tag lookup did
-    not show: nothing is attached and False is returned. Only the create call
-    is read this way; an upload error stays a failure.
+    Returns None when the release was created and its artifacts attached. A
+    create call the forge answers as a duplicate (``adapter.release_conflict``:
+    409 on Forgejo, 422 on GitHub) means the destination already holds the
+    release in some state the by-tag lookup did not show: nothing is attached
+    and the duplicate detail (``http=<status> existing_release_id=<id>``) is
+    returned, so the caller continues with the existing object. Only the create
+    call is read this way; an upload error stays a failure.
 
     ``body_override``, when given, is used as the release body instead of
     ``release_notes``, so a release created here carries the full body with
@@ -1087,11 +1125,10 @@ async def _publish_to_destination(
         )
     except Exception as exc:  # noqa: BLE001 (only a duplicate answer is absorbed)
         # ``is True``: only an adapter's explicit yes absorbs the error.
-        if (
-            tolerate_existing
-            and await adapter.release_conflict(exc, destination.repo, tag_name) is True
-        ):
-            return False
+        if await adapter.release_conflict(exc, destination.repo, tag_name) is True:
+            # The duplicate answer names its status; the release id comes from
+            # the same lookup ``_conflict_detail`` runs for any 409/422.
+            return await _conflict_detail(adapter, destination, tag_name, exc)
         raise
     release_id = created["id"]
     for asset_name, data in artifacts:
@@ -1101,7 +1138,7 @@ async def _publish_to_destination(
             asset_name=asset_name,
             data=data,
         )
-    return True
+    return None
 
 
 def _collect_artifacts(artifact_dir: str | Path) -> list[tuple[str, bytes]]:

@@ -303,8 +303,9 @@ class ReconcileHandler:
         release-role destination (resolved from ``.ops.yaml`` at that tag over
         the Layer-2 config, like the webhook path). A tag missing on at least
         one destination goes through the OE-009 path (gates, tag identity,
-        ``publish_release`` with ``skip_existing``), so a destination that
-        already holds the release is left alone.
+        ``publish_release``), so a destination that already holds the release
+        is left alone: a duplicate answer to the create call continues with the
+        existing object (REA-011).
 
         A tag that is refused or fails is recorded in the report and the other
         tags still run. A repository without ``release.enabled``, or with ``release.reconcile`` set
