@@ -17,6 +17,7 @@ from ops_engine.modules.mirror import resolve_destinations
 from ops_engine.modules.notification import NotificationHandler
 from ops_engine.modules.release_gates import (
     MissingChangelogEntryError,
+    ReleaseNotesAudienceError,
     ReleaseTitleError,
     check_release_notes_audience,
     check_release_title,
@@ -398,13 +399,29 @@ class ReleaseHandler:
         than ``already_exists``) is a failure and carries ``http=<status>
         existing_release_id=<id>``, in the audit line and in the notification.
 
-        An existing release with the notes of this build (equal after
-        stripping) and a title equal to the gated title ignoring case and
-        whitespace is supplemented, not failed: the title is corrected and
-        exactly the missing files are uploaded; it is listed in
-        ``supplemented`` and the audit line reads ``result=supplemented``.
-        Files already attached are untouched; nothing is re-created or deleted. When any destination failed, one warning line is logged for
-        the whole call (the engine has no event log, D20).
+        An existing release is converged to the intended state (REA-012,
+        decision D1, which supersedes C1's "existing object only recorded"):
+        for the declared tag the title is set per the name template and the
+        body to the CHANGELOG body, and the object is never deleted or
+        re-created. An object with another title is PATCHed to the template
+        title; an empty body is filled with the CHANGELOG body; the audit line
+        names the old and the new title and lists the files attached. When the
+        title is equal ignoring case and whitespace, the notes of this build
+        (equal after stripping) are in place and only files are missing, it is
+        supplemented: the title is corrected and exactly the missing files are
+        uploaded. It is then listed in ``supplemented`` and the audit line
+        reads ``result=supplemented``. Files already attached are untouched;
+        nothing is re-created or deleted. When any destination failed, one
+        warning line is logged for the whole call (the engine has no event
+        log, D20).
+
+        ``release_body`` is the composed body (title, notes, install and
+        CHANGELOG link). With ``ticket_prefixes`` given, the external-audience
+        gate runs on that final body per destination before any write: a body
+        that names the author's tracker writes nothing on that destination and
+        fails it by name, while a destination with a clean body still
+        publishes. ``process_event`` keeps raising the refusal from its own
+        gate before any destination is considered; this path records it.
 
         ``publisher_login`` is the login the engine publishes as (P36-003). A
         repository can have two publishers — the engine and a repository-local
@@ -496,13 +513,6 @@ class ReleaseHandler:
         # summary lists the reason.
         _is_rc = _RC_TAG_RE.match(tag_name)
 
-        # P36-017 criterion 3: the external-audience gate runs on the
-        # FINAL body before any destination write. The gate runs here
-        # because the shipped workflow calls publish_release directly
-        # and composes the body itself — the gate must be in this path.
-        if release_body is not None and ticket_prefixes:
-            check_release_notes_audience(release_body, ticket_prefixes)
-
         for destination, adapter in paired:
             label = _destination_label(destination)
             # A release destination without explicit visibility is public
@@ -539,6 +549,23 @@ class ReleaseHandler:
                                   f"publisher_login unavailable for "
                                   f"credential_variable {destination.credential_variable!r}")
                 continue
+            # REA-012 (D1): the external-audience gate runs on the FINAL body
+            # before any write on this destination, and only this destination
+            # is refused when the body names the author's tracker. The gate
+            # runs here because the shipped workflow calls publish_release
+            # directly and composes the body itself — the gate must be in this
+            # path — and per destination because one refused body must not
+            # stop another destination whose body is clean.
+            if release_body is not None and ticket_prefixes:
+                try:
+                    check_release_notes_audience(release_body, ticket_prefixes)
+                except ReleaseNotesAudienceError as exc:
+                    logger.error(f"partial publication: {label} failed: {exc}")
+                    report.failed.append(label)
+                    report.body_states[label] = f"failed: {exc}"
+                    report.failure_details[label] = str(exc)
+                    _audit_destination(audit, tag_name, label, "failed", str(exc))
+                    continue
             try:
                 if skip_existing and await adapter.release_exists(
                     destination.repo, tag_name
@@ -818,7 +845,8 @@ async def _judge_existing_release(
     if release_body is not None:
         if await _try_supplement_body(
             adapter, destination, report, audit, tag_name, label,
-            release_body, release_notes, artifacts, duplicate_detail=duplicate_detail,
+            release_name, release_body, release_notes, artifacts,
+            duplicate_detail=duplicate_detail,
         ):
             return
         # Body already contains the CHANGELOG section.  Use the existing
@@ -856,23 +884,27 @@ async def _try_supplement_body(
     audit: Optional[list[str]],
     tag_name: str,
     label: str,
+    release_name: str,
     release_body: str,
     release_notes: str,
     artifacts: list[tuple[str, bytes]],
     duplicate_detail: str = "",
 ) -> bool:
-    """Judge an existing release with the body-writer rule (P36-017).
+    """Judge an existing release with the body-writer rule (P36-017, REA-012).
 
-    Returns True when the destination was handled (body supplemented or
-    failed); False means the caller should continue with the existing
+    Returns True when the destination was handled (converged, failed, or
+    retitled); False means the caller should continue with the existing
     supplement/title/asset logic.
 
-    Rule: when the existing release has an empty body, the full body is
-    patched in and the destination is recorded as supplemented. When the
-    body does not contain the tag's CHANGELOG section, the destination is
-    failed with a named error that names the difference. Otherwise
-    (body already contains the CHANGELOG), the caller keeps judging as
-    before.
+    Rule (REA-012 / D1): an existing release with an empty body is converged —
+    the title to ``release_name`` per the template when it differs, the body
+    to ``release_body`` (the CHANGELOG section under heading and install
+    block), and exactly the files of this build that are not attached. An
+    object whose body is already exactly ``release_body`` is retitled when its
+    title differs and left alone otherwise. When the body does not contain
+    the tag's CHANGELOG section, the destination is failed with a named error
+    that names the difference and nothing is written there. Nothing is
+    re-created or deleted.
     """
     found = await adapter.find_release(destination.repo, tag_name)
     if not isinstance(found, dict) or found.get("id") is None:
@@ -880,25 +912,47 @@ async def _try_supplement_body(
     existing_body = (found.get("body") or "").strip()
 
     if not existing_body:
-        # Empty body: supplement with the full body.
+        # REA-012 (D1): converge the object — the title per the template and
+        # the body to the CHANGELOG section. The two adapter calls stay
+        # single-field writes (the adapter API exposes one field per call),
+        # and the title is written first so a failure leaves the body as
+        # found. Nothing is deleted or re-created.
+        title = found.get("name")
+        retitle = not (isinstance(title, str) and title == release_name)
+        attached = {
+            a.get("name") for a in (found.get("assets") or []) if isinstance(a, dict)
+        }
+        missing = [(n, d) for n, d in artifacts if n not in attached]
         try:
+            if retitle:
+                await adapter.update_release_title(
+                    destination.repo, found["id"], release_name
+                )
             await adapter.update_release_body(
                 destination.repo, found["id"], release_body
             )
+            for name, data in missing:
+                await adapter.upload_release_asset(
+                    repo_full_name=destination.repo,
+                    release_id=found["id"],
+                    asset_name=name,
+                    data=data,
+                )
         except NotImplementedError:
             return False
-        logger.info(
-            f"Release {tag_name} on {label} body supplemented "
-            f"(was empty)"
-        )
+        parts = [f"existing_release_id={found['id']}"]
+        if retitle:
+            parts.append(f"title corrected from {title!r} to {release_name!r}")
+        parts.append("body supplemented (was empty)")
+        if missing:
+            parts.append("uploaded: " + ", ".join(n for n, _ in missing))
+        detail = "; ".join(parts)
+        logger.info(f"Release {tag_name} on {label} converged: {detail}")
         report.supplemented.append(label)
         report.body_states[label] = "supplemented"
         _audit_destination(
             audit, tag_name, label, "supplemented",
-            _with_duplicate(
-                duplicate_detail,
-                f"existing_release_id={found['id']} body supplemented (was empty)",
-            ),
+            _with_duplicate(duplicate_detail, detail),
         )
         return True
 
@@ -920,7 +974,47 @@ async def _try_supplement_body(
         )
         return True
 
-    # Body already contains the CHANGELOG section: already equal.
+    # Body already contains the CHANGELOG section: already equal. REA-012
+    # (D1): when it is exactly the body this call would write and the title
+    # differs, the title is converged to the template and the missing files
+    # are attached — the whole object converges, not only an empty one.
+    title = found.get("name")
+    if existing_body == release_body.strip() and not (
+        isinstance(title, str) and title == release_name
+    ):
+        attached = {
+            a.get("name") for a in (found.get("assets") or []) if isinstance(a, dict)
+        }
+        missing = [(n, d) for n, d in artifacts if n not in attached]
+        try:
+            await adapter.update_release_title(
+                destination.repo, found["id"], release_name
+            )
+            for name, data in missing:
+                await adapter.upload_release_asset(
+                    repo_full_name=destination.repo,
+                    release_id=found["id"],
+                    asset_name=name,
+                    data=data,
+                )
+        except NotImplementedError:
+            return False
+        parts = [
+            f"existing_release_id={found['id']}",
+            f"title corrected from {title!r} to {release_name!r}",
+        ]
+        if missing:
+            parts.append("uploaded: " + ", ".join(n for n, _ in missing))
+        detail = "; ".join(parts)
+        logger.info(f"Release {tag_name} on {label} converged: {detail}")
+        report.supplemented.append(label)
+        report.body_states[label] = "supplemented"
+        _audit_destination(
+            audit, tag_name, label, "supplemented",
+            _with_duplicate(duplicate_detail, detail),
+        )
+        return True
+
     # The body_states entry is recorded here, but we return False so the
     # caller continues with the existing supplement/title/asset logic
     # (P36-017/P36-003). The body_states entry is kept even if the

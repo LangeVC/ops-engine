@@ -524,6 +524,13 @@ async def test_audience_gate_runs_on_final_body_not_raw_notes(tmp_path, monkeypa
 # ---------------------------------------------------------------------------
 # F3+F4 proof: audience gate through publish_release (the workflow's path)
 # ---------------------------------------------------------------------------
+#
+# REA-012 (decision D1) changed the contract of this path: the gate runs per
+# destination on the FINAL body and a refused body writes nothing on that
+# destination, which is recorded as a failure in the report and the audit. The
+# older F3+F4 expectation (a raise out of publish_release) is superseded: a
+# raise would abandon the other destinations, and process_event keeps raising
+# its own gate before any destination is considered.
 
 
 @pytest.mark.asyncio
@@ -531,10 +538,9 @@ async def test_audience_gate_runs_through_publish_release_call_shape(tmp_path):
     """F3+F4 proof: the audience gate on the FINAL body runs through the
     publish_release call shape (the path the shipped workflow really calls),
     not only through _release_tag. A tracker reference introduced by the
-    install block in the composed release_body is caught before any
-    destination write."""
-    from ops_engine.modules.release_gates import ReleaseNotesAudienceError
-
+    install block in the composed release_body is refused before any
+    destination write; the destination is failed by name and the audit names
+    the offence (REA-012 D1: recorded failure, not a raise)."""
     dest = FakeDestination()
     body_with_tracker = (
         f"## {TITLE}\n\n"
@@ -544,14 +550,20 @@ async def test_audience_gate_runs_through_publish_release_call_shape(tmp_path):
         f"See [{CHANGELOG_PATH}](https://example.com/{CHANGELOG_PATH}) for all changes.\n"
     )
 
-    with pytest.raises(ReleaseNotesAudienceError, match="LVC-999"):
-        await _publish("forgejo", _forgejo(dest), tmp_path,
-                       release_body=body_with_tracker,
-                       ticket_prefixes=["LVC"])
+    label = f"forgejo:{REPO}"
+    report, audit = await _publish("forgejo", _forgejo(dest), tmp_path,
+                                   release_body=body_with_tracker,
+                                   ticket_prefixes=["LVC"])
 
-    # No destination write happened — the gate raised before the loop.
+    # No destination write happened — the gate refused before the write.
     assert dest.writes() == []
     assert dest.creates() == 0
+    # The refusal is recorded for that destination, naming the offence.
+    assert report.failed == [label]
+    assert report.body_states[label].startswith("failed:")
+    assert "LVC-999" in report.failure_details[label]
+    assert len(audit) == 1
+    assert "result=failed" in audit[0] and "LVC-999" in audit[0]
 
 
 # ---------------------------------------------------------------------------
