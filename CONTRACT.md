@@ -1301,8 +1301,15 @@ declares nothing keeps the raw notes
 (`test_attach_path_without_declaration_keeps_raw_notes`, `:643`), and the
 declared-vocabulary gate refuses a body only the engine composed
 (`test_declared_gate_refuses_engine_composed_body`, `:657`). Against a clean
-`git archive` of 2f5c255 the first and third are red (the body is the raw notes
-and the destination is written), and the second is green in both.
+`git archive` of 2f5c255 three tests are red — the attach-path composition
+(`:614`, the created body is the raw notes), the declared-vocabulary gate
+(`:657`, the destination is written), and the pre-existing
+`test_audience_gate_runs_through_publish_release_call_shape` (`:569`, which
+raises out of `publish_release` instead of recording a failed destination) —
+for `3 failed, 15 passed`. `test_attach_path_without_declaration_keeps_raw_notes`
+is green in both (the scoping control), and the file is `15 passed` at 2f5c255
+and `18 passed` here. The seven release files listed in the attempt report move
+`115 -> 120`; adding `tests/test_release_webhook_path.py` gives `140 -> 145`.
 
 The shipped console script is covered on its own path in
 `tests/test_release_attach_cli.py`: with no `--ticket-prefix` the declared
