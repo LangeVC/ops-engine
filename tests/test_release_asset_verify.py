@@ -392,6 +392,40 @@ async def test_a_different_size_on_forgejo_fails_naming_file_and_destination(tmp
     assert FILES[1] in detail and "size" in detail
 
 
+# --- A destination the judgement already failed is not verified -------------
+
+
+@pytest.mark.asyncio
+async def test_a_destination_failed_by_the_judgement_gets_no_verified_line(tmp_path):
+    """An existing release with another title is failed as incomplete by the
+    judgement; verification must not then add a clean ``verified`` line (or a
+    second failure) for the same destination, and the outcome stays the
+    judgement's."""
+    dest = FakeDestination(forge="github")
+    await _publish([dest], tmp_path, config=_config("github", assets=DECLARED))
+    # Another digest on the destination: the judgement's own check fails it
+    # as incomplete, because a conflict is never silently re-uploaded.
+    wrong = "sha256:" + "0" * 64
+    dest.release = {
+        **dest.release,
+        "assets": [
+            {**asset, "digest": wrong} if asset["name"] == FILES[0] else asset
+            for asset in dest.release["assets"]
+        ],
+    }
+
+    report, audit = await _publish(
+        [dest], tmp_path, config=_config("github", assets=DECLARED)
+    )
+
+    label = f"github:{REPO}"
+    assert report.failed == [label]
+    assert report.verified == {}
+    results = [line.split("result=")[1].split()[0] for line in audit]
+    assert results == ["incomplete"]
+    assert not any("verified" in line for line in audit)
+
+
 # --- Criterion 3: the RED proof --------------------------------------------
 
 
