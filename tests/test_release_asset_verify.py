@@ -533,3 +533,44 @@ async def test_verification_reads_the_asset_list_and_downloads_nothing(tmp_path)
         {name: 1 for name in FILES}
     )
     assert report.failed == []
+
+
+# --- REA-015: the two defects the REA-014 review found ----------------------
+
+
+@pytest.mark.asyncio
+async def test_a_verify_failure_replaces_the_pre_verification_body_state(tmp_path):
+    """REA-015 defect 1: a destination that published and then failed the
+    read-back must not keep its pre-verification ``written`` state."""
+    dest = FakeDestination(forge="forgejo", hidden={"SHA256SUMS"})
+    report, _ = await _publish(
+        [dest], tmp_path, config=_config("forgejo", assets=DECLARED)
+    )
+
+    label = f"forgejo:{REPO}"
+    assert report.failed == [label]
+    assert report.body_states[label].startswith("failed: verification failed")
+    assert "SHA256SUMS" in report.body_states[label]
+
+
+@pytest.mark.asyncio
+async def test_a_superseded_audit_line_does_not_survive_a_verify_failure(tmp_path):
+    """REA-015 defect 2: the judgement's ``result=skipped`` line described a
+    state the verification failure supersedes; only the failure line remains."""
+    assets = [
+        *DECLARED,
+        {"type": "github_release_zip", "name": "not-built-<version>.zip"},
+    ]
+    dest = FakeDestination(forge="forgejo")
+    await _publish([dest], tmp_path, config=_config("forgejo", assets=DECLARED))
+
+    report, audit = await _publish(
+        [dest], tmp_path, config=_config("forgejo", assets=assets)
+    )
+
+    label = f"forgejo:{REPO}"
+    assert report.failed == [label]
+    label_lines = [line for line in audit if f"dest={label} " in line]
+    assert len(label_lines) == 1, label_lines
+    assert "result=verify-failed" in label_lines[0]
+    assert "not-built-3.5.1.zip" in label_lines[0]
