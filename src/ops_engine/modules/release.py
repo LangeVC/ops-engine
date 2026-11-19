@@ -128,6 +128,10 @@ class PublicationReport:
     # P36-018 criterion 1: body state per destination (written, supplemented,
     # already_equal, or failed with the named difference).
     body_states: dict[str, str] = field(default_factory=dict)
+    # REA-014: destination label -> the declared release-object files found on
+    # read-back, each as ``"<name> sha256:<hex>"`` of the build's own bytes.
+    # Empty when the repo declares no release-object asset.
+    verified: dict[str, list[str]] = field(default_factory=dict)
 
     @property
     def publisher(self) -> dict[str, str]:
@@ -465,8 +469,26 @@ class ReleaseHandler:
             name_template or DEFAULT_NAME_TEMPLATE, repo, tag_name
         )
         artifacts = _collect_artifacts(artifact_dir)
+        # REA-014: the release-object files this repo declares, resolved from
+        # the same Layer 2 + ``.ops.yaml`` merge the destinations come from.
+        # Empty: nothing to verify, and the destination keeps its historic
+        # single audit line.
+        declared = _declared_release_asset_names(config, repo, repo_dir, tag_name)
 
         report = PublicationReport(repo=repo, tag_name=tag_name)
+
+        async def _verify(adapter: ForgeAdapter, destination: Destination,
+                          label: str) -> None:
+            # Nothing declared: nothing to check. A destination the judgement
+            # just failed (an incomplete object) is not verified — its outcome
+            # already names the difference, and a second line saying the set
+            # looked right would contradict it.
+            if not declared or label in report.failed:
+                return
+            await _verify_destination_assets(
+                adapter, destination, report, audit, tag_name, label,
+                declared, artifacts,
+            )
 
         if adapters is not None:
             if len(adapters) != len(destinations):
@@ -583,6 +605,7 @@ class ReleaseHandler:
                         release_name, release_notes, artifacts, per_dest_login,
                         release_body=release_body,
                     )
+                    await _verify(adapter, destination, label)
                     continue
                 duplicate_detail = await _publish_to_destination(
                     adapter,
@@ -607,6 +630,7 @@ class ReleaseHandler:
                         release_body=release_body,
                         duplicate_detail=duplicate_detail,
                     )
+                    await _verify(adapter, destination, label)
                     continue
             except Exception as exc:  # noqa: BLE001 (record — the report, not abort)
                 logger.error(f"partial publication: {label} failed: {exc}")
@@ -622,7 +646,12 @@ class ReleaseHandler:
                 if per_dest_login:
                     # The release this call created is the engine's own.
                     report.publishers[label] = "engine"
-                _audit_destination(audit, tag_name, label, "published")
+                # REA-014: check the published set on read-back before the
+                # destination counts as published. With nothing declared this
+                # skips and the line stays ``result=published``.
+                await _verify(adapter, destination, label)
+                if not declared:
+                    _audit_destination(audit, tag_name, label, "published")
 
         if report.partial:
             logger.warning(
@@ -1380,6 +1409,147 @@ def _resolve_publish_destinations(
         return destinations
     wanted = set(roles)
     return [d for d in destinations if d.role in wanted]
+
+
+# REA-014: declaration types whose file is an asset of the release object.
+# ``ghcr_image`` and ``capacium_exchange`` are published elsewhere (REA-016
+# owns their fan-out), so there is nothing on the release to read back.
+_RELEASE_ASSET_TYPES = ("github_release_tarball", "github_release_zip")
+
+
+def _render_asset_name(name: str, tag_name: str) -> str:
+    """Render the ``<version>``/``<tag>`` placeholders of a declaration name.
+
+    ``<version>`` is the tag without its leading ``v`` and ``<tag>`` the tag
+    itself, the two forms the fleet writes in ``.ops.yaml``.
+    """
+    version = tag_name[1:] if tag_name.startswith("v") else tag_name
+    return name.replace("<version>", version).replace("<tag>", tag_name)
+
+
+def _declared_release_asset_names(
+    config: OpsEngineConfig,
+    repo: str,
+    repo_dir: str | Path | None,
+    tag_name: str,
+) -> list[str]:
+    """The release-object files the repo declares, names rendered from the tag.
+
+    Read through the same path the destinations come from: Layer 2 merged with
+    the Layer-3 ``.ops.yaml`` in ``repo_dir``. An absent declaration and
+    ``assets: none`` both mean "no requirement" and give an empty list, so
+    nothing is verified and the run behaves as before. Declarations that are
+    not release-object assets are dropped here.
+    """
+    org, _, name = repo.partition("/")
+    layer2 = config.get_repo_config(org, name)
+    if repo_dir is not None:
+        layer3 = load_ops_yaml(repo_dir)
+        if layer3 is not None:
+            layer2 = layer2.merge_layer3(layer3)
+    release_config = layer2.release
+    if release_config is None:
+        return []
+    declarations = release_config.assets
+    if not declarations:
+        return []
+    names: list[str] = []
+    for declaration in declarations:
+        if declaration.type not in _RELEASE_ASSET_TYPES or not declaration.name:
+            continue
+        names.append(_render_asset_name(declaration.name, tag_name))
+    return names
+
+
+async def _verify_destination_assets(
+    adapter: ForgeAdapter,
+    destination: Destination,
+    report: "PublicationReport",
+    audit: Optional[list[str]],
+    tag_name: str,
+    label: str,
+    declared: list[str],
+    artifacts: list[tuple[str, bytes]],
+) -> bool:
+    """Read the destination's release back and check every declared file.
+
+    The asset set comes from ``list_release_assets`` on the release found by
+    tag (REA-013), never from a download (REL-010): the build's bytes are on
+    disk, so a missing name or another digest/size is proven locally. On
+    success the destination is recorded in ``report.verified`` as
+    ``"<name> sha256:<hex>"`` per file, and the audit line reads
+    ``result=verified``. On failure the destination leaves ``published`` /
+    ``skipped`` / ``supplemented`` / ``up_to_date`` and is recorded in
+    ``failed`` with a detail naming each failing file (and both digests where
+    the forge exposes one); the audit line reads ``result=verify-failed``.
+    """
+    try:
+        found = await adapter.find_release(destination.repo, tag_name)
+        if not isinstance(found, dict) or found.get("id") is None:
+            return _fail_verification(
+                report, audit, tag_name, label,
+                [f"release for {tag_name} not found after publication"],
+            )
+        assets = await adapter.list_release_assets(destination.repo, found["id"])
+    except Exception as exc:  # noqa: BLE001 (record — the report, not abort)
+        return _fail_verification(
+            report, audit, tag_name, label, [f"read-back failed: {exc}"]
+        )
+    attached = {
+        asset.get("name"): asset
+        for asset in assets or ()
+        if isinstance(asset, dict) and asset.get("name") is not None
+    }
+    build = dict(artifacts)
+    problems: list[str] = []
+    entries: list[str] = []
+    for name in declared:
+        existing = attached.get(name)
+        if existing is None:
+            problems.append(f"{name} missing")
+            continue
+        data = build.get(name)
+        if data is None:
+            # Attached, but this run's build does not carry it: there is no
+            # local truth to compare against, so it cannot be proven bad.
+            entries.append(name)
+            continue
+        difference = _asset_difference(existing, data)
+        if difference is not None:
+            problems.append(f"{name} differs ({difference})")
+            continue
+        entries.append(f"{name} {_asset_sha256(data)}")
+    if problems:
+        return _fail_verification(report, audit, tag_name, label, problems)
+    report.verified[label] = entries
+    _audit_destination(audit, tag_name, label, "verified", ", ".join(entries))
+    return True
+
+
+def _fail_verification(
+    report: "PublicationReport",
+    audit: Optional[list[str]],
+    tag_name: str,
+    label: str,
+    problems: list[str],
+) -> bool:
+    """Record a destination whose asset set failed the read-back."""
+    detail = "verification failed: " + "; ".join(problems)
+    logger.error(f"partial publication: {label} failed: {detail}")
+    report.failed.append(label)
+    report.failure_details[label] = detail
+    report.body_states.setdefault(label, f"failed: {detail}")
+    for bucket in (
+        report.published,
+        report.skipped,
+        report.supplemented,
+        report.up_to_date,
+    ):
+        if label in bucket:
+            bucket.remove(label)
+    report.verified.pop(label, None)
+    _audit_destination(audit, tag_name, label, "verify-failed", detail)
+    return False
 
 
 async def _release_tag(

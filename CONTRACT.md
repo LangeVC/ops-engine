@@ -1219,6 +1219,54 @@ The change is **additive**: `list_release_assets` is a new, non-abstract read
 method; `upload_release_asset` keeps its shape; and the existing upload path
 (create then attach) now uploads only the names the release lacks.
 
+### Release asset verification after publishing (REA-014)
+
+After create/converge/attach, `publish_release` reads each destination's
+release back with `find_release(repo, tag)` and `list_release_assets(repo,
+release_id)` and compares it to the files the repo declares in
+`release.assets` (REA-010) and to the build's own bytes on disk. Nothing is
+downloaded (REL-010): the expected digest is computed locally.
+
+The declarations to verify are resolved through the same Layer 2 +
+Layer-3 `.ops.yaml` merge the destinations come from (`repo_dir` at the tag),
+and their `<version>`/`<tag>` placeholders are rendered from the tag
+(`<version>` is the tag without a leading `v`). Only declarations whose type
+is an asset of the release object are verified — `github_release_zip` and
+`github_release_tarball`. `ghcr_image` and `capacium_exchange` are published
+elsewhere (REA-016 owns their fan-out) and are never read back. With no
+declaration, `assets: none`, or only non-release-object declarations there is
+nothing to verify and the run is unchanged.
+
+The comparison is the same one the attachment path uses (REA-013): GitHub's
+`digest` where the forge exposes it, otherwise Forgejo's `size`. Per declared
+file:
+
+- **Present and equal** — the destination carries the file with the build's
+  digest (or size). The destination is recorded in
+  `PublicationReport.verified: dict[str, list[str]]` as
+  `"<name> sha256:<hex>"` per file, and its audit line is
+  `release-publish tag=<tag> dest=<forge:repo> result=verified <entries>`.
+- **Present, not equal** — another digest or size fails the destination, and
+  the failure detail names the file with both values.
+- **Absent** — the destination lacks the declared file (never attached, or
+  absent from the build so it could not be): the destination fails, and the
+  detail names the file.
+- **Attached but not part of this run's build** — there is no local truth to
+  compare, so the file cannot be proven wrong and is recorded present.
+
+A destination that published or converged and then fails verification is
+**moved** out of `published`/`skipped`/`supplemented`/`up_to_date` and into
+`failed` (the destination label stays the `forge:repo` form), with its detail
+in `failure_details` and its audit line
+`result=verify-failed verification failed: <detail>`. Another destination's
+outcome is unaffected: verification is per destination and a read error is
+recorded, not raised. The exit code is not part of this surface — REA-015
+derives it from `report.failed`.
+
+The change is **additive**: `PublicationReport` gains an optional
+`verified` field defaulting to `{}`; `to_dict()` keeps its existing keys; and
+a run with no declaration emits exactly the audit lines it did before.
+
 `RepoConfig.release_body_install_block: str = ""`
 `RepoConfig.release_body_assets_line: str = ""`
 
