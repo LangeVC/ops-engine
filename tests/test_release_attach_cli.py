@@ -71,6 +71,9 @@ def _config(
     assets=None,
     tracker_prefixes=None,
     install_block=None,
+    manifest=None,
+    forgejo_assets=None,
+    free_space_url=None,
 ) -> OpsEngineConfig:
     destinations = [
         {
@@ -92,6 +95,12 @@ def _config(
     release = {"enabled": True}
     if assets is not None:
         release["assets"] = assets
+    if manifest is not None:
+        release["manifest"] = manifest
+    if forgejo_assets is not None:
+        release["forgejo_assets"] = forgejo_assets
+    if free_space_url is not None:
+        release["forgejo_free_space_url"] = free_space_url
     repository = {"destinations": destinations, "release": release}
     if tracker_prefixes is not None:
         repository["tracker_prefixes"] = tracker_prefixes
@@ -111,7 +120,9 @@ def _config(
 class FakeDestination:
     """Serve one release by tag and record every write (see REA-014 tests)."""
 
-    def __init__(self, *, forge: str, hidden=(), tamper=None, create_status=409):
+    def __init__(
+        self, *, forge: str, hidden=(), tamper=None, create_status=409, preloaded=None
+    ):
         self.forge = forge
         self.release: dict | None = None
         self.hidden = set(hidden)
@@ -120,10 +131,48 @@ class FakeDestination:
         self.calls: list[tuple[str, str]] = []
         self.uploaded: list[dict] = []
         self.read_assets: list[list[dict]] = []
+        self.asset_bytes: dict[str, bytes] = {}
+        self._next_id = 900
+        if preloaded is not None:
+            self.release = {
+                "id": RELEASE_ID,
+                "tag_name": TAG,
+                "name": f"Ops Engine {TAG}",
+                "body": BODY,
+                "draft": False,
+                "prerelease": False,
+                "assets": [self._asset(name, data) for name, data in preloaded.items()],
+            }
+
+    def _asset(self, name: str, data: bytes) -> dict:
+        self._next_id += 1
+        self.asset_bytes[name] = data
+        return {
+            "id": self._next_id,
+            "name": name,
+            "size": len(data),
+            "url": (
+                f"https://{self.forge}.invalid/repos/{REPO}"
+                f"/releases/assets/{self._next_id}"
+            ),
+            "digest": _sha256(data) if self.forge == "github" else None,
+        }
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
         self.calls.append((request.method, path))
+        if request.method == "GET" and "/releases/assets/" in path:
+            name = next(
+                (
+                    asset["name"]
+                    for asset in (self.release or {}).get("assets") or []
+                    if asset.get("url") == str(request.url)
+                ),
+                None,
+            )
+            if name is None:
+                return httpx.Response(404, json={"message": "not found"})
+            return httpx.Response(200, content=self.asset_bytes[name])
         if request.method == "GET" and "/releases/tags/" in path:
             if self.release is None:
                 return httpx.Response(404, json={"message": "not found"})
@@ -147,8 +196,9 @@ class FakeDestination:
         ):
             name = request.url.params.get("name")
             data = request.content
-            asset = {"name": name, "size": len(data)}
-            asset["digest"] = _sha256(data) if self.forge == "github" else None
+            # Build the asset the way the forge answers: a served ``url`` and
+            # the bytes behind it, so a pull can re-read what was attached.
+            asset = self._asset(name, data)
             asset.update(self.tamper.get(name, {}))
             if name not in self.hidden:
                 self.uploaded.append(asset)
@@ -212,9 +262,18 @@ def _artifacts(tmp_path, extra: dict[str, bytes] | None = None) -> None:
         (art / name).write_bytes(data)
 
 
-async def _run(destinations, tmp_path, *, config, repo_dir=None, assets_body=BODY):
+async def _run(
+    destinations,
+    tmp_path,
+    *,
+    config,
+    repo_dir=None,
+    assets_body=BODY,
+    free_space_reader=None,
+):
     _artifacts(tmp_path)
     audit: list[str] = []
+    extra = {} if free_space_reader is None else {"free_space_reader": free_space_reader}
     report = await run_attach(
         config,
         REPO,
@@ -226,6 +285,7 @@ async def _run(destinations, tmp_path, *, config, repo_dir=None, assets_body=BOD
         notes=NOTES,
         release_body=assets_body,
         audit=audit,
+        **extra,
     )
     return report, audit
 
@@ -274,6 +334,10 @@ def _config_file(
     assets=None,
     tracker_prefixes=None,
     install_block=None,
+    second=None,
+    manifest=None,
+    forgejo_assets=None,
+    free_space_url=None,
 ) -> "object":
     path = tmp_path / "config.yml"
     lines = [
@@ -286,6 +350,15 @@ def _config_file(
         f"            repo: {REPO}",
         "            role: release",
         "            credential_variable: OPS_TOKEN",
+    ]
+    if second is not None:
+        lines += [
+            f"          - forge: {second}",
+            f"            repo: {REPO}",
+            "            role: release",
+            "            credential_variable: SECOND_TOKEN",
+        ]
+    lines += [
         "        release:",
         "          enabled: true",
     ]
@@ -294,6 +367,24 @@ def _config_file(
         for asset in assets:
             lines.append(f"            - type: {asset['type']}")
             lines.append(f"              name: '{asset['name']}'")
+    if manifest:
+        lines.append("          manifest:")
+        if "deadline_minutes" in manifest:
+            lines.append(
+                f"            deadline_minutes: {manifest['deadline_minutes']}"
+            )
+        lines.append("            assets:")
+        for piece in manifest.get("assets") or []:
+            lines.append(f"              - type: {piece['type']}")
+            lines.append(f"                name: '{piece['name']}'")
+            lines.append(f"                producer: {piece['producer']}")
+            lines.append("                destinations:")
+            for label in piece["destinations"]:
+                lines.append(f"                  - '{label}'")
+    if forgejo_assets is not None:
+        lines.append(f"          forgejo_assets: {forgejo_assets}")
+    if free_space_url is not None:
+        lines.append(f"          forgejo_free_space_url: '{free_space_url}'")
     if tracker_prefixes:
         lines.append("        tracker_prefixes:")
         for prefix in tracker_prefixes:
@@ -613,3 +704,174 @@ def test_an_unreadable_config_is_a_named_usage_error(tmp_path, capsys):
 
     assert code == 2
     assert payload["error"].startswith("cannot load config")
+
+
+# --- REA-017: the pull, the free space and the pending pieces in the report -
+
+
+GITHUB_BINARY = "ops-engine-tool-3.5.1-linux-amd64.tar.gz"
+GITHUB_BYTES = b"github built bytes\n"
+FREE_SPACE_URL = "https://forge.invalid/space.json"
+FREE_BYTES = 987654321
+FREE_SPACE_RESPONSE = json.dumps({"free_bytes": FREE_BYTES}).encode()
+
+PULL_MANIFEST = {
+    "assets": [
+        {
+            "type": "github_release_tarball",
+            "name": "ops-engine-tool-<version>-linux-amd64.tar.gz",
+            "producer": "github",
+            "destinations": [f"forgejo:{REPO}"],
+        }
+    ]
+}
+
+# A second manifest: the github-produced piece only GitHub must hold, so this
+# run never reads it and it stays pending in the report.
+PENDING_MANIFEST = {
+    "assets": [
+        *PULL_MANIFEST["assets"],
+        {
+            "type": "github_release_zip",
+            "name": "ops-engine-tool-<version>-windows-amd64.zip",
+            "producer": "github",
+            "destinations": [f"github:{REPO}"],
+        },
+    ]
+}
+PENDING_BINARY = "ops-engine-tool-3.5.1-windows-amd64.zip"
+
+
+class FreeSpaceSource:
+    """Answer the declared free-space URL; record every request it sees.
+
+    Stands in for the host endpoint the shipped reader reads. The shipped
+    reader builds its own ``httpx`` client, so the listener is patched into the
+    module's client factory; the real reader still parses the answer.
+    """
+
+    def __init__(self, body=FREE_SPACE_RESPONSE, status=200):
+        self.body = body
+        self.status = status
+        self.reads: list[tuple[str, str | None]] = []
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        self.reads.append(
+            (str(request.url), request.headers.get("authorization"))
+        )
+        return httpx.Response(self.status, content=self.body)
+
+
+def _patch_default_client(monkeypatch, source: FreeSpaceSource, fakes) -> None:
+    """Give the shipped reader a mock transport without touching the network.
+
+    The reader builds its own ``httpx.AsyncClient``: every default client the
+    asset-pull module opens carries this transport, which answers the declared
+    URL from ``source`` and serves each forge's asset bytes from its fake.
+    """
+    from ops_engine.modules import asset_pull
+
+    real_client = httpx.AsyncClient
+
+    def build_transport(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == FREE_SPACE_URL:
+            return source.handler(request)
+        for fake in fakes:
+            if f"{fake.forge}.invalid" in str(request.url):
+                return fake.handler(request)
+        return httpx.Response(500, json={"message": "unexpected read"})
+
+    def client_factory(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(build_transport)
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(asset_pull.httpx, "AsyncClient", client_factory)
+
+
+def _github_pair(*, github_preloaded):
+    """A Forgejo release beside the GitHub release that holds the binary."""
+    forgejo = FakeDestination(forge="forgejo")
+    github = FakeDestination(
+        forge="github",
+        preloaded={**{name: CONTENT[name] for name in FILES}, **github_preloaded},
+    )
+    return forgejo, github
+
+
+def test_the_cli_report_carries_the_pulled_free_space_and_pending(
+    tmp_path, monkeypatch, capsys
+):
+    """REA-017 on the CLI path: a ``pull`` run whose JSON report carries, per
+    destination, the pulled file names, the free-space reading (an integer
+    byte count here) and the still-pending github-produced piece.
+
+    The pull means: the GitHub-built tarball lands on the Forgejo release with
+    the GitHub digest, and the free space is read from the declared source.
+    """
+    monkeypatch.setenv("OPS_TOKEN", "rw-token")
+    monkeypatch.setenv("SECOND_TOKEN", "rw-token")
+    forgejo, github = _github_pair(github_preloaded={GITHUB_BINARY: GITHUB_BYTES})
+    _artifacts(tmp_path)
+    adapters = [_make(forgejo), _make(github)]
+    source = FreeSpaceSource()
+    _patch_default_client(monkeypatch, source, [forgejo, github])
+
+    code = main(
+        _argv(
+            tmp_path,
+            _config_file(
+                tmp_path,
+                "forgejo",
+                second="github",
+                assets=DECLARED,
+                manifest=PENDING_MANIFEST,
+                forgejo_assets="pull",
+                free_space_url=FREE_SPACE_URL,
+            ),
+        ),
+        adapters=adapters,
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 0, payload
+    entries = {e["destination"]: e for e in payload["destinations"]}
+    forgejo_entry = entries[f"forgejo:{REPO}"]
+    github_entry = entries[f"github:{REPO}"]
+    assert forgejo_entry["pulled"] == [GITHUB_BINARY]
+    assert forgejo_entry["free_space"] == FREE_BYTES
+    assert source.reads == [(FREE_SPACE_URL, None)], (
+        "the declared source is read once with no credential"
+    )
+    pending = github_entry["pending"]
+    assert len(pending) == 1 and pending[0]["name"] == PENDING_BINARY
+    assert pending[0]["producer"] == "github" and pending[0]["since"]
+    assert GITHUB_BINARY in [a["name"] for a in forgejo.uploaded]
+
+
+def test_the_cli_report_names_an_undeclared_free_space_source(
+    tmp_path, monkeypatch, capsys
+):
+    """REA-017: with no source declared the reading is an explicit
+    ``unavailable: ...`` string, never null, and the release still succeeds."""
+    monkeypatch.setenv("OPS_TOKEN", "rw-token")
+    dest = FakeDestination(forge="forgejo")
+    _artifacts(tmp_path)
+
+    code = main(
+        _argv(
+            tmp_path,
+            _config_file(
+                tmp_path, "forgejo", assets=DECLARED,
+                forgejo_assets="pull", free_space_url=None,
+            ),
+        ),
+        adapters=[_make(dest)],
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    entry = payload["destinations"][0]
+    assert entry["pulled"] == []
+    assert entry["pending"] == []
+    assert entry["free_space"].startswith("unavailable:")
+    assert "no source declared" in entry["free_space"]
