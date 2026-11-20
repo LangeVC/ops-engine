@@ -146,6 +146,13 @@ jobs:
           DEFAULT_BRANCH: "main"
         run: |
           set -euo pipefail
+          # Under workflow_dispatch the checkout is refs/heads/main, shallow
+          # and tagless; fetch the tag so the peel has something to resolve.
+          if ! git rev-parse --verify --quiet "refs/tags/${TAG_NAME}^{}" \
+               >/dev/null; then
+            git fetch --quiet --depth=1 origin \
+              "refs/tags/${TAG_NAME}:refs/tags/${TAG_NAME}" || true
+          fi
           candidate="$(git rev-parse "refs/tags/${TAG_NAME}^{}")"
           echo "e2e-verdict-gate: candidate ${TAG_NAME} peels to ${candidate}"
           if [[ ! -f "$VERDICT_PATH" ]] \

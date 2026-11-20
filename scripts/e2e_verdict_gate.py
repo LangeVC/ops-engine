@@ -73,6 +73,10 @@ def main(argv=None) -> int:
             text = handle.read()
     except FileNotFoundError:
         return _refuse(f"no verdict at {path!r}")
+    except IsADirectoryError:
+        return _refuse(f"{path!r} is a directory, not a verdict file")
+    except OSError as exc:
+        return _refuse(f"{path!r} cannot be read: {exc}")
 
     try:
         verdict = json.loads(text)
