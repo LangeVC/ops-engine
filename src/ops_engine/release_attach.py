@@ -2,7 +2,7 @@
 
 A repository workflow builds its declared files and then runs one command:
 
-    ops-engine-release-attach --config config.yml --repo org/name --tag v1.2.3 \
+    ops-engine-release-attach --repo org/name --tag v1.2.3 \
         --artifacts dist --repo-dir . --notes-file NOTES.md
 
 For every declared release destination it finds or creates the release,
@@ -11,6 +11,14 @@ verifies the declared asset set by reading the release back (REA-014). The
 same argv works from a Forgejo runner and a GitHub runner: the runner supplies
 the credentials its workflow already holds, and the command resolves each
 destination from the same config the engine uses.
+
+``--config`` is optional. A repository that declares its destinations, release
+block and ``release.assets`` in its own ``.ops.yaml`` needs no Layer-2 file:
+without ``--config`` the command reads exactly that Layer-3 declaration from
+``--repo-dir`` and nothing is invented. A missing ``.ops.yaml``, or one that
+declares no destination, is a usage error naming the file. With ``--config``
+the command reads the Layer-2 file first, then the Layer-3 ``.ops.yaml`` over
+it, exactly as before.
 
 The command is a thin wire around :meth:`ReleaseHandler.publish_release`, not
 a second publication path: it loads the layers the engine loads, passes
@@ -42,7 +50,13 @@ from typing import Iterable, Optional
 
 from ops_engine.adapters.base import ForgeAdapter
 from ops_engine.adapters.factory import Credential
-from ops_engine.config_loader import OpsEngineConfig, load_config_file
+from ops_engine.config_loader import (
+    OpsEngineConfig,
+    RepoConfig,
+    load_config_file,
+    load_ops_yaml,
+)
+from ops_engine.modules.mirror import resolve_destinations
 from ops_engine.modules.release import (
     DEFAULT_NAME_TEMPLATE,
     PublicationReport,
@@ -91,15 +105,42 @@ def request_from_args(
     variable that names a secret is read by that name; ``environment`` is the
     runner's environment (``os.environ`` by default).
 
+    Without ``--config`` the command builds the minimal Layer-2 stand-in the
+    engine needs — one repository entry named by ``--repo`` — and lets the
+    Layer-3 ``.ops.yaml`` in ``--repo-dir`` supply the destinations, the release
+    block and ``release.assets``. The file must exist and declare at least one
+    destination; either absence is a usage error naming the file. Nothing is
+    invented, so the same argv that works with ``--config`` works without it.
+
     Raises:
-        AttachUsageError: the config file cannot be read or parsed, or the
-            artifact directory is not a directory.
+        AttachUsageError: the config file cannot be read or parsed, the
+            artifact directory is not a directory, or no ``--config`` was
+            passed and ``--repo-dir`` declares no destination (a missing or
+            empty ``.ops.yaml``).
     """
     env = os.environ if environment is None else environment
-    try:
-        config = load_config_file(args.config)
-    except Exception as exc:  # noqa: BLE001 (a usage error, reported by name)
-        raise AttachUsageError(f"cannot load config {args.config}: {exc}") from exc
+    repo_dir = Path(args.repo_dir or ".")
+    if args.config:
+        try:
+            config = load_config_file(args.config)
+        except Exception as exc:  # noqa: BLE001 (a usage error, reported by name)
+            raise AttachUsageError(f"cannot load config {args.config}: {exc}") from exc
+        # The destinations already resolved from the config say which variables
+        # supply their credentials; the command reads exactly those.
+        variables = [
+            destination.credential_variable
+            for destination in _all_destinations(config)
+        ]
+    else:
+        config = _config_from_ops_yaml(args.repo, repo_dir)
+        # Without a Layer-2 file the destinations are the Layer-3 declaration
+        # itself; read the same resolved list the engine will publish to.
+        variables = [
+            destination.credential_variable
+            for destination in resolve_destinations(
+                config, args.repo, repo_dir=str(repo_dir)
+            )
+        ]
 
     artifact_dir = Path(args.artifacts)
     if not artifact_dir.is_dir():
@@ -108,10 +149,7 @@ def request_from_args(
         )
 
     credentials: dict[str, Credential] = {}
-    # The destinations already resolved from the config say which variables
-    # supply their credentials; the command reads exactly those.
-    for destination in _all_destinations(config):
-        variable = destination.credential_variable
+    for variable in variables:
         if not variable or variable in credentials:
             continue
         token = env.get(variable, "")
@@ -133,7 +171,7 @@ def request_from_args(
         repo=args.repo,
         tag_name=args.tag,
         artifact_dir=artifact_dir,
-        repo_dir=Path(args.repo_dir or "."),
+        repo_dir=repo_dir,
         name_template=args.name_template or DEFAULT_NAME_TEMPLATE,
         notes=notes,
         release_body=release_body,
@@ -151,6 +189,50 @@ def _all_destinations(config: OpsEngineConfig) -> Iterable:
     for org in config.orgs.values():
         for repo in org.repositories.values():
             yield from repo.destinations
+
+
+def _config_from_ops_yaml(repo: str, repo_dir: Path) -> OpsEngineConfig:
+    """The minimal config a run without ``--config`` needs.
+
+    The Layer-2 object holds one repository entry named by ``--repo`` and
+    nothing else: the Layer-3 ``.ops.yaml`` supplies the destinations, the
+    release block and everything the engine reads through ``repo_dir``. The
+    engine's ``get_repo_config`` needs the org to exist, so the org key is the
+    one ``--repo`` names. Reading the file here (rather than letting the engine
+    find it) is what makes a missing file, or one with no destination, a named
+    usage error instead of a silent empty publication.
+
+    Raises:
+        AttachUsageError: ``repo`` is not ``org/name``; the ``.ops.yaml`` is
+            absent, malformed, or declares no destination.
+    """
+    org, _, name = repo.partition("/")
+    if not org or not name:
+        raise AttachUsageError(
+            f"repository selector {repo!r} is not an org/name form"
+        )
+    path = repo_dir / ".ops.yaml"
+    if not path.is_file():
+        raise AttachUsageError(
+            f"no --config was passed and {path} does not exist; a run without "
+            "a Layer-2 config needs the repository's .ops.yaml to declare its "
+            "destinations"
+        )
+    config = OpsEngineConfig.load(
+        {"orgs": {org: {"repositories": {name: RepoConfig()}}}}
+    )
+    try:
+        # The resolved list is what the engine publishes to, so the check and
+        # the credential lookup below judge the same destinations.
+        destinations = resolve_destinations(config, repo, repo_dir=str(repo_dir))
+    except Exception as exc:  # noqa: BLE001 (a usage error, reported by name)
+        raise AttachUsageError(str(exc)) from exc
+    if not destinations:
+        raise AttachUsageError(
+            f"{path} declares no destination; a run without a Layer-2 config "
+            "needs the repository's .ops.yaml to declare at least one"
+        )
+    return config
 
 
 async def run_attach(
@@ -284,7 +366,14 @@ def _parser() -> argparse.ArgumentParser:
             "and verify the declared asset set on every destination."
         ),
     )
-    parser.add_argument("--config", required=True, help="the Layer-2 org config file")
+    parser.add_argument(
+        "--config",
+        default="",
+        help=(
+            "the Layer-2 org config file; omit it when --repo-dir's .ops.yaml "
+            "declares the destinations and the release block"
+        ),
+    )
     parser.add_argument("--repo", required=True, help="the repository selector, org/name")
     parser.add_argument("--tag", required=True, help="the tag being released")
     parser.add_argument(
