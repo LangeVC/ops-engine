@@ -27,6 +27,7 @@ from ops_engine.modules.asset_manifest import (
     evaluate_channels,
     parse_timestamp,
 )
+from ops_engine.modules.asset_pull import HttpxAssetDownloader, HttpxFreeSpaceReader
 from ops_engine.modules.mirror import resolve_destinations
 from ops_engine.modules.notification import NotificationHandler
 from ops_engine.modules.release_gates import (
@@ -191,6 +192,15 @@ class PublicationReport:
     # each as ``"<name> producer=<forge> since=<iso>"``. A pending piece is
     # not a failure: it is a github-produced asset inside the deadline.
     pending: dict[str, list[str]] = field(default_factory=dict)
+    # REA-017: destination label -> the github-produced files pulled into it,
+    # each as ``"<name> sha256:<hex>"`` of the GitHub digest and the bytes
+    # attached. Empty when the switch is off (D4's default) or nothing was
+    # pulled. Kept out of :meth:`to_dict`, which stays as it was.
+    pulled: dict[str, list[str]] = field(default_factory=dict)
+    # REA-017: destination label -> the host's free-space reading, as
+    # ``"free_bytes=<n>"``. Absent when no reading could be made; that is
+    # evidence, never a failure.
+    free_space: dict[str, str] = field(default_factory=dict)
 
     @property
     def publisher(self) -> dict[str, str]:
@@ -416,6 +426,8 @@ class ReleaseHandler:
         release_body: str | None = None,
         ticket_prefixes: Iterable[str] | None = None,
         channel_reader: object = None,
+        asset_downloader: object = None,
+        free_space_reader: object = None,
         changelog_url: str = "",
     ) -> "PublicationReport":
         """Publish a built release to every destination resolved from config.
@@ -545,6 +557,16 @@ class ReleaseHandler:
         read-only :class:`HttpxChannelReader` probes PyPI, ghcr and the
         Homebrew tap with ``GET`` only.
 
+        ``asset_downloader`` and ``free_space_reader`` are the REA-017
+        injection points, the same shape: an object with ``async
+        download(adapter, repo, asset) -> bytes`` and one with ``async
+        free_bytes(destination) -> int | None``. Omitted, the shipped
+        read-only :class:`HttpxAssetDownloader` reads the GitHub asset with the
+        adapter's own credential and :class:`HttpxFreeSpaceReader` answers
+        ``None`` unless a source is declared. The pull runs only when the
+        repository declares ``release.forgejo_assets: pull`` (D4: off by
+        default) and the GitHub release already carries the declared piece.
+
         Raises:
             ValueError: a supplied ``adapters`` list does not match the resolved
                 destination count.
@@ -601,6 +623,28 @@ class ReleaseHandler:
             list(ticket_prefixes)
             if ticket_prefixes is not None
             else _declared_tracker_prefixes(config, repo, repo_dir)
+        )
+        # REA-017 (D4): the pull of GitHub-built assets is armed per repository
+        # and off unless declared. The pieces it may pull are the manifest's
+        # github-produced entries; with no manifest there is nothing the
+        # engine knows how to fetch.
+        pull_armed = _declared_forgejo_assets(config, repo, repo_dir) == "pull"
+        pull_pieces: dict[str, str] = {}
+        if pull_armed and manifest is not None:
+            for entry in manifest.assets:
+                if entry.producer == "github":
+                    pull_pieces[_render_asset_name(entry.name, tag_name)] = (
+                        entry.producer
+                    )
+        downloader = (
+            asset_downloader
+            if asset_downloader is not None
+            else HttpxAssetDownloader()
+        )
+        free_reader = (
+            free_space_reader
+            if free_space_reader is not None
+            else HttpxFreeSpaceReader()
         )
         now = datetime.now(timezone.utc)
 
@@ -684,6 +728,31 @@ class ReleaseHandler:
                 assets, artifacts, since, now,
             )
             return True
+
+        async def _pull_after_write(
+            adapter: ForgeAdapter,
+            destination: Destination,
+            label: str,
+        ) -> None:
+            """Pull the github-produced pieces into ``label`` (REA-017).
+
+            Runs on every path that leaves the Forgejo release in place —
+            created now, already present, or found through a duplicate answer
+            — because a piece that was still on its way at the first run is
+            pulled by a later one. Off by default (D4) and only for the
+            forgejo destination; a destination the judgement just failed is
+            left exactly as that judgement recorded it.
+            """
+            if not (pull_armed and destination.forge == "forgejo"):
+                return
+            if label in report.failed:
+                return
+            if pull_pieces:
+                await _pull_github_assets(
+                    adapter, destination, report, audit, tag_name,
+                    label, pull_pieces, paired, downloader,
+                )
+            await _record_free_space(free_reader, destination, label, report)
 
         if adapters is not None:
             if len(adapters) != len(destinations):
@@ -802,6 +871,7 @@ class ReleaseHandler:
                         release_name, release_notes, artifacts, per_dest_login,
                         release_body=effective_body,
                     )
+                    await _pull_after_write(adapter, destination, label)
                     await _verify(adapter, destination, label)
                     continue
                 duplicate_detail = await _publish_to_destination(
@@ -827,6 +897,7 @@ class ReleaseHandler:
                         release_body=effective_body,
                         duplicate_detail=duplicate_detail,
                     )
+                    await _pull_after_write(adapter, destination, label)
                     await _verify(adapter, destination, label)
                     continue
             except Exception as exc:  # noqa: BLE001 (record — the report, not abort)
@@ -843,6 +914,10 @@ class ReleaseHandler:
                 if per_dest_login:
                     # The release this call created is the engine's own.
                     report.publishers[label] = "engine"
+                # REA-017: with the switch on, pull the github-produced
+                # pieces into this Forgejo release, after the GitHub release
+                # already holds them and only when their digest matches.
+                await _pull_after_write(adapter, destination, label)
                 # REA-014: check the published set on read-back before the
                 # destination counts as published. With nothing declared this
                 # skips and the line stays ``result=published``.
@@ -1763,6 +1838,26 @@ def _declared_release_body_parts(
     )
 
 
+def _declared_forgejo_assets(
+    config: OpsEngineConfig,
+    repo: str,
+    repo_dir: str | Path | None,
+) -> str:
+    """The repo's ``release.forgejo_assets`` switch, Layer 2 + Layer 3.
+
+    ``off`` unless the repository (or its ``.ops.yaml``) declares ``pull``
+    (D4: the default is off for every repository, capacium included).
+    """
+    org, _, name = repo.partition("/")
+    layer2 = config.get_repo_config(org, name)
+    if repo_dir is not None:
+        layer3 = load_ops_yaml(repo_dir)
+        if layer3 is not None:
+            layer2 = layer2.merge_layer3(layer3)
+    release_config = layer2.release
+    return release_config.forgejo_assets if release_config is not None else "off"
+
+
 def _declared_tracker_prefixes(
     config: OpsEngineConfig,
     repo: str,
@@ -1908,6 +2003,193 @@ def _judge_manifest_pieces(
         return
     if entries:
         _audit_destination(audit, tag_name, label, "verified", ", ".join(entries))
+
+
+async def _pull_github_assets(
+    adapter: ForgeAdapter,
+    destination: Destination,
+    report: "PublicationReport",
+    audit: Optional[list[str]],
+    tag_name: str,
+    label: str,
+    pieces: dict[str, str],
+    paired: list[tuple[Destination, ForgeAdapter]],
+    downloader: object,
+) -> None:
+    """Pull the github-produced pieces into one Forgejo release (REA-017).
+
+    Runs only after the target release exists. It reads the GitHub release
+    (the asset list carries the digest), downloads every piece with the GitHub
+    adapter's own credential and checks its SHA-256 against that digest BEFORE
+    uploading anything. Only when every piece checks out are they attached to
+    Forgejo and re-downloaded from it (which reports no digest of its own) to
+    check the bytes again. A missing GitHub piece leaves the pull for a later
+    run — the manifest's own pending judgement owns it. A digest mismatch
+    fails the destination by name and attaches nothing.
+    """
+    github = next(
+        (
+            pair
+            for pair in paired
+            if pair[0].forge == "github"
+            and pair[0].repo == destination.repo
+        ),
+        None,
+    )
+    if github is None:
+        return
+    github_adapter = github[1]
+    try:
+        found = await adapter.find_release(destination.repo, tag_name)
+        if not isinstance(found, dict) or found.get("id") is None:
+            return
+        target_id = found["id"]
+        gh_found = await github_adapter.find_release(destination.repo, tag_name)
+        if not isinstance(gh_found, dict) or gh_found.get("id") is None:
+            return
+        gh_assets = await github_adapter.list_release_assets(
+            destination.repo, gh_found["id"]
+        )
+        target_assets = await adapter.list_release_assets(
+            destination.repo, target_id
+        )
+    except Exception as exc:  # noqa: BLE001 (record — the report, not abort)
+        _fail_pull(report, audit, tag_name, label, f"read failed: {exc}")
+        return
+
+    on_github = {
+        asset.get("name"): asset
+        for asset in gh_assets or ()
+        if isinstance(asset, dict) and asset.get("name") is not None
+    }
+    on_target = {
+        asset.get("name")
+        for asset in target_assets or ()
+        if isinstance(asset, dict) and asset.get("name") is not None
+    }
+    # Every piece is downloaded and checked against the digest the GitHub API
+    # reports before any byte is uploaded, so a mismatch joins the problems
+    # list and nothing is attached — not even a piece that did match.
+    staged: list[tuple[str, bytes]] = []
+    problems: list[str] = []
+    for name in pieces:
+        if name in on_target:
+            # A previous run already attached it: the read-back verifies it,
+            # and a pull never re-uploads over itself.
+            continue
+        source = on_github.get(name)
+        if source is None:
+            # Not on GitHub yet: the manifest's pending judgement owns it.
+            continue
+        try:
+            data = await downloader.download(github_adapter, destination.repo, source)
+        except Exception as exc:  # noqa: BLE001 (record — the report, not abort)
+            problems.append(f"{name} download failed ({exc})")
+            continue
+        digest = source.get("digest") or ""
+        if digest and _asset_sha256(data) != digest:
+            problems.append(
+                f"{name} sha256 mismatch on {label} "
+                f"(github {digest}, downloaded {_asset_sha256(data)})"
+            )
+            continue
+        staged.append((name, data))
+    if problems:
+        _fail_pull(report, audit, tag_name, label, "; ".join(problems))
+        return
+
+    entries: list[str] = []
+    for name, data in staged:
+        try:
+            await adapter.upload_release_asset(
+                repo_full_name=destination.repo,
+                release_id=target_id,
+                asset_name=name,
+                data=data,
+            )
+            uploaded = await adapter.find_release(destination.repo, tag_name)
+            re_assets = await adapter.list_release_assets(
+                destination.repo, uploaded["id"]
+            )
+            re_asset = next(
+                (
+                    asset
+                    for asset in re_assets or ()
+                    if isinstance(asset, dict) and asset.get("name") == name
+                ),
+                None,
+            )
+            if re_asset is None:
+                problems.append(f"{name} not present on {label} after upload")
+                continue
+            re_data = await downloader.download(adapter, destination.repo, re_asset)
+        except Exception as exc:  # noqa: BLE001 (record — the report, not abort)
+            problems.append(f"{name} upload failed ({exc})")
+            continue
+        if re_data != data:
+            problems.append(
+                f"{name} sha256 mismatch after upload on {label} "
+                f"(uploaded {_asset_sha256(data)}, read back {_asset_sha256(re_data)})"
+            )
+            continue
+        entries.append(f"{name} {_asset_sha256(data)}")
+        _audit_destination(audit, tag_name, label, "pulled", entries[-1])
+
+    if not problems:
+        if entries:
+            report.pulled.setdefault(label, []).extend(entries)
+        return
+    _fail_pull(report, audit, tag_name, label, "; ".join(problems))
+
+
+def _fail_pull(
+    report: "PublicationReport",
+    audit: Optional[list[str]],
+    tag_name: str,
+    label: str,
+    detail: str,
+) -> None:
+    """Fail a destination whose pull could not be trusted, naming the file.
+
+    The destination leaves every success bucket it reached, exactly like a
+    manifest failure: a release that could not carry the pulled file is not
+    published in the report's eyes.
+    """
+    message = f"pull not satisfied on {label}: {detail}"
+    logger.error(f"partial publication: {label} failed: {message}")
+    report.failed.append(label)
+    report.failure_details[label] = message
+    report.body_states.setdefault(label, f"failed: {message}")
+    for bucket in (
+        report.published,
+        report.skipped,
+        report.supplemented,
+        report.up_to_date,
+    ):
+        if label in bucket:
+            bucket.remove(label)
+    report.verified.pop(label, None)
+    report.pending.pop(label, None)
+    _audit_destination(audit, tag_name, label, "pull-failed", message)
+
+
+async def _record_free_space(
+    reader: object,
+    destination: Destination,
+    label: str,
+    report: "PublicationReport",
+) -> None:
+    """Read the Forgejo host's free space and put the reading in the report.
+
+    A reading that cannot be made is simply absent: it is evidence, never a
+    failure, so it must not change the destination's outcome.
+    """
+    try:
+        value = await reader.free_bytes(destination)
+    except Exception:  # noqa: BLE001 (evidence, never a gate)
+        return
+    if isinstance(value, int):
+        report.free_space[label] = f"free_bytes={value}"
 
 
 def _fail_manifest(

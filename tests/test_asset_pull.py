@@ -155,6 +155,7 @@ class FakeDestination:
         self.asset_bytes: dict[str, bytes] = {}
         self.next_id = 900
         self.calls: list[tuple[str, str]] = []
+        self.uploaded: list[str] = []
         self.release = None
         if preloaded is not None:
             assets = []
@@ -216,6 +217,7 @@ class FakeDestination:
         ):
             name = request.url.params.get("name")
             data = request.content
+            self.uploaded.append(name)
             asset = self._asset(name, data)
             if name not in self.hidden:
                 self.asset_bytes[name] = data
@@ -456,12 +458,9 @@ async def test_a_digest_mismatch_fails_by_name_and_attaches_nothing(tmp_path):
         "a mismatch attaches nothing"
     )
     assert not report.pulled.get(label)
-    uploads = [
-        path
-        for method, path in forgejo.writes()
-        if method == "POST" and path.endswith("/assets")
-    ]
-    assert uploads == [], "the mismatched bytes are never uploaded"
+    assert sorted(forgejo.uploaded) == sorted(FILES), (
+        "the mismatched bytes are never uploaded: only the build's own files are"
+    )
 
 
 # --- Criterion 3: pull only after GitHub presence; free-space in report ----
@@ -524,6 +523,41 @@ async def test_the_pull_reads_github_before_downloading(tmp_path):
     ]
     assert listed, "the GitHub asset list is read first"
     assert listed[0] < first_download
+
+
+@pytest.mark.asyncio
+async def test_a_later_run_pulls_the_piece_the_first_run_left_pending(tmp_path):
+    """Criterion 3: the pull follows the GitHub presence, not the first run.
+
+    The Forgejo release already exists (a previous run created it while the
+    binary was still on its way), so this run skips it — and still pulls the
+    piece now that GitHub holds it, with the same pre-upload digest check."""
+    timeline: list = []
+    forgejo = FakeDestination(
+        forge="forgejo", timeline=timeline, preloaded=dict(CONTENT)
+    )
+    github = FakeDestination(
+        forge="github",
+        timeline=timeline,
+        preloaded={**CONTENT, GITHUB_BINARY: GITHUB_BYTES},
+    )
+    downloader = FakeDownloader(timeline)
+    config = _config(
+        "forgejo", second="github", manifest=MANIFEST, forgejo_assets="pull"
+    )
+
+    report, _ = await _publish(
+        [forgejo, github], tmp_path, config=config, downloader=downloader
+    )
+
+    label = f"forgejo:{REPO}"
+    assert report.failed == [], report.failure_details
+    assert GITHUB_BINARY in forgejo.asset_names()
+    assert report.pulled[label] == [f"{GITHUB_BINARY} {_sha256(GITHUB_BYTES)}"]
+    assert downloader.reads == [
+        ("github", GITHUB_BINARY),
+        ("forgejo", GITHUB_BINARY),
+    ]
 
 
 @pytest.mark.asyncio
