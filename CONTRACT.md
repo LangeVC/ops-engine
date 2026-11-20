@@ -474,7 +474,13 @@ stdout as JSON, one run per invocation:
       "destination": "forgejo:org/name",
       "outcome": "published",
       "verified": ["name-1.2.3.whl sha256:<hex>", "SHA256SUMS sha256:<hex>"],
-      "failure": null
+      "failure": null,
+      "pulled": ["ops-engine-tool-1.2.3-linux-amd64.tar.gz"],
+      "free_space": 21474836480,
+      "pending": [
+        {"name": "ops-engine-tool-1.2.3-windows-amd64.zip",
+         "producer": "github", "since": "2026-11-20T08:00:00+00:00"}
+      ]
     }
   ]
 }
@@ -487,6 +493,20 @@ release-object file found on read-back with the build's own SHA-256 (empty when
 the repository declares none). `failure` is `null` on success and otherwise
 names the destination and the failing file(s). The schema is **additive**: new
 keys may appear; existing keys keep their meaning.
+
+Three per-destination keys carry the REA-016/REA-017 decidable evidence:
+
+- `pulled` — the file **names** of the GitHub-produced assets this run pulled
+  into the Forgejo release (REA-017; empty when the switch is off or nothing
+  was pulled). The digest of each pulled file is in `verified`.
+- `free_space` — the Forgejo host's free-space reading as an **integer byte
+  count**, or the string `unavailable: <reason>` when no reading could be made
+  (for example `unavailable: no source declared`). It is **never `null`**: a
+  missing reading is named evidence, not a hole, and it never changes the
+  destination's outcome.
+- `pending` — the manifest pieces still on their way (REA-016), each as
+  `{"name", "producer", "since"}`. A pending piece is inside its deadline and
+  is not a failure; an empty list means nothing is owed.
 
 Two defect fixes from the REA-014 review ride in this change:
 `body_states` records `failed: <detail>` for a destination that failed
@@ -1491,6 +1511,74 @@ The change is **additive**: `PublicationReport` gains an optional `pending`
 field defaulting to `{}`; `to_dict()` keeps its existing keys; and a run with
 no manifest (or with only forgejo-produced pieces) emits exactly the audit
 lines it did before.
+
+### Pulling a GitHub-built asset and reading the Forgejo host (REA-017)
+
+`release.forgejo_assets` (an optional key, default `off`) decides whether a
+`github`-produced piece is pulled into the Forgejo release:
+
+```yaml
+release:
+  forgejo_assets: pull          # off (default) | pull; anything else is refused
+  forgejo_free_space_url: https://forge.example/metrics/free.json
+```
+
+D4 keeps a GitHub-built binary on GitHub. With `pull`, once the piece is
+present on the GitHub release the engine downloads it with its own GitHub
+credential (`HttpxAssetDownloader`, `GET` only, redirects followed), checks its
+SHA-256 against the digest the GitHub API reports, attaches it to the Forgejo
+release and re-downloads it from Forgejo to check the bytes again — Forgejo
+reports no digest of its own, only a size.
+
+- **Switch off** (the default for every repository) — nothing is downloaded and
+  the Forgejo release carries only forgejo-produced assets.
+- **Digest matches** — the file is attached; `PublicationReport.pulled` gains
+  `"<name> sha256:<hex>"` and the audit line is
+  `result=pulled <name> sha256:<hex>`.
+- **Digest mismatch, or the read-back differs** — the destination fails by
+  name, attaches or keeps nothing it cannot prove, and the audit line is
+  `result=pull-failed pull not satisfied on <label>: <detail>`; the detail
+  names the file and both digests where they differ.
+- **Not yet on GitHub inside the manifest deadline** — the piece stays pending
+  (REA-016); past the deadline it is red by name.
+
+`release.forgejo_free_space_url` is the **declared HTTP source** of the Forgejo
+host's free-space reading. The engine reads it unauthenticated — the source is
+a host endpoint, not a forge, so no credential is sent — with a timeout. The
+answer is a plain-text integer byte count or JSON carrying `free_bytes`, `free`
+or `available_bytes` (`HttpxFreeSpaceReader`). An undeclared source and a
+failed read (`no source declared`, `read failed: ...`, `unreadable answer:
+...`) raise `FreeSpaceUnavailable`; the engine turns that into the report's
+`free_space: "unavailable: <reason>"`. The engine never reaches the host any
+other way: no ssh, no docker. Host capacity is an operator decision, and the
+reading is evidence, never a gate — no reading fails a release.
+
+The reading is recorded for the Forgejo destination of every run that reached
+it, and audited:
+`release-publish tag=<tag> dest=<forge:repo> result=free-space free_bytes=<n>`
+(or `... result=free-space unavailable: <reason>`).
+
+Both readers are injectable collaborators, like the REA-016 channel reader: a
+caller may pass `asset_downloader=` and `free_space_reader=` to
+`publish_release`, to the CLI helper `run_attach`, or to the CLI's `main` as
+test seams; the shipped `HttpxAssetDownloader`/`HttpxFreeSpaceReader` take an
+optional `httpx.AsyncClient`. None of them changes what is resolved or
+published.
+
+The change is **additive**: `PublicationReport` gains optional `pulled` and
+`free_space` fields defaulting to `{}`; `to_dict()` keeps its existing keys
+(the CLI report adds `pulled`, `free_space` and `pending` per destination);
+`release.forgejo_assets` and `release.forgejo_free_space_url` are extras that
+stay out of `model_fields`, so a release block that never sets them is
+unchanged; and a run with the switch off and no source declared behaves
+exactly as before, with one extra `result=free-space` audit line naming that
+no source was declared.
+
+**Known limitation.** Layer 3 overrides Layer 2 field by field on the
+`release` object: a `.ops.yaml` that sets any `release` key replaces the
+Layer-2 `release` object, so the Layer-2 `forgejo_assets`/`forgejo_free_space_url`
+must be repeated in `.ops.yaml` when that file declares other release keys.
+This is the existing `merge_layer3` semantics, named here rather than changed.
 
 `RepoConfig.release_body_install_block: str = ""`
 `RepoConfig.release_body_assets_line: str = ""`
