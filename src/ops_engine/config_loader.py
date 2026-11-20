@@ -352,6 +352,11 @@ class ReleaseConfig(BaseModel):
     repository) leaves it on GitHub, ``pull`` downloads and attaches it. It is
     an extra for the same reason: an absent key is ``off`` and an existing
     block keeps loading.
+
+    ``forgejo_free_space_url`` (REA-017) is the declared HTTP source of the
+    Forgejo host's free-space reading. It is an extra for the same reason: an
+    absent key means no reading is attempted, and an existing block keeps
+    loading unchanged.
     """
 
     model_config = ConfigDict(extra="allow")
@@ -572,6 +577,17 @@ class ReleaseConfig(BaseModel):
         """
         extra = self.__pydantic_extra__ or {}
         return extra.get("forgejo_assets") or "off"
+
+    @property
+    def forgejo_free_space_url(self) -> str:
+        """The declared HTTP source of the Forgejo free-space reading, or ``""``.
+
+        Empty means undeclared: the engine reads no host and the report says
+        so by name. Read through the extras mapping for the same reason as
+        :attr:`forgejo_assets`.
+        """
+        extra = self.__pydantic_extra__ or {}
+        return extra.get("forgejo_free_space_url") or ""
 
     @property
     def assets(self) -> Optional[tuple[_AssetDeclaration, ...]]:

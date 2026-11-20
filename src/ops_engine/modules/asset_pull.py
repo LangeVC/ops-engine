@@ -50,13 +50,27 @@ class HttpxAssetDownloader:
         return response.content
 
 
+class FreeSpaceUnavailable(Exception):
+    """No reading could be made; the message names the reason.
+
+    The caller turns this into the report's ``unavailable: <reason>`` string.
+    It is evidence, not a gate: a release never fails because a host reading
+    could not be taken.
+    """
+
+
 class HttpxFreeSpaceReader:
     """Read a forge host's free space from a declared HTTP source.
 
     The source is a URL the operator declares (an exporter or the host's own
-    endpoint), never ssh. The response is JSON carrying ``free_bytes``,
-    ``free`` or ``available_bytes``. An undeclared source and any read error
-    answer ``None``: the reading is evidence, not a gate.
+    endpoint), never ssh and never a credential: the read is unauthenticated so
+    the engine adds no secret to a host endpoint. The response is plain-text
+    integer bytes or JSON carrying ``free_bytes``, ``free`` or
+    ``available_bytes``. The read has a timeout.
+
+    An undeclared source and a failed read raise :class:`FreeSpaceUnavailable`
+    whose message names the reason, so the report can say why the reading is
+    missing instead of leaving a silent hole.
     """
 
     def __init__(
@@ -67,22 +81,37 @@ class HttpxFreeSpaceReader:
         self._client = client
         self._source_url = source_url
 
-    async def free_bytes(self, destination) -> Optional[int]:
+    async def free_bytes(self, destination) -> int:
         if not self._source_url:
-            return None
+            raise FreeSpaceUnavailable("no source declared")
         try:
             if self._client is not None:
                 response = await self._client.get(self._source_url)
             else:
                 async with httpx.AsyncClient(timeout=10.0) as client:
                     response = await client.get(self._source_url)
-            if response.status_code != 200:
-                return None
-            payload = response.json()
-        except (httpx.HTTPError, ValueError):
-            return None
-        for key in ("free_bytes", "free", "available_bytes"):
-            value = payload.get(key) if isinstance(payload, dict) else None
-            if isinstance(value, int):
-                return value
-        return None
+        except httpx.HTTPError as exc:
+            raise FreeSpaceUnavailable(f"read failed: {exc}") from exc
+        if response.status_code != 200:
+            raise FreeSpaceUnavailable(f"read failed: HTTP {response.status_code}")
+        return _free_bytes_from(response)
+
+
+def _free_bytes_from(response: httpx.Response) -> int:
+    """The byte count in a free-space answer: plain-text or JSON."""
+    body = response.text.strip()
+    # A declared endpoint may answer the bare integer; an exporter usually
+    # answers JSON. Both are read here, and anything else is a named miss.
+    try:
+        return int(body)
+    except ValueError:
+        pass
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise FreeSpaceUnavailable("unreadable answer: not an integer or JSON") from exc
+    for key in ("free_bytes", "free", "available_bytes"):
+        value = payload.get(key) if isinstance(payload, dict) else None
+        if isinstance(value, int):
+            return value
+    raise FreeSpaceUnavailable("unreadable answer: no free-byte field")

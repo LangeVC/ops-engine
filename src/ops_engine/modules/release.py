@@ -27,7 +27,11 @@ from ops_engine.modules.asset_manifest import (
     evaluate_channels,
     parse_timestamp,
 )
-from ops_engine.modules.asset_pull import HttpxAssetDownloader, HttpxFreeSpaceReader
+from ops_engine.modules.asset_pull import (
+    FreeSpaceUnavailable,
+    HttpxAssetDownloader,
+    HttpxFreeSpaceReader,
+)
 from ops_engine.modules.mirror import resolve_destinations
 from ops_engine.modules.notification import NotificationHandler
 from ops_engine.modules.release_gates import (
@@ -644,7 +648,9 @@ class ReleaseHandler:
         free_reader = (
             free_space_reader
             if free_space_reader is not None
-            else HttpxFreeSpaceReader()
+            else HttpxFreeSpaceReader(
+                source_url=_declared_free_space_url(config, repo, repo_dir)
+            )
         )
         now = datetime.now(timezone.utc)
 
@@ -752,7 +758,9 @@ class ReleaseHandler:
                     adapter, destination, report, audit, tag_name,
                     label, pull_pieces, paired, downloader,
                 )
-            await _record_free_space(free_reader, destination, label, report)
+            await _record_free_space(
+                free_reader, destination, label, report, audit, tag_name
+            )
 
         if adapters is not None:
             if len(adapters) != len(destinations):
@@ -1858,6 +1866,28 @@ def _declared_forgejo_assets(
     return release_config.forgejo_assets if release_config is not None else "off"
 
 
+def _declared_free_space_url(
+    config: OpsEngineConfig,
+    repo: str,
+    repo_dir: str | Path | None,
+) -> str:
+    """The repo's ``release.forgejo_free_space_url``, Layer 2 + Layer 3.
+
+    Empty unless the repository (or its ``.ops.yaml``) declares an HTTP
+    source. The engine never reaches the host by other means.
+    """
+    org, _, name = repo.partition("/")
+    layer2 = config.get_repo_config(org, name)
+    if repo_dir is not None:
+        layer3 = load_ops_yaml(repo_dir)
+        if layer3 is not None:
+            layer2 = layer2.merge_layer3(layer3)
+    release_config = layer2.release
+    if release_config is None:
+        return ""
+    return release_config.forgejo_free_space_url
+
+
 def _declared_tracker_prefixes(
     config: OpsEngineConfig,
     repo: str,
@@ -2178,18 +2208,29 @@ async def _record_free_space(
     destination: Destination,
     label: str,
     report: "PublicationReport",
+    audit: Optional[list[str]] = None,
+    tag_name: str = "",
 ) -> None:
     """Read the Forgejo host's free space and put the reading in the report.
 
-    A reading that cannot be made is simply absent: it is evidence, never a
-    failure, so it must not change the destination's outcome.
+    A reading that cannot be made is named (``unavailable: <reason>``), never
+    left silent and never a null: it is evidence, not a gate, so it must not
+    change the destination's outcome. The reading is audited too, so a reader
+    of the run log sees it beside the destination it describes.
     """
     try:
         value = await reader.free_bytes(destination)
-    except Exception:  # noqa: BLE001 (evidence, never a gate)
-        return
-    if isinstance(value, int):
-        report.free_space[label] = f"free_bytes={value}"
+    except FreeSpaceUnavailable as exc:
+        reading = f"unavailable: {exc}"
+    except Exception as exc:  # noqa: BLE001 (evidence, never a gate)
+        reading = f"unavailable: {type(exc).__name__}: {exc}"
+    else:
+        if not isinstance(value, int):
+            reading = "unavailable: reader answered no byte count"
+        else:
+            reading = f"free_bytes={value}"
+    report.free_space[label] = reading
+    _audit_destination(audit, tag_name, label, "free-space", reading)
 
 
 def _fail_manifest(

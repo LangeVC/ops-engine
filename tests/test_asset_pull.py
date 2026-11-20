@@ -27,13 +27,15 @@ token beyond the one the fake adapters already carry.
 
 import hashlib
 import json
+import tempfile
+from pathlib import Path
 
 import httpx
 import pytest
 
 from ops_engine.adapters.forgejo_adapter import ForgejoAdapter
 from ops_engine.adapters.github_adapter import GithubAdapter
-from ops_engine.config_loader import OpsEngineConfig
+from ops_engine.config_loader import Destination, OpsEngineConfig
 from ops_engine.modules.release import ReleaseHandler
 
 REPO = "langevc/ops-engine"
@@ -82,6 +84,7 @@ def _config(
     second: str | None = None,
     manifest=None,
     forgejo_assets=None,
+    free_space_url=None,
 ) -> OpsEngineConfig:
     destinations = [
         {
@@ -105,6 +108,8 @@ def _config(
         release["manifest"] = manifest
     if forgejo_assets is not None:
         release["forgejo_assets"] = forgejo_assets
+    if free_space_url is not None:
+        release["forgejo_free_space_url"] = free_space_url
     return OpsEngineConfig.load(
         {
             "orgs": {
@@ -326,6 +331,7 @@ async def _publish(
     config,
     downloader=None,
     free_space_reader=None,
+    repo_dir=None,
 ):
     _artifacts(tmp_path)
     audit: list[str] = []
@@ -339,6 +345,7 @@ async def _publish(
         adapters=[_make(dest) for dest in destinations],
         skip_existing=True,
         audit=audit,
+        repo_dir=repo_dir,
         release_body=BODY,
         asset_downloader=downloader,
         free_space_reader=free_space_reader,
@@ -587,6 +594,204 @@ async def test_the_forgejo_free_space_reading_is_part_of_the_report(tmp_path):
     label = f"forgejo:{REPO}"
     assert report.free_space[label] == f"free_bytes={FREE_BYTES}"
     assert free_space.reads == [label]
+
+
+# --- Criterion 3: the shipped source, its reasons and the audit line ------
+
+FREE_SPACE_URL = "https://forge.invalid/metrics/free.json"
+
+
+def _client(handler) -> httpx.AsyncClient:
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body,status,expected",
+    [
+        (str(FREE_BYTES).encode(), 200, FREE_BYTES),
+        (json.dumps({"free_bytes": FREE_BYTES}).encode(), 200, FREE_BYTES),
+        (json.dumps({"free": FREE_BYTES}).encode(), 200, FREE_BYTES),
+        (json.dumps({"available_bytes": FREE_BYTES}).encode(), 200, FREE_BYTES),
+    ],
+)
+async def test_the_shipped_reader_reads_plain_text_and_json_without_a_credential(
+    body, status, expected
+):
+    """The declared source answers a bare integer or JSON; either is read.
+
+    The read carries no ``Authorization`` header: the source is a host
+    endpoint, not a forge, so the engine adds no secret to it.
+    """
+    from ops_engine.modules.asset_pull import HttpxFreeSpaceReader
+
+    seen: list[tuple[str, str | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((str(request.url), request.headers.get("authorization")))
+        return httpx.Response(status, content=body)
+
+    reader = HttpxFreeSpaceReader(
+        client=_client(handler), source_url=FREE_SPACE_URL
+    )
+    destination = Destination(forge="forgejo", repo=REPO)
+
+    assert await reader.free_bytes(destination) == expected
+    assert seen == [(FREE_SPACE_URL, None)]
+
+
+@pytest.mark.asyncio
+async def test_the_shipped_reader_names_a_failed_read():
+    """A failed read is a named reason, never a bare exception.
+
+    ``_record_free_space`` turns the reason into ``unavailable: <reason>``;
+    the reason has to say what went wrong, not just that something did.
+    """
+    from ops_engine.modules.asset_pull import (
+        FreeSpaceUnavailable,
+        HttpxFreeSpaceReader,
+    )
+
+    destination = Destination(forge="forgejo", repo=REPO)
+
+    with pytest.raises(FreeSpaceUnavailable) as undeclared:
+        await HttpxFreeSpaceReader(client=_client(lambda r: httpx.Response(200))).free_bytes(
+            destination
+        )
+    assert "no source declared" in str(undeclared.value)
+
+    http_error = HttpxFreeSpaceReader(
+        client=_client(lambda r: httpx.Response(503, content=b"down")),
+        source_url=FREE_SPACE_URL,
+    )
+    with pytest.raises(FreeSpaceUnavailable) as refused:
+        await http_error.free_bytes(destination)
+    assert "HTTP 503" in str(refused.value)
+
+    unreadable = HttpxFreeSpaceReader(
+        client=_client(lambda r: httpx.Response(200, content=b"lots")),
+        source_url=FREE_SPACE_URL,
+    )
+    with pytest.raises(FreeSpaceUnavailable) as unparsed:
+        await unreadable.free_bytes(destination)
+    assert "unreadable answer" in str(unparsed.value)
+
+
+@pytest.mark.asyncio
+async def test_a_missing_reading_is_named_in_the_report_and_audited(tmp_path):
+    """Criterion 3: an undeterminable reading is evidence, not a failure.
+
+    With no source declared the shipped reader is still the reader the engine
+    builds, and the destination's outcome is unchanged: the report carries
+    ``unavailable: no source declared`` and the audit line says the same.
+    """
+    timeline: list = []
+    destinations, forgejo, _ = _both(
+        timeline, github_preloaded={**CONTENT, GITHUB_BINARY: GITHUB_BYTES}
+    )
+    config = _config(
+        "forgejo", second="github", manifest=MANIFEST, forgejo_assets="pull"
+    )
+
+    report, audit = await _publish(
+        destinations, tmp_path, config=config, downloader=FakeDownloader(timeline)
+    )
+
+    label = f"forgejo:{REPO}"
+    assert report.failed == [], report.failure_details
+    assert GITHUB_BINARY in forgejo.asset_names()
+    assert report.free_space[label] == "unavailable: no source declared"
+    assert (
+        f"release-publish tag={TAG} dest={label} result=free-space "
+        f"unavailable: no source declared"
+    ) in audit
+
+
+@pytest.mark.asyncio
+async def test_the_declared_source_reaches_the_shipped_reader(tmp_path, monkeypatch):
+    """Criterion 3: the source declared in the config is the one read.
+
+    The engine builds the shipped reader itself; the only reason this test
+    needs a patch is that the reader opens a real client. Everything else —
+    the config lookup, the read, the report entry — is the shipped path.
+    """
+    from ops_engine.modules import asset_pull
+
+    timeline: list = []
+    destinations, _, _ = _both(
+        timeline, github_preloaded={**CONTENT, GITHUB_BINARY: GITHUB_BYTES}
+    )
+    config = _config(
+        "forgejo",
+        second="github",
+        manifest=MANIFEST,
+        forgejo_assets="pull",
+        free_space_url=FREE_SPACE_URL,
+    )
+    seen: list[tuple[str, str | None]] = []
+    real_client = httpx.AsyncClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((str(request.url), request.headers.get("authorization")))
+        return httpx.Response(
+            200, content=json.dumps({"free_bytes": FREE_BYTES}).encode()
+        )
+
+    def client_factory(*args, **kwargs):
+        # The engine's reader opens a default client; the adapters built for
+        # the fakes supply their own transport and must keep it.
+        if "transport" not in kwargs:
+            kwargs["transport"] = httpx.MockTransport(handler)
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(asset_pull.httpx, "AsyncClient", client_factory)
+
+    report, _ = await _publish(
+        destinations, tmp_path, config=config, downloader=FakeDownloader(timeline)
+    )
+
+    label = f"forgejo:{REPO}"
+    assert report.free_space[label] == f"free_bytes={FREE_BYTES}"
+    assert seen == [(FREE_SPACE_URL, None)]
+
+
+def test_the_declared_source_resolves_from_layer_two_and_layer_three(tmp_path):
+    """``release.forgejo_free_space_url`` is a Layer-2 or Layer-3 declaration.
+
+    Layer 3 overrides Layer 2 field by field on the ``release`` object: a
+    Layer-3 block that names the URL wins, one that only names other release
+    keys inherits the Layer-2 URL.
+    """
+    from ops_engine.modules.release import _declared_free_space_url
+
+    config = _config("forgejo", free_space_url=FREE_SPACE_URL)
+    assert _release_config(config).forgejo_free_space_url == FREE_SPACE_URL
+    assert _declared_free_space_url(config, REPO, None) == FREE_SPACE_URL
+
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / ".ops.yaml"
+        path.write_text(
+            f"release:\n  forgejo_free_space_url: '{FREE_SPACE_URL}'\n",
+            encoding="utf-8",
+        )
+        assert _declared_free_space_url(config, REPO, directory) == FREE_SPACE_URL
+
+        path.write_text(
+            f"release:\n  forgejo_free_space_url: 'https://other.invalid/'\n",
+            encoding="utf-8",
+        )
+        assert (
+            _declared_free_space_url(config, REPO, directory)
+            == "https://other.invalid/"
+        )
+
+
+def test_an_undeclared_source_is_the_empty_string():
+    """An absent key means no reading is attempted: the property is ``""``."""
+    from ops_engine.config_loader import ReleaseConfig
+
+    assert _release_config(_config("forgejo")).forgejo_free_space_url == ""
+    assert "forgejo_free_space_url" not in ReleaseConfig.model_fields
 
 
 # --- The switch: default off, unknown refused, per repository --------------

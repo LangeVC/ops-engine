@@ -168,6 +168,8 @@ async def run_attach(
     credentials: Optional[dict[str, Credential]] = None,
     audit: Optional[list[str]] = None,
     skip_existing: bool = True,
+    asset_downloader: object = None,
+    free_space_reader: object = None,
 ) -> PublicationReport:
     """Run one attach and return the engine's publication report.
 
@@ -175,7 +177,9 @@ async def run_attach(
     merge the Layer-3 ``.ops.yaml`` (so the declared assets are read and
     verified), and ``audit`` receives one line per destination. ``adapters`` is
     the test injection point of :meth:`ReleaseHandler.publish_release` and
-    never changes the destination resolution.
+    never changes the destination resolution. ``asset_downloader`` and
+    ``free_space_reader`` are the REA-017 injection points; ``None`` lets the
+    engine build the shipped HTTP collaborators.
     """
     return await ReleaseHandler.publish_release(
         config,
@@ -191,6 +195,8 @@ async def run_attach(
         credentials=credentials,
         release_body=release_body,
         ticket_prefixes=ticket_prefixes,
+        asset_downloader=asset_downloader,
+        free_space_reader=free_space_reader,
     )
 
 
@@ -212,7 +218,13 @@ def _outcome(report: PublicationReport, label: str) -> str:
 
 
 def _labels(report: PublicationReport) -> list[str]:
-    """Every destination the run touched, in the order it first appears."""
+    """Every destination the run touched, in the order it first appears.
+
+    ``pulled``, ``free_space`` and ``pending`` are read after the outcome
+    buckets because a reading is recorded even when nothing else about the
+    destination changed (REA-017): a destination that only carries evidence
+    still belongs in the report.
+    """
     seen: list[str] = []
     for bucket in (
         report.published,
@@ -222,11 +234,61 @@ def _labels(report: PublicationReport) -> list[str]:
         report.rc_skipped,
         report.failed,
         list(report.verified),
+        list(report.pulled),
+        list(report.pending),
+        list(report.free_space),
     ):
         for label in bucket:
             if label not in seen:
                 seen.append(label)
     return seen
+
+
+def _pulled_names(entries: Iterable[str]) -> list[str]:
+    """The file names out of the engine's ``<name> sha256:<hex>`` entries.
+
+    The report names the files, not their digests: the digest is the same one
+    the verified list already carries, and a consumer that wants to compare
+    pins it there.
+    """
+    return [entry.split(" ", 1)[0] for entry in entries]
+
+
+def _pending_entries(entries: Iterable[str]) -> list[dict]:
+    """Parse the engine's ``<name> producer=<forge> since=<iso>`` text.
+
+    A piece still on its way is reported as the structured fact it is —
+    which file, from which forge, since when — so a consumer does not have to
+    parse a sentence to see that the publish is not yet complete.
+    """
+    parsed = []
+    for entry in entries:
+        parts = entry.split(" ")
+        name, producer, since = parts[0], "", ""
+        for part in parts[1:]:
+            if part.startswith("producer="):
+                producer = part.split("=", 1)[1]
+            elif part.startswith("since="):
+                since = part.split("=", 1)[1]
+        parsed.append({"name": name, "producer": producer, "since": since})
+    return parsed
+
+
+def _free_space(reading: Optional[str]):
+    """The free-space reading as the report shows it: a byte count or a reason.
+
+    A ``free_bytes=<n>`` reading becomes the integer; anything else is the
+    engine's ``unavailable: <reason>`` string, passed through verbatim. It is
+    never ``null``: a missing reading is evidence about the host, not a hole.
+    """
+    if reading is None:
+        return "unavailable: no reading recorded"
+    if reading.startswith("free_bytes="):
+        try:
+            return int(reading.split("=", 1)[1])
+        except ValueError:
+            return reading
+    return reading
 
 
 def render_report(report: PublicationReport) -> dict:
@@ -235,8 +297,11 @@ def render_report(report: PublicationReport) -> dict:
     One entry per destination, in the engine's order: the destination label,
     its single outcome, the verified ``<name> sha256:<hex>`` list (empty when
     nothing was declared) and the failure detail naming the file and the
-    destination (``None`` on success). ``exit_code`` is the code the command
-    returns, so a consumer reads the outcome from the report alone.
+    destination (``None`` on success). REA-017 adds, per destination, the
+    pulled file names, the host free-space reading (an integer, or an explicit
+    ``unavailable: <reason>`` string — never null) and the still-pending
+    pieces with their producer and since. ``exit_code`` is the code the
+    command returns, so a consumer reads the outcome from the report alone.
     """
     destinations = []
     for label in _labels(report):
@@ -250,6 +315,9 @@ def render_report(report: PublicationReport) -> dict:
                 "outcome": _outcome(report, label),
                 "verified": list(report.verified.get(label, [])),
                 "failure": failure,
+                "pulled": _pulled_names(report.pulled.get(label, [])),
+                "free_space": _free_space(report.free_space.get(label)),
+                "pending": _pending_entries(report.pending.get(label, [])),
             }
         )
     failed = bool(report.failed)
@@ -318,11 +386,15 @@ def main(
     argv: Optional[list[str]] = None,
     *,
     adapters: Optional[list[ForgeAdapter]] = None,
+    asset_downloader: object = None,
+    free_space_reader: object = None,
 ) -> int:
     """Run the command, print the JSON report and return the exit code.
 
-    ``argv`` is the command line (``sys.argv[1:]`` by default); ``adapters`` is
-    the test injection point passed through to :func:`run_attach`.
+    ``argv`` is the command line (``sys.argv[1:]`` by default); ``adapters``,
+    ``asset_downloader`` and ``free_space_reader`` are the test injection
+    points passed through to :func:`run_attach`. They do not change what the
+    command resolves or publishes.
     """
     args = _parser().parse_args(argv)
     try:
@@ -347,6 +419,8 @@ def main(
                 ticket_prefixes=request.ticket_prefixes,
                 credentials=request.credentials,
                 audit=audit,
+                asset_downloader=asset_downloader,
+                free_space_reader=free_space_reader,
             )
         )
     except Exception as exc:  # noqa: BLE001 (a named failure, never a traceback)
