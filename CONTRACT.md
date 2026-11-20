@@ -447,17 +447,26 @@ a GitHub runner: the argv does not name a forge, and each destination is
 resolved from the same Layer-2 + `.ops.yaml` merge the engine uses.
 
 ```text
-ops-engine-release-attach --config config.yml --repo org/name --tag v1.2.3 \
+ops-engine-release-attach [--config config.yml] --repo org/name --tag v1.2.3 \
     --artifacts dist [--repo-dir .] [--name-template T] \
     [--notes-file F] [--body-file F] [--ticket-prefix P ...]
 ```
 
+`--config` is optional. Without it the command builds the minimal Layer-2
+stand-in the engine needs — one repository entry named by `--repo` — and the
+repository's own `.ops.yaml` in `--repo-dir` supplies the destinations, the
+release block and `release.assets`. A product repository therefore publishes
+from the same declaration the engine reads, without shipping or inventing an
+org `config.yml` that would drift from the layover's release block. With
+`--config` the command reads that Layer-2 file first and merges the Layer-3
+`.ops.yaml` over it, exactly as before. The command writes nothing of its own:
+it is a wire around `ReleaseHandler.publish_release`, which remains the one
+publication function (*One release path*).
+
 The credentials come from the environment variables each destination declares
 (`credential_variable`); the runner populates the ones it holds. `--repo-dir`
 is the repository root holding `.ops.yaml`; it is always passed to the engine,
-so `release.assets` is read and verified. The command writes nothing of its
-own: it is a wire around `ReleaseHandler.publish_release`, which remains the
-one publication function (*One release path*).
+so `release.assets` is read and verified.
 
 **Report schema v1** (`ops-engine-release-attach-report/v1`) is printed to
 stdout as JSON, one run per invocation:
@@ -502,7 +511,7 @@ the same value):
 | ---- | ------- |
 | 0 | Every destination is done: published, converged, already equal or verified. |
 | 1 | At least one destination failed by name; `failure` names the file and the destination. |
-| 2 | The run could not start: an unreadable config, a missing artifact directory, or an error that escaped the engine. The report is still JSON, with `error` set and `destinations` empty. |
+| 2 | The run could not start: an unreadable config, a missing artifact directory, no `--config` and a `.ops.yaml` in `--repo-dir` that is absent, malformed, or declares no destination (the error names the file), or an error that escaped the engine. The report is still JSON, with `error` set and `destinations` empty. |
 
 ## Release reconcile entry point
 
