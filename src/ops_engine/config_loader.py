@@ -346,6 +346,17 @@ class ReleaseConfig(BaseModel):
     piece, its producer and the destinations that must hold it, plus the
     channels. It is an extra for the same reason as ``assets``: an absent block
     leaves the release block exactly as it was.
+
+    ``forgejo_assets`` (REA-017, D4) decides whether a GitHub-built asset is
+    pulled into the Forgejo release: ``off`` (the default for every
+    repository) leaves it on GitHub, ``pull`` downloads and attaches it. It is
+    an extra for the same reason: an absent key is ``off`` and an existing
+    block keeps loading.
+
+    ``forgejo_free_space_url`` (REA-017) is the declared HTTP source of the
+    Forgejo host's free-space reading. It is an extra for the same reason: an
+    absent key means no reading is attempted, and an existing block keeps
+    loading unchanged.
     """
 
     model_config = ConfigDict(extra="allow")
@@ -535,6 +546,48 @@ class ReleaseConfig(BaseModel):
                 f"release.manifest is malformed: {exc.errors()[0]['msg']}"
             ) from exc
         return overridden
+
+    @model_validator(mode="before")
+    @classmethod
+    def _parse_forgejo_assets(cls, data: Any) -> Any:
+        """Refuse an unknown ``release.forgejo_assets`` value, naming the key.
+
+        Only ``off`` and ``pull`` load. Parsed here, before pydantic's field
+        handling, so the reason names ``release.forgejo_assets`` rather than an
+        opaque model error — the callers that wrap a ``ValidationError`` add
+        the source file or section.
+        """
+        if not isinstance(data, dict) or "forgejo_assets" not in data:
+            return data
+        raw = data["forgejo_assets"]
+        if raw not in ("off", "pull"):
+            raise ValueError(
+                "release.forgejo_assets must be 'off' or 'pull', "
+                f"got {raw!r}"
+            )
+        return data
+
+    @property
+    def forgejo_assets(self) -> str:
+        """``off`` unless declared; the switch that arms the REA-017 pull.
+
+        Read through the extras mapping so it stays out of ``model_fields``
+        (an existing release block that never sets it keeps loading) and so a
+        Layer-3 block that sets it reaches the merged config.
+        """
+        extra = self.__pydantic_extra__ or {}
+        return extra.get("forgejo_assets") or "off"
+
+    @property
+    def forgejo_free_space_url(self) -> str:
+        """The declared HTTP source of the Forgejo free-space reading, or ``""``.
+
+        Empty means undeclared: the engine reads no host and the report says
+        so by name. Read through the extras mapping for the same reason as
+        :attr:`forgejo_assets`.
+        """
+        extra = self.__pydantic_extra__ or {}
+        return extra.get("forgejo_free_space_url") or ""
 
     @property
     def assets(self) -> Optional[tuple[_AssetDeclaration, ...]]:
