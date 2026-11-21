@@ -23,6 +23,14 @@ Source of the forge facts (read 2026-11-03, not assumed):
 
 The fake destination here is an ``httpx`` transport behind the real adapters, so
 the adapters' own request pipeline runs; only the socket is replaced.
+
+REA-011 (3.7.0): a duplicate answer on create continues with the existing
+object whether or not the caller asked for the pre-flight check. A create call
+answering 409 (Forgejo) or 422 (GitHub) resolves the destination's release by
+tag, for any state, and the same existing-release judgement runs. The audit
+line of that resolution names the destination, the status of the duplicate
+answer and the existing release id; a second delivery of the same event
+writes nothing.
 """
 
 import httpx
@@ -82,6 +90,14 @@ class FakeDestination:
     def creates(self) -> int:
         return sum(1 for m, p in self.calls if m == "POST" and p.endswith("/releases"))
 
+    def writes(self) -> list[tuple[str, str]]:
+        """Every call that would change the destination, the create attempt
+        itself aside (it is the call whose duplicate answer is absorbed)."""
+        return [
+            (m, p) for m, p in self.calls
+            if m != "GET" and not (m == "POST" and p.endswith("/releases"))
+        ]
+
 
 def _forgejo(dest: FakeDestination) -> ForgejoAdapter:
     adapter = ForgejoAdapter(base_url="https://forge.invalid", token="t", webhook_secret="s")
@@ -105,14 +121,14 @@ GITHUB_ALREADY_EXISTS = {
 }
 
 
-async def _publish(forge: str, adapter, tmp_path):
+async def _publish(forge: str, adapter, tmp_path, *, skip_existing: bool = True):
     art = tmp_path / "dist"
     art.mkdir(exist_ok=True)
     (art / "a.whl").write_bytes(b"x")
     audit: list[str] = []
     report = await ReleaseHandler.publish_release(
         _config(forge), REPO, TAG, "notes", art,
-        adapters=[adapter], skip_existing=True, audit=audit,
+        adapters=[adapter], skip_existing=skip_existing, audit=audit,
     )
     return report, audit
 
@@ -126,7 +142,12 @@ async def test_forgejo_create_409_reports_destination_as_holding_the_release(tmp
     report, audit = await _publish("forgejo", _forgejo(dest), tmp_path)
     assert report.skipped and not report.failed and not report.published
     assert not report.partial
-    assert audit == [f"release-publish tag={TAG} dest={report.skipped[0]} result=skipped"]
+    # The token cannot see the release (by-tag 404, empty list), so its id is
+    # unknown; the duplicate answer itself is still named.
+    assert audit == [
+        f"release-publish tag={TAG} dest={report.skipped[0]} result=skipped "
+        "http=409 existing_release_id=unknown"
+    ]
 
 
 @pytest.mark.asyncio
@@ -134,7 +155,10 @@ async def test_github_create_422_already_exists_reports_destination_as_holding_t
     dest = FakeDestination(422, GITHUB_ALREADY_EXISTS)
     report, audit = await _publish("github", _github(dest), tmp_path)
     assert report.skipped and not report.failed and not report.published
-    assert audit == [f"release-publish tag={TAG} dest={report.skipped[0]} result=skipped"]
+    assert audit == [
+        f"release-publish tag={TAG} dest={report.skipped[0]} result=skipped "
+        "http=422 existing_release_id=unknown"
+    ]
 
 
 @pytest.mark.asyncio
@@ -284,36 +308,35 @@ async def test_create_409_with_no_visible_release_is_still_skipped(tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("make,forge,status,body", [
-    (_forgejo, "forgejo", 409, None),
-    (_github, "github", 422, {"message": "Validation Failed",
-                              "errors": [{"code": "invalid", "field": "target_commitish"}]}),
-])
-async def test_partial_publication_names_http_status_and_existing_release_id(
-    make, forge, status, body, tmp_path, monkeypatch
+async def test_a_422_that_is_not_a_duplicate_failure_names_http_status_and_release_id(
+    tmp_path, monkeypatch
 ):
-    # Without skip_existing the duplicate answer is a failure: the audit line
-    # and the notification must name the status and the id of the release the
-    # destination already holds.
+    # A 422 whose codes say something other than "already exists" is not a
+    # duplicate answer to continue from: it stays a failure, and the audit line
+    # and the notification name the status and the id of the release the
+    # destination holds.
     sink = RecordingNotifications(monkeypatch)
     dest = FakeDestination(
-        status, body, listed=[{"id": RELEASE_ID, "tag_name": TAG, "name": TITLE}]
+        422,
+        {"message": "Validation Failed",
+         "errors": [{"code": "invalid", "field": "target_commitish"}]},
+        listed=[{"id": RELEASE_ID, "tag_name": TAG, "name": TITLE}],
     )
     audit: list[str] = []
     art = tmp_path / "dist"
     art.mkdir()
     (art / "a.whl").write_bytes(b"x")
     report = await ReleaseHandler.publish_release(
-        _config(forge), REPO, TAG, "notes", art, adapters=[make(dest)], audit=audit,
+        _config("github"), REPO, TAG, "notes", art, adapters=[_github(dest)], audit=audit,
     )
     assert report.partial
-    expected = f"http={status} existing_release_id={RELEASE_ID}"
+    expected = f"http=422 existing_release_id={RELEASE_ID}"
     assert audit == [
         f"release-publish tag={TAG} dest={report.failed[0]} result=failed {expected}"
     ]
     from ops_engine.modules.release import _notify_partial
 
-    await _notify_partial(_notifying_config(forge), REPO, TAG, report)
+    await _notify_partial(_notifying_config("github"), REPO, TAG, report)
     assert expected in sink.bodies[0]
 
 
@@ -329,3 +352,175 @@ async def test_a_failure_that_is_not_409_or_422_carries_no_status_detail(tmp_pat
     )
     assert report.partial
     assert audit == [f"release-publish tag={TAG} dest={report.failed[0]} result=failed"]
+
+
+# --- REA-011 criterion 1: a duplicate answer continues, asked or not ----------
+
+DUPLICATE_ANSWERS = [
+    ("forgejo", _forgejo, 409),
+    ("github", _github, 422),
+]
+
+
+def _github_duplicate_body() -> dict:
+    return dict(GITHUB_ALREADY_EXISTS)
+
+
+def _duplicate_body(forge: str) -> dict | None:
+    return _github_duplicate_body() if forge == "github" else None
+
+
+def _present(*, complete: bool) -> list[dict]:
+    """The release the destination holds, as the by-tag-404 list shows it.
+
+    ``complete``: the gated title and the build's file. Otherwise the title is
+    another one and no file is attached, which is an incomplete release.
+    """
+    return [{
+        "id": RELEASE_ID,
+        "tag_name": TAG,
+        "name": TITLE if complete else "something else",
+        "assets": [{"name": "a.whl"}] if complete else [],
+    }]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("forge,make,status", DUPLICATE_ANSWERS)
+async def test_duplicate_answer_continues_with_the_existing_object_without_the_pre_flight_check(
+    forge, make, status, tmp_path
+):
+    # RED PROOF at base 2f5c255: skip_existing is not given, so the 409/422 is
+    # not absorbed, the destination lands in ``failed`` and the workflow ends in
+    # PartialPublicationError. The duplicate answer must continue with the
+    # release the destination already holds, whatever state it is in.
+    dest = FakeDestination(
+        status, _duplicate_body(forge), listed=_present(complete=True)
+    )
+    report, audit = await _publish(forge, make(dest), tmp_path, skip_existing=False)
+    assert not report.failed and not report.published
+    assert report.skipped == [f"{forge}:{REPO}"]
+    assert dest.creates() == 1  # the create call whose duplicate answer was absorbed
+    assert dest.writes() == []
+    assert audit == [
+        f"release-publish tag={TAG} dest={report.skipped[0]} result=skipped "
+        f"http={status} existing_release_id={RELEASE_ID}"
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("forge,make,status", DUPLICATE_ANSWERS)
+async def test_duplicate_answer_with_an_unseen_release_is_not_a_failure(
+    forge, make, status, tmp_path
+):
+    # By-tag 404 and an empty list: the token cannot see the release at all.
+    # The duplicate answer itself is the proof that the destination holds it;
+    # the destination is skipped, its id is named as unknown.
+    dest = FakeDestination(status, _duplicate_body(forge))
+    report, audit = await _publish(forge, make(dest), tmp_path, skip_existing=False)
+    assert not report.failed and not report.published
+    assert report.skipped == [f"{forge}:{REPO}"]
+    assert dest.writes() == []
+    assert audit == [
+        f"release-publish tag={TAG} dest={report.skipped[0]} result=skipped "
+        f"http={status} existing_release_id=unknown"
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("forge,make,status", DUPLICATE_ANSWERS)
+async def test_duplicate_answer_with_an_incomplete_release_names_status_and_id(
+    forge, make, status, tmp_path
+):
+    # The pre-flight check answered no (by-tag 404, and the list would have
+    # said yes only later); the create answered a duplicate; the release the
+    # destination holds is incomplete. It continues with that object and is
+    # judged as such, with the duplicate answer named.
+    dest = FakeDestination(
+        status, _duplicate_body(forge), listed=_present(complete=False)
+    )
+    report, audit = await _publish(forge, make(dest), tmp_path, skip_existing=False)
+    assert report.partial and report.failed == [f"{forge}:{REPO}"]
+    assert not report.skipped
+    assert dest.writes() == []
+    assert len(audit) == 1
+    assert "result=incomplete" in audit[0]
+    assert f"http={status} existing_release_id={RELEASE_ID}" in audit[0]
+    assert "title is 'something else'" in audit[0]
+
+
+@pytest.mark.asyncio
+async def test_duplicate_answer_that_is_not_a_duplicate_still_fails(tmp_path):
+    # GitHub answers 422 for any validation failure; only the duplicate answer
+    # continues. Nothing is listed for the tag, so this one stays a failure.
+    dest = FakeDestination(
+        422, {"message": "Validation Failed",
+              "errors": [{"code": "invalid", "field": "target_commitish"}]}
+    )
+    report, audit = await _publish("github", _github(dest), tmp_path, skip_existing=False)
+    assert report.failed == [f"github:{REPO}"]
+    assert not report.skipped
+    assert dest.writes() == []
+    assert "result=failed" in audit[0] and "incomplete" not in audit[0]
+
+
+# --- REA-011 criterion 2: the audit line names destination, status and id -----
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("forge,make,status", DUPLICATE_ANSWERS)
+async def test_audit_line_of_a_duplicate_answer_names_destination_status_and_id(
+    forge, make, status, tmp_path
+):
+    dest = FakeDestination(
+        status, _duplicate_body(forge), listed=_present(complete=True)
+    )
+    report, audit = await _publish(forge, make(dest), tmp_path, skip_existing=False)
+    assert len(audit) == 1
+    assert audit[0] == (
+        f"release-publish tag={TAG} dest={forge}:{REPO} result=skipped "
+        f"http={status} existing_release_id={RELEASE_ID}"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("forge,make,status", DUPLICATE_ANSWERS)
+async def test_the_pre_flight_skip_carries_no_duplicate_detail(
+    forge, make, status, tmp_path
+):
+    # A release the pre-flight lookup finds is not a duplicate answer: its
+    # audit line keeps the shape every caller of publish_release relies on.
+    dest = FakeDestination(status, _duplicate_body(forge), listed=_present(complete=True))
+    report, audit = await _publish(forge, make(dest), tmp_path, skip_existing=True)
+    assert report.skipped == [f"{forge}:{REPO}"]
+    assert dest.creates() == 0
+    assert audit == [
+        f"release-publish tag={TAG} dest={report.skipped[0]} result=skipped"
+    ]
+
+
+# --- REA-011 criterion 3: redelivery of the same event writes nothing --------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("forge,make,status", DUPLICATE_ANSWERS)
+async def test_redelivery_after_a_duplicate_answer_writes_nothing(
+    forge, make, status, tmp_path
+):
+    # First delivery: the create answers a duplicate and the existing release is
+    # continued from, nothing written. The redelivery of the same event finds
+    # the release and skips it: no second create, no title, no upload.
+    dest = FakeDestination(
+        status, _duplicate_body(forge), listed=_present(complete=True)
+    )
+    adapter = make(dest)
+    first, _ = await _publish(forge, adapter, tmp_path, skip_existing=False)
+    second, second_audit = await _publish(forge, adapter, tmp_path)
+
+    assert first.skipped == [f"{forge}:{REPO}"]
+    assert second.skipped == [f"{forge}:{REPO}"]
+    assert second.failed == [] and second.published == []
+    assert dest.creates() == 1  # the redelivery did not post again
+    assert dest.writes() == []
+    assert second_audit == [
+        f"release-publish tag={TAG} dest={second.skipped[0]} result=skipped"
+    ]

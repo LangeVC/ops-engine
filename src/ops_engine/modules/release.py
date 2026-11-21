@@ -1,10 +1,12 @@
 """CORE-002: ReleaseHandler — Create releases from tag pushes or labeled merges."""
 
 import fnmatch
+import hashlib
 import logging
 import re
 import tempfile
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -12,11 +14,29 @@ import httpx
 
 from ops_engine.adapters.base import ForgeAdapter
 from ops_engine.adapters.factory import Credential, MissingCredentialError, adapters_for
-from ops_engine.config_loader import Destination, OpsEngineConfig, ReleaseConfig, load_ops_yaml
+from ops_engine.config_loader import (
+    AssetManifest,
+    Destination,
+    OpsEngineConfig,
+    ReleaseConfig,
+    load_ops_yaml,
+)
+from ops_engine.modules.asset_manifest import (
+    HttpxChannelReader,
+    deadline_passed,
+    evaluate_channels,
+    parse_timestamp,
+)
+from ops_engine.modules.asset_pull import (
+    FreeSpaceUnavailable,
+    HttpxAssetDownloader,
+    HttpxFreeSpaceReader,
+)
 from ops_engine.modules.mirror import resolve_destinations
 from ops_engine.modules.notification import NotificationHandler
 from ops_engine.modules.release_gates import (
     MissingChangelogEntryError,
+    ReleaseNotesAudienceError,
     ReleaseTitleError,
     check_release_notes_audience,
     check_release_title,
@@ -85,6 +105,48 @@ def render_release_name(template: str, repo: str, tag_name: str) -> str:
     return template.format_map(_TemplateDict(values))
 
 
+def compose_release_body(
+    repo: str,
+    tag_name: str,
+    notes: str,
+    *,
+    name_template: str = DEFAULT_NAME_TEMPLATE,
+    install_block: str = "",
+    assets_line: str = "",
+    changelog_path: str = "CHANGELOG.md",
+    changelog_url: str = "",
+) -> str:
+    """Compose the release body from its parts (P36-017), in a fixed order.
+
+    The five parts, in order: the product heading rendered from
+    ``name_template``, the CHANGELOG ``notes``, the optional ``### Install``
+    block, the optional assets line, and the CHANGELOG link. The install block
+    and assets line are business data (a per-repository declaration), never
+    engine defaults: an empty value contributes nothing, not an empty heading.
+
+    The composer lives in the engine so that every caller — the webhook path,
+    the shipped workflow and the attach CLI — gets the same body without
+    restating it, and so that :meth:`ReleaseHandler.publish_release` can run the
+    audience gate on the FINAL body on every destination (REA-018, REA-012 D1).
+
+    ``changelog_url`` is supplied by the caller: the engine holds no canonical
+    host. When it is empty the CHANGELOG link is omitted rather than invented —
+    a body without a link is still the composed body and still carries the
+    declared install block.
+    """
+    body = f"## {render_release_name(name_template, repo, tag_name)}\n\n{notes}\n"
+    if install_block:
+        body += f"### Install\n{install_block}\n\n"
+    if assets_line:
+        body += f"{assets_line}\n\n"
+    if changelog_url:
+        body += (
+            f"See [{changelog_path}]({changelog_url})"
+            f" for all changes.\n"
+        )
+    return body
+
+
 @dataclass
 class PublicationReport:
     """Queryable record of one release published outward to its destinations.
@@ -102,16 +164,19 @@ class PublicationReport:
     published: list[str] = field(default_factory=list)
     failed: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
-    # Destinations whose existing release (made by someone else, with the notes
-    # of this build) got its title corrected and its missing files uploaded.
-    # Not failures: they are not in ``failed``.
+    # Destinations whose existing release was converged to the intended state
+    # (D1): title, body or missing files written. An object authored by
+    # another account is converged the same way. Not failures: they are not in
+    # ``failed``.
     supplemented: list[str] = field(default_factory=list)
     # label -> what an operator needs to read: the HTTP status and the
     # destination's existing release id (409/422), or what differs on an
     # existing release (incomplete). Both labels are also in ``failed``.
     failure_details: dict[str, str] = field(default_factory=dict)
-    # Destinations whose release for the tag already exists from ANOTHER
-    # publisher: recorded as up to date, never edited and never duplicated.
+    # Destinations whose existing release for the tag already is the intended
+    # state, so nothing was written: recorded as up to date, never edited and
+    # never duplicated. A release from ANOTHER publisher is converged like any
+    # other (D1, superseding P36-003); only a complete one lands here.
     # Not failures: they are not in ``failed``.
     up_to_date: list[str] = field(default_factory=list)
     # destination label -> who made the release found for the tag there:
@@ -123,6 +188,23 @@ class PublicationReport:
     # P36-018 criterion 1: body state per destination (written, supplemented,
     # already_equal, or failed with the named difference).
     body_states: dict[str, str] = field(default_factory=dict)
+    # REA-014: destination label -> the declared release-object files found on
+    # read-back, each as ``"<name> sha256:<hex>"`` of the build's own bytes.
+    # Empty when the repo declares no release-object asset.
+    verified: dict[str, list[str]] = field(default_factory=dict)
+    # REA-016: destination label -> the manifest pieces still on their way,
+    # each as ``"<name> producer=<forge> since=<iso>"``. A pending piece is
+    # not a failure: it is a github-produced asset inside the deadline.
+    pending: dict[str, list[str]] = field(default_factory=dict)
+    # REA-017: destination label -> the github-produced files pulled into it,
+    # each as ``"<name> sha256:<hex>"`` of the GitHub digest and the bytes
+    # attached. Empty when the switch is off (D4's default) or nothing was
+    # pulled. Kept out of :meth:`to_dict`, which stays as it was.
+    pulled: dict[str, list[str]] = field(default_factory=dict)
+    # REA-017: destination label -> the host's free-space reading, as
+    # ``"free_bytes=<n>"``. Absent when no reading could be made; that is
+    # evidence, never a failure.
+    free_space: dict[str, str] = field(default_factory=dict)
 
     @property
     def publisher(self) -> dict[str, str]:
@@ -220,6 +302,9 @@ class ReleaseContext:
     credentials: Optional[dict[str, Credential]] = None
     audit: Optional[list[str]] = None
     publisher_login: str | dict[str, str] = ""
+    # REA-016: read-only channel probe, the same injection point as
+    # ``publish_release``'s. Omitted, the shipped HttpxChannelReader runs.
+    channel_reader: object = None
     # P36-017: per-repository release body parts. The install block and assets
     # line come from a per-repository declaration (business data, for example a
     # key in the repository's .ops.yaml), never from engine defaults.
@@ -344,6 +429,10 @@ class ReleaseHandler:
         publisher_login: str | dict[str, str] = "",
         release_body: str | None = None,
         ticket_prefixes: Iterable[str] | None = None,
+        channel_reader: object = None,
+        asset_downloader: object = None,
+        free_space_reader: object = None,
+        changelog_url: str = "",
     ) -> "PublicationReport":
         """Publish a built release to every destination resolved from config.
 
@@ -372,16 +461,20 @@ class ReleaseHandler:
         the tag there). ``roles`` keeps only destinations whose role is listed;
         ``None`` keeps all.
 
-        ``skip_existing`` makes publication idempotent per destination: when the
-        destination already holds a release for ``tag_name`` it is recorded in
-        ``skipped`` and nothing is created or uploaded there, so a redelivered
-        event is a no-op for it. The check runs on the destination's own
-        adapter (each destination answers for itself), and a create call the
-        forge answers as a duplicate (409 Forgejo, 422 GitHub) is recorded the
-        same way, so a release the by-tag lookup cannot see (a draft) is not a
-        failure. It is opt-in so callers
-        that publish to a known-empty destination keep their exact call
-        sequence.
+        ``skip_existing`` adds a pre-flight check that makes publication
+        idempotent per destination: when the destination already holds a release
+        for ``tag_name`` it is recorded in ``skipped`` and nothing is created or
+        uploaded there, so a redelivered event is a no-op for it. The check runs
+        on the destination's own adapter (each destination answers for itself).
+
+        A duplicate answer to the create call is continued from whether or not
+        ``skip_existing`` was given (REA-011): 409 on Forgejo, 422 on GitHub,
+        which mean the destination already holds a release for the tag in some
+        state — a draft, or a row the token's list does not show. The existing
+        release is resolved by tag for any state and judged like one the
+        pre-flight check found; the audit line of that judgement names the
+        duplicate answer (``http=<status> existing_release_id=<id>``), so this
+        is never a failure.
 
         ``audit`` follows the ``MirrorHandler.push_event`` convention: when a
         list is given, one line per destination is appended to it
@@ -389,28 +482,66 @@ class ReleaseHandler:
         A destination skipped because its release already exists is not a
         failure, unless that release is incomplete (its title is not the gated
         title, or it lacks assets of this build): it is then recorded in
-        ``failed`` and ``incomplete`` names what differs. A failure the
-        destination answered with 409 or 422 carries ``http=<status>
+        ``failed`` and ``incomplete`` names what differs. A 422 that is not a
+        duplicate answer (GitHub's generic validation failure, a code other
+        than ``already_exists``) is a failure and carries ``http=<status>
         existing_release_id=<id>``, in the audit line and in the notification.
 
-        An existing release with the notes of this build (equal after
-        stripping) and a title equal to the gated title ignoring case and
-        whitespace is supplemented, not failed: the title is corrected and
-        exactly the missing files are uploaded; it is listed in
-        ``supplemented`` and the audit line reads ``result=supplemented``.
-        Files already attached are untouched; nothing is re-created or deleted. When any destination failed, one warning line is logged for
-        the whole call (the engine has no event log, D20).
+        An existing release is converged to the intended state (REA-012,
+        decision D1, which supersedes C1's "existing object only recorded"):
+        for the declared tag the title is set per the name template and the
+        body to the CHANGELOG body, and the object is never deleted or
+        re-created. An object with another title is PATCHed to the template
+        title; an empty body is filled with the CHANGELOG body; the audit line
+        names the old and the new title and lists the files attached. When the
+        title is equal ignoring case and whitespace, the notes of this build
+        (equal after stripping) are in place and only files are missing, it is
+        supplemented: the title is corrected and exactly the missing files are
+        uploaded. It is then listed in ``supplemented`` and the audit line
+        reads ``result=supplemented``. Files already attached are untouched;
+        nothing is re-created or deleted. When any destination failed, one
+        warning line is logged for the whole call (the engine has no event
+        log, D20).
+
+        The body is composed by the ENGINE (REA-018): the product heading, the
+        ``release_notes``, the ``### Install`` block and assets line declared by
+        the repository (``release_body_install_block`` /
+        ``release_body_assets_line``, read through the same Layer 2 + Layer-3
+        merge the destinations come from) and, when ``changelog_url`` is
+        given, the CHANGELOG link. A caller that passes no ``release_body``
+        therefore still publishes the declared install block — the author does
+        not repeat it in the CHANGELOG.
+
+        ``release_body`` is an optional override: when given, it is written
+        verbatim instead of the composed body (a caller that has already
+        composed a body and wants exactly that one). ``release_notes`` remains
+        the CHANGELOG section, and the supplement rule compares against
+        whichever body this call writes.
+
+        With ``ticket_prefixes`` given, the external-audience gate runs on that
+        final body per destination before any write: a body that names the
+        author's tracker writes nothing on that destination and fails it by
+        name, while a destination with a clean body still publishes.
+        ``process_event`` keeps raising the refusal from its own gate before
+        any destination is considered; this path records it. When
+        ``ticket_prefixes`` is omitted, the repository's declared
+        ``tracker_prefixes`` (Layer 2 + Layer 3) are used — an empty
+        declaration refuses nothing.
 
         ``publisher_login`` is the login the engine publishes as (P36-003). A
         repository can have two publishers — the engine and a repository-local
-        workflow — so a release that already exists on a destination is only
-        the engine's to touch when the release object's own ``author.login``
-        names that account. When it names another account the release is
-        recorded in ``up_to_date`` and neither edited nor duplicated; the
-        report's ``publisher`` says ``engine`` or ``other``. Without the
-        parameter the engine cannot attribute a release and every release found
-        is judged as before. An undeterminable author degrades to ``other``,
-        never to a false ``engine``.
+        workflow — so the release object's own ``author.login`` is read and
+        the report's ``publisher`` says ``engine`` or ``other``. Attribution
+        does NOT exempt an object from judgement: decision D1 supersedes
+        P36-003's "recorded only", so a release authored by another account is
+        converged to the intended state (title per the template, the CHANGELOG
+        body, the missing files) exactly like one without an author; it is
+        edited in place, never deleted or duplicated. A foreign release that
+        already IS the intended state writes nothing and is recorded in
+        ``up_to_date``. Without the parameter the engine cannot
+        attribute a release and every release found is judged as before. An
+        undeterminable author degrades to ``other``, never to a false
+        ``engine``.
 
         A ``dict[str, str]`` maps credential-variable names to logins (one
         login per destination, P36-003 design C1). Any dict (including an
@@ -425,6 +556,21 @@ class ReleaseHandler:
         versa (P36-002). Omitted or ``None`` falls back to the legacy shared
         ``token``/``webhook_secret`` pair.
 
+        ``channel_reader`` is an optional injection point for tests: an object
+        with ``async present_at(channel, name, version)``. Omitted, the shipped
+        read-only :class:`HttpxChannelReader` probes PyPI, ghcr and the
+        Homebrew tap with ``GET`` only.
+
+        ``asset_downloader`` and ``free_space_reader`` are the REA-017
+        injection points, the same shape: an object with ``async
+        download(adapter, repo, asset) -> bytes`` and one with ``async
+        free_bytes(destination) -> int | None``. Omitted, the shipped
+        read-only :class:`HttpxAssetDownloader` reads the GitHub asset with the
+        adapter's own credential and :class:`HttpxFreeSpaceReader` answers
+        ``None`` unless a source is declared. The pull runs only when the
+        repository declares ``release.forgejo_assets: pull`` (D4: off by
+        default) and the GitHub release already carries the declared piece.
+
         Raises:
             ValueError: a supplied ``adapters`` list does not match the resolved
                 destination count.
@@ -435,8 +581,186 @@ class ReleaseHandler:
             name_template or DEFAULT_NAME_TEMPLATE, repo, tag_name
         )
         artifacts = _collect_artifacts(artifact_dir)
+        # REA-014: the release-object files this repo declares, resolved from
+        # the same Layer 2 + ``.ops.yaml`` merge the destinations come from.
+        # Empty: nothing to verify, and the destination keeps its historic
+        # single audit line.
+        declared = _declared_release_asset_names(config, repo, repo_dir, tag_name)
+        # REA-016: the manifest's pieces per destination label. None means the
+        # repo declares no manifest, so every asset is forgejo-produced and
+        # required at once (the REA-014 behaviour, unchanged).
+        manifest = _resolved_manifest(config, repo, repo_dir)
+        requirements = (
+            _manifest_requirements(manifest, repo, tag_name)
+            if manifest is not None else {}
+        )
+        # REA-018: the body is composed HERE, in the engine, from the parts the
+        # repository declares (Layer 2 merged with its ``.ops.yaml``). A caller
+        # that passes raw notes and no body therefore still publishes the
+        # declared install block on every destination — the author does not
+        # repeat it in the CHANGELOG. A caller that supplies ``release_body``
+        # overrides the composition verbatim. With nothing declared (and no
+        # ``changelog_url``) the historical path stands: the body is the raw
+        # notes and the supplement check keys on them.
+        install_block, assets_line, changelog_path = _declared_release_body_parts(
+            config, repo, repo_dir
+        )
+        if release_body is not None:
+            effective_body: str | None = release_body
+        elif install_block or assets_line or changelog_url:
+            effective_body = compose_release_body(
+                repo,
+                tag_name,
+                release_notes,
+                name_template=name_template or DEFAULT_NAME_TEMPLATE,
+                install_block=install_block,
+                assets_line=assets_line,
+                changelog_path=changelog_path,
+                changelog_url=changelog_url,
+            )
+        else:
+            effective_body = None
+        # The gate vocabulary: an explicit argument wins; omitted, the
+        # repository's own declaration (Layer 2 + Layer 3) is used, and an
+        # empty declaration refuses nothing.
+        gate_prefixes = (
+            list(ticket_prefixes)
+            if ticket_prefixes is not None
+            else _declared_tracker_prefixes(config, repo, repo_dir)
+        )
+        # REA-017 (D4): the pull of GitHub-built assets is armed per repository
+        # and off unless declared. The pieces it may pull are the manifest's
+        # github-produced entries; with no manifest there is nothing the
+        # engine knows how to fetch.
+        pull_armed = _declared_forgejo_assets(config, repo, repo_dir) == "pull"
+        pull_pieces: dict[str, str] = {}
+        if pull_armed and manifest is not None:
+            for entry in manifest.assets:
+                if entry.producer == "github":
+                    pull_pieces[_render_asset_name(entry.name, tag_name)] = (
+                        entry.producer
+                    )
+        downloader = (
+            asset_downloader
+            if asset_downloader is not None
+            else HttpxAssetDownloader()
+        )
+        free_reader = (
+            free_space_reader
+            if free_space_reader is not None
+            else HttpxFreeSpaceReader(
+                source_url=_declared_free_space_url(config, repo, repo_dir)
+            )
+        )
+        now = datetime.now(timezone.utc)
 
         report = PublicationReport(repo=repo, tag_name=tag_name)
+        # Destinations this run read back, and the release clock the pending
+        # deadline runs from: the first release object's own created_at.
+        seen: set[str] = set()
+        observed_since: list[Optional[datetime]] = [None]
+        # The clock the pending deadline runs from is the release object's own
+        # created_at. A manifest destination this run does not visit (a
+        # github-built piece on a github destination another workflow owns)
+        # has no object to read here: without a clock its pieces stay pending,
+        # never red and never on another destination's clock.
+
+        async def _verify(adapter: ForgeAdapter, destination: Destination,
+                          label: str) -> bool:
+            """Check a destination after publication; True if it audited itself.
+
+            Without a manifest this is the REA-014 read-back: every declared
+            file must be attached, and a failure is ``verify-failed``. With a
+            manifest each piece carries a producer: a github-produced piece
+            still on its way is pending inside the deadline and red after it,
+            while a forgejo-produced piece is required at once (D4/D5).
+            """
+            # A destination the judgement just failed (an incomplete object) is
+            # not verified — its outcome already names the difference, and a
+            # second line saying the set looked right would contradict it.
+            if label in report.failed:
+                return True
+            # No manifest: the REA-014 read-back, unchanged. With nothing
+            # declared either there is nothing to check and the destination
+            # keeps its historic single ``published`` line.
+            if manifest is None:
+                if not declared:
+                    return False
+                await _verify_destination_assets(
+                    adapter, destination, report, audit, tag_name, label,
+                    declared, artifacts,
+                )
+                return True
+            # A manifest that names no piece for this destination leaves it
+            # alone (D4: a GitHub-built binary stays on GitHub). A declared
+            # REA-010 file is still a build file and is still read back.
+            pieces = requirements.get(label, ())
+            if not pieces and not declared:
+                # Nothing is required on this destination, but its release
+                # object is the run's release and therefore carries the clock
+                # the pending deadline runs from. Read it (read-only) and keep
+                # the destination's historic single ``published`` line.
+                if observed_since[0] is None:
+                    observed_since[0] = await _destination_clock(
+                        adapter, destination, tag_name
+                    )
+                return False
+            try:
+                found = await adapter.find_release(destination.repo, tag_name)
+                if not isinstance(found, dict) or found.get("id") is None:
+                    _fail_verification(
+                        report, audit, tag_name, label,
+                        [f"release for {tag_name} not found after publication"],
+                    )
+                    return True
+                assets = await adapter.list_release_assets(
+                    destination.repo, found["id"]
+                )
+            except Exception as exc:  # noqa: BLE001 (record — the report, not abort)
+                _fail_verification(
+                    report, audit, tag_name, label, [f"read-back failed: {exc}"]
+                )
+                return True
+            # The pending deadline runs from the release object's own creation
+            # time; a destination that does not report one starts the clock at
+            # this run, which can only make a piece pending for longer, never
+            # red sooner.
+            since = parse_timestamp(found.get("created_at")) or now
+            if observed_since[0] is None:
+                observed_since[0] = since
+            seen.add(label)
+            _judge_manifest_pieces(
+                report, audit, tag_name, label, manifest, pieces, declared,
+                assets, artifacts, since, now,
+            )
+            return True
+
+        async def _pull_after_write(
+            adapter: ForgeAdapter,
+            destination: Destination,
+            label: str,
+        ) -> None:
+            """Pull the github-produced pieces into ``label`` (REA-017).
+
+            Runs on every path that leaves the Forgejo release in place —
+            created now, already present, or found through a duplicate answer
+            — because a piece that was still on its way at the first run is
+            pulled by a later one. Off by default (D4) and only for the
+            forgejo destination; a destination the judgement just failed is
+            left exactly as that judgement recorded it.
+            """
+            if not (pull_armed and destination.forge == "forgejo"):
+                return
+            if label in report.failed:
+                return
+            if pull_pieces:
+                await _pull_github_assets(
+                    adapter, destination, report, audit, tag_name,
+                    label, pull_pieces, paired, downloader,
+                )
+            await _record_free_space(
+                free_reader, destination, label, report, audit, tag_name
+            )
 
         if adapters is not None:
             if len(adapters) != len(destinations):
@@ -491,13 +815,6 @@ class ReleaseHandler:
         # summary lists the reason.
         _is_rc = _RC_TAG_RE.match(tag_name)
 
-        # P36-017 criterion 3: the external-audience gate runs on the
-        # FINAL body before any destination write. The gate runs here
-        # because the shipped workflow calls publish_release directly
-        # and composes the body itself — the gate must be in this path.
-        if release_body is not None and ticket_prefixes:
-            check_release_notes_audience(release_body, ticket_prefixes)
-
         for destination, adapter in paired:
             label = _destination_label(destination)
             # A release destination without explicit visibility is public
@@ -534,6 +851,25 @@ class ReleaseHandler:
                                   f"publisher_login unavailable for "
                                   f"credential_variable {destination.credential_variable!r}")
                 continue
+            # REA-012 (D1): the external-audience gate runs on the FINAL body
+            # before any write on this destination, and only this destination
+            # is refused when the body names the author's tracker. REA-018
+            # moved composition into this function, so the body judged here is
+            # the one this call writes, on every destination — a body a caller
+            # passed (§ override) or one composed from the repository's
+            # declaration — and it is judged per destination because one
+            # refused body must not stop another destination whose body is
+            # clean.
+            if effective_body is not None and gate_prefixes:
+                try:
+                    check_release_notes_audience(effective_body, gate_prefixes)
+                except ReleaseNotesAudienceError as exc:
+                    logger.error(f"partial publication: {label} failed: {exc}")
+                    report.failed.append(label)
+                    report.body_states[label] = f"failed: {exc}"
+                    report.failure_details[label] = str(exc)
+                    _audit_destination(audit, tag_name, label, "failed", str(exc))
+                    continue
             try:
                 if skip_existing and await adapter.release_exists(
                     destination.repo, tag_name
@@ -541,10 +877,12 @@ class ReleaseHandler:
                     await _judge_existing_release(
                         adapter, destination, report, audit, tag_name, label,
                         release_name, release_notes, artifacts, per_dest_login,
-                        release_body=release_body,
+                        release_body=effective_body,
                     )
+                    await _pull_after_write(adapter, destination, label)
+                    await _verify(adapter, destination, label)
                     continue
-                created = await _publish_to_destination(
+                duplicate_detail = await _publish_to_destination(
                     adapter,
                     destination,
                     tag_name=tag_name,
@@ -553,18 +891,22 @@ class ReleaseHandler:
                     artifacts=artifacts,
                     draft=draft,
                     prerelease=prerelease,
-                    tolerate_existing=skip_existing,
-                    body_override=release_body,
+                    body_override=effective_body,
                 )
-                if not created:
-                    # The create call answered a duplicate: the release was
-                    # created between the lookup and the create. Same rule as
-                    # for a release the lookup showed (OE-042a).
+                if duplicate_detail is not None:
+                    # The create call answered a duplicate: the destination
+                    # already holds the release, whether or not the pre-flight
+                    # lookup could see it (a draft, or no write access to the
+                    # list). Continue with that object, the same judgement as
+                    # for a release the lookup showed (REA-011, OE-042a).
                     await _judge_existing_release(
                         adapter, destination, report, audit, tag_name, label,
                         release_name, release_notes, artifacts, per_dest_login,
-                        release_body=release_body,
+                        release_body=effective_body,
+                        duplicate_detail=duplicate_detail,
                     )
+                    await _pull_after_write(adapter, destination, label)
+                    await _verify(adapter, destination, label)
                     continue
             except Exception as exc:  # noqa: BLE001 (record — the report, not abort)
                 logger.error(f"partial publication: {label} failed: {exc}")
@@ -580,7 +922,52 @@ class ReleaseHandler:
                 if per_dest_login:
                     # The release this call created is the engine's own.
                     report.publishers[label] = "engine"
-                _audit_destination(audit, tag_name, label, "published")
+                # REA-017: with the switch on, pull the github-produced
+                # pieces into this Forgejo release, after the GitHub release
+                # already holds them and only when their digest matches.
+                await _pull_after_write(adapter, destination, label)
+                # REA-014: check the published set on read-back before the
+                # destination counts as published. With nothing declared this
+                # skips and the line stays ``result=published``.
+                audited = await _verify(adapter, destination, label)
+                if not audited:
+                    _audit_destination(audit, tag_name, label, "published")
+
+        # REA-016: a manifest destination this run did not visit (D4: the
+        # github-built piece on a github destination another workflow owns) is
+        # still named. This run holds no evidence about it — it never read
+        # that destination — so the piece is pending, never red and never
+        # published.
+        if manifest is not None and requirements:
+            for label, pieces in requirements.items():
+                if (
+                    label in seen
+                    or label in report.failed
+                    or label in report.rc_skipped
+                ):
+                    continue
+                # This run read nothing on this destination, so there is no
+                # evidence that any piece is absent — only that it is not part
+                # of this run. Every piece is pending; an unread destination
+                # is never red, and never takes another destination's clock:
+                # the clock it would borrow was read elsewhere and says
+                # nothing about this destination, so the run's own time stands.
+                pending = [
+                    f"{name} producer={producer} since={now.isoformat()}"
+                    for name, producer in pieces
+                ]
+                _record_pending(report, audit, tag_name, label, pending)
+
+        # REA-016: the manifest's channels are judged read-only — a present
+        # channel is satisfied, an absent one follows its producer, and an
+        # unprobeable one (winget, or any read error) is manual, never a
+        # failure. A channel has no release object of its own, so it runs on
+        # the run's clock when no release clock was observed.
+        if manifest is not None and manifest.channels:
+            await _judge_channels(
+                report, audit, tag_name, manifest, now, observed_since[0],
+                channel_reader,
+            )
 
         if report.partial:
             logger.warning(
@@ -600,6 +987,31 @@ def _audit_destination(
     if audit is not None:
         line = f"release-publish tag={tag_name} dest={label} result={result}"
         audit.append(f"{line} {detail}" if detail else line)
+
+
+def _supersede_audit(
+    audit: Optional[list[str]], tag_name: str, label: str
+) -> None:
+    """Drop earlier audit lines for the same destination of the same tag.
+
+    A destination gets one outcome: when verification fails a destination
+    whose judgement already appended a line, that line described a superseded
+    state and must not stay beside ``result=verify-failed``.
+    """
+    if audit is None:
+        return
+    prefix = f"release-publish tag={tag_name} dest={label} "
+    audit[:] = [line for line in audit if not line.startswith(prefix)]
+
+
+def _with_duplicate(duplicate_detail: str, detail: str) -> str:
+    """Put the duplicate answer first: ``http=<status>
+    existing_release_id=<id>``, then what the existing release holds.
+
+    ``duplicate_detail`` is empty on the pre-flight path, where the line keeps
+    exactly the detail it had before (REA-011).
+    """
+    return f"{duplicate_detail}; {detail}" if duplicate_detail else detail
 
 
 async def _conflict_detail(
@@ -640,10 +1052,12 @@ async def _existing_release_problems(
 ) -> list[str]:
     """What differs between the destination's release and this build.
 
-    Compares the title with the gated ``release_name`` and the attached asset
-    names with the artifacts of this build. An adapter that shows no release
-    details (``find_release`` not a dict) gives no problems. Empty list: the
-    existing release is the one this build would have made.
+    Compares the title with the gated ``release_name`` and the assets with the
+    artifacts of this build: a missing name, and a name attached with another
+    digest (or, where the forge exposes no digest, another size). An adapter
+    that shows no release details (``find_release`` not a dict) gives no
+    problems. Empty list: the existing release is the one this build would
+    have made.
 
     When ``release_notes`` is given, a release whose notes differ (text after
     stripping) is reported as ``notes differ`` so the failure names it.
@@ -663,15 +1077,72 @@ async def _existing_release_problems(
     title = found.get("name")
     if title != release_name:
         problems.append(f"title is {title!r}, expected {release_name!r}")
-    attached = {
-        a.get("name") for a in (found.get("assets") or []) if isinstance(a, dict)
-    }
-    missing = [name for name, _ in artifacts if name not in attached]
+    missing, conflicts = _plan_attachments(found.get("assets"), artifacts)
     if missing:
-        problems.append(f"missing assets: {', '.join(missing)}")
+        problems.append(f"missing assets: {', '.join(n for n, _ in missing)}")
+    problems.extend(conflicts)
     if problems:
         problems.insert(0, f"existing_release_id={found.get('id', 'unknown')}")
     return problems
+
+
+def _asset_sha256(data: bytes) -> str:
+    """The build's own SHA-256, ``sha256:<hex>``, as GitHub reports a digest.
+
+    Free: the bytes are on disk (REL-010), so no asset is ever downloaded to
+    compute it.
+    """
+    return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+def _asset_difference(existing: dict, data: bytes) -> Optional[str]:
+    """Why an attached asset is not the build's file, or None when it cannot
+    be proven different.
+
+    The forge's ``digest`` is compared where it is exposed (GitHub:
+    ``sha256:<hex>``); a null or absent digest falls back to ``size``
+    (Forgejo reports ``digest: null`` but ``size`` — measured 2026-07-28). An
+    asset that carries neither cannot be proven different and stays a no-op;
+    nothing is downloaded to try (REL-010).
+    """
+    digest = existing.get("digest")
+    if isinstance(digest, str) and digest:
+        expected = _asset_sha256(data)
+        if digest.lower() != expected.lower():
+            return f"digest is {digest}, expected {expected}"
+        return None
+    size = existing.get("size")
+    if isinstance(size, int) and size != len(data):
+        return f"size is {size}, expected {len(data)}"
+    return None
+
+
+def _plan_attachments(
+    assets: Iterable[object], artifacts: list[tuple[str, bytes]]
+) -> tuple[list[tuple[str, bytes]], list[str]]:
+    """Split the build's files into what to upload and what conflicts.
+
+    A name attached with the same digest (or the same size where the forge
+    exposes no digest) is a no-op; the same name with another digest is a
+    conflict and is never overwritten. Only names absent from the release are
+    uploaded. Returns ``(missing, conflicts)``; both in artifact order.
+    """
+    attached = {
+        a.get("name"): a
+        for a in (assets or ())
+        if isinstance(a, dict) and a.get("name") is not None
+    }
+    missing: list[tuple[str, bytes]] = []
+    conflicts: list[str] = []
+    for name, data in artifacts:
+        existing = attached.get(name)
+        if existing is None:
+            missing.append((name, data))
+            continue
+        difference = _asset_difference(existing, data)
+        if difference is not None:
+            conflicts.append(f"asset {name} differs ({difference})")
+    return missing, conflicts
 
 
 @dataclass
@@ -759,42 +1230,51 @@ async def _judge_existing_release(
     artifacts: list[tuple[str, bytes]],
     publisher_login: str = "",
     release_body: str | None = None,
+    duplicate_detail: str = "",
 ) -> None:
     """Record what ``destination`` already holds for ``tag_name``.
 
-    With ``publisher_login`` given, a release the destination already holds and
-    that names ANOTHER account as its author is one publisher's release per
-    repository (P36-003): recorded in ``up_to_date``, neither edited nor
-    duplicated, and the publisher is named per destination. Any other release
-    is judged as before — supplemented, incomplete, or skipped.
+    ``duplicate_detail`` is set when the release was found through a duplicate
+    answer to the create call (REA-011): ``http=<status>
+    existing_release_id=<id>``. It is carried into the audit line of that
+    judgement — skipped, incomplete or supplemented — so the duplicate answer
+    is named next to the destination. The pre-flight path passes nothing.
+
+    With ``publisher_login`` given, the release the destination already holds
+    is attributed to ``engine`` or ``other`` in ``report.publishers``. An
+    author that is another account does NOT exempt the object from judgement:
+    decision D1 (which supersedes C1 / P36-003) converges it like any other —
+    title, body and missing assets — and never deletes or re-creates it. Only
+    a foreign release that already is complete (nothing to write) is recorded
+    in ``up_to_date``; the publisher is named per destination either way.
 
     With ``release_body`` given (P36-017), an existing release whose body is
     empty gets the body supplemented (patched in), and one whose body does not
     contain the tag's CHANGELOG section is left untouched and fails that
     destination with a named error.
     """
+    # Attributing the release to a publisher is a report fact, not a write
+    # gate: it never exempts the object from convergence (D1 supersedes
+    # P36-003). Only a release that NAMES another account is provably
+    # someone else's; one without an author is attributed ``other`` but keeps
+    # the historical judgement.
+    foreign = False
     if publisher_login:
         found = await adapter.find_release(destination.repo, tag_name)
         if isinstance(found, dict) and found:
             publisher = _publisher_of(found, publisher_login)
             report.publishers[label] = publisher
-            # Only a release that NAMES another account is someone else's; one
-            # without an author proves nothing and is judged as before.
-            if publisher == "other" and _release_author(found):
+            foreign = publisher == "other" and bool(_release_author(found))
+            if foreign:
                 logger.info(
                     f"Release {tag_name} on {label} was published by another "
-                    "publisher, leaving it untouched"
+                    "publisher; converging it to the intended state (D1)"
                 )
-                report.up_to_date.append(label)
-                report.body_states[label] = "up_to_date"
-                _audit_destination(
-                    audit, tag_name, label, "up-to-date", f"publisher={publisher}"
-                )
-                return
     if release_body is not None:
         if await _try_supplement_body(
             adapter, destination, report, audit, tag_name, label,
-            release_body, release_notes, artifacts,
+            release_name, release_body, release_notes, artifacts,
+            duplicate_detail=duplicate_detail,
         ):
             return
         # Body already contains the CHANGELOG section.  Use the existing
@@ -807,7 +1287,7 @@ async def _judge_existing_release(
             release_notes = found_body["body"]
     if await _try_supplement(
         adapter, destination, report, audit, tag_name, label,
-        release_name, release_notes, artifacts,
+        release_name, release_notes, artifacts, duplicate_detail=duplicate_detail,
     ):
         return
     problems = await _existing_release_problems(
@@ -815,12 +1295,29 @@ async def _judge_existing_release(
         release_notes,
     )
     if problems:
-        _record_incomplete(report, audit, tag_name, label, problems)
+        _record_incomplete(
+            report, audit, tag_name, label, problems, duplicate_detail=duplicate_detail
+        )
+        return
+    if foreign:
+        # Nothing differs from what this build would write, and the object was
+        # authored by another account: recorded up to date without a write.
+        # Under D1 that is the only outcome left for a foreign release — an
+        # incomplete one is converged above, never left behind.
+        logger.info(
+            f"Release {tag_name} on {label} already holds the intended state"
+        )
+        report.up_to_date.append(label)
+        report.body_states[label] = "up_to_date"
+        _audit_destination(
+            audit, tag_name, label, "up-to-date",
+            _with_duplicate(duplicate_detail, "publisher=other"),
+        )
         return
     logger.info(f"Release {tag_name} already exists on {label}, skipping")
     report.skipped.append(label)
     report.body_states.setdefault(label, "skipped")
-    _audit_destination(audit, tag_name, label, "skipped")
+    _audit_destination(audit, tag_name, label, "skipped", duplicate_detail)
 
 
 async def _try_supplement_body(
@@ -830,22 +1327,27 @@ async def _try_supplement_body(
     audit: Optional[list[str]],
     tag_name: str,
     label: str,
+    release_name: str,
     release_body: str,
     release_notes: str,
     artifacts: list[tuple[str, bytes]],
+    duplicate_detail: str = "",
 ) -> bool:
-    """Judge an existing release with the body-writer rule (P36-017).
+    """Judge an existing release with the body-writer rule (P36-017, REA-012).
 
-    Returns True when the destination was handled (body supplemented or
-    failed); False means the caller should continue with the existing
+    Returns True when the destination was handled (converged, failed, or
+    retitled); False means the caller should continue with the existing
     supplement/title/asset logic.
 
-    Rule: when the existing release has an empty body, the full body is
-    patched in and the destination is recorded as supplemented. When the
-    body does not contain the tag's CHANGELOG section, the destination is
-    failed with a named error that names the difference. Otherwise
-    (body already contains the CHANGELOG), the caller keeps judging as
-    before.
+    Rule (REA-012 / D1): an existing release with an empty body is converged —
+    the title to ``release_name`` per the template when it differs, the body
+    to ``release_body`` (the CHANGELOG section under heading and install
+    block), and exactly the files of this build that are not attached. An
+    object whose body is already exactly ``release_body`` is retitled when its
+    title differs and left alone otherwise. When the body does not contain
+    the tag's CHANGELOG section, the destination is failed with a named error
+    that names the difference and nothing is written there. Nothing is
+    re-created or deleted.
     """
     found = await adapter.find_release(destination.repo, tag_name)
     if not isinstance(found, dict) or found.get("id") is None:
@@ -853,22 +1355,61 @@ async def _try_supplement_body(
     existing_body = (found.get("body") or "").strip()
 
     if not existing_body:
-        # Empty body: supplement with the full body.
+        # REA-012 (D1): converge the object — the title per the template and
+        # the body to the CHANGELOG section. The two adapter calls stay
+        # single-field writes (the adapter API exposes one field per call),
+        # and the title is written first so a failure leaves the body as
+        # found. Nothing is deleted or re-created.
+        title = found.get("name")
+        retitle = not (isinstance(title, str) and title == release_name)
+        missing, conflicts = _plan_attachments(found.get("assets"), artifacts)
+        if conflicts:
+            # A name is attached with another digest: never overwritten, so
+            # the destination fails by name and writes nothing at all. The
+            # title difference, if any, is named beside it.
+            parts = [f"existing_release_id={found['id']}"]
+            if retitle:
+                parts.append(f"title is {title!r}, expected {release_name!r}")
+            detail = "; ".join([*parts, *conflicts])
+            logger.error(f"partial publication: {label} failed: {detail}")
+            report.failed.append(label)
+            report.failure_details[label] = detail
+            report.body_states[label] = f"failed: {detail}"
+            _audit_destination(
+                audit, tag_name, label, "failed",
+                _with_duplicate(duplicate_detail, detail),
+            )
+            return True
         try:
+            if retitle:
+                await adapter.update_release_title(
+                    destination.repo, found["id"], release_name
+                )
             await adapter.update_release_body(
                 destination.repo, found["id"], release_body
             )
+            for name, data in missing:
+                await adapter.upload_release_asset(
+                    repo_full_name=destination.repo,
+                    release_id=found["id"],
+                    asset_name=name,
+                    data=data,
+                )
         except NotImplementedError:
             return False
-        logger.info(
-            f"Release {tag_name} on {label} body supplemented "
-            f"(was empty)"
-        )
+        parts = [f"existing_release_id={found['id']}"]
+        if retitle:
+            parts.append(f"title corrected from {title!r} to {release_name!r}")
+        parts.append("body supplemented (was empty)")
+        if missing:
+            parts.append("uploaded: " + ", ".join(n for n, _ in missing))
+        detail = "; ".join(parts)
+        logger.info(f"Release {tag_name} on {label} converged: {detail}")
         report.supplemented.append(label)
         report.body_states[label] = "supplemented"
         _audit_destination(
             audit, tag_name, label, "supplemented",
-            f"existing_release_id={found['id']} body supplemented (was empty)"
+            _with_duplicate(duplicate_detail, detail),
         )
         return True
 
@@ -885,10 +1426,69 @@ async def _try_supplement_body(
         report.failed.append(label)
         report.failure_details[label] = detail
         report.body_states[label] = f"failed: {detail}"
-        _audit_destination(audit, tag_name, label, "failed", detail)
+        _audit_destination(
+            audit, tag_name, label, "failed", _with_duplicate(duplicate_detail, detail)
+        )
         return True
 
-    # Body already contains the CHANGELOG section: already equal.
+    # Body already contains the CHANGELOG section: already equal. REA-012
+    # (D1): when it is exactly the body this call would write and the title
+    # differs, the title is converged to the template and the missing files
+    # are attached — the whole object converges, not only an empty one.
+    title = found.get("name")
+    if existing_body == release_body.strip() and not (
+        isinstance(title, str) and title == release_name
+    ):
+        missing, conflicts = _plan_attachments(found.get("assets"), artifacts)
+        if conflicts:
+            # Same rule as the empty-body branch: a conflicting name fails the
+            # destination by name and nothing is written. The title difference
+            # this branch exists for is named beside it.
+            detail = "; ".join(
+                [
+                    f"existing_release_id={found['id']}",
+                    f"title is {title!r}, expected {release_name!r}",
+                    *conflicts,
+                ]
+            )
+            logger.error(f"partial publication: {label} failed: {detail}")
+            report.failed.append(label)
+            report.failure_details[label] = detail
+            report.body_states[label] = f"failed: {detail}"
+            _audit_destination(
+                audit, tag_name, label, "failed",
+                _with_duplicate(duplicate_detail, detail),
+            )
+            return True
+        try:
+            await adapter.update_release_title(
+                destination.repo, found["id"], release_name
+            )
+            for name, data in missing:
+                await adapter.upload_release_asset(
+                    repo_full_name=destination.repo,
+                    release_id=found["id"],
+                    asset_name=name,
+                    data=data,
+                )
+        except NotImplementedError:
+            return False
+        parts = [
+            f"existing_release_id={found['id']}",
+            f"title corrected from {title!r} to {release_name!r}",
+        ]
+        if missing:
+            parts.append("uploaded: " + ", ".join(n for n, _ in missing))
+        detail = "; ".join(parts)
+        logger.info(f"Release {tag_name} on {label} converged: {detail}")
+        report.supplemented.append(label)
+        report.body_states[label] = "supplemented"
+        _audit_destination(
+            audit, tag_name, label, "supplemented",
+            _with_duplicate(duplicate_detail, detail),
+        )
+        return True
+
     # The body_states entry is recorded here, but we return False so the
     # caller continues with the existing supplement/title/asset logic
     # (P36-017/P36-003). The body_states entry is kept even if the
@@ -907,6 +1507,7 @@ async def _try_supplement(
     release_name: str,
     release_notes: str,
     artifacts: list[tuple[str, bytes]],
+    duplicate_detail: str = "",
 ) -> bool:
     """Supplement the existing release of ``destination`` when the rule applies.
 
@@ -925,7 +1526,9 @@ async def _try_supplement(
     logger.info(f"Release {tag_name} on {label} supplemented: {detail}")
     report.supplemented.append(label)
     report.body_states.setdefault(label, "supplemented")
-    _audit_destination(audit, tag_name, label, "supplemented", detail)
+    _audit_destination(
+        audit, tag_name, label, "supplemented", _with_duplicate(duplicate_detail, detail)
+    )
     return True
 
 
@@ -957,10 +1560,11 @@ async def _plan_supplement(
     title = found.get("name")
     if not _same_title(title, release_name):
         return None
-    attached = {
-        a.get("name") for a in (found.get("assets") or []) if isinstance(a, dict)
-    }
-    missing = [(n, d) for n, d in artifacts if n not in attached]
+    missing, conflicts = _plan_attachments(found.get("assets"), artifacts)
+    if conflicts:
+        # A name attached with another digest is never overwritten: leave the
+        # judgement to the caller, which fails the destination by name.
+        return None
     retitle = title != release_name
     if not retitle and not missing:
         return None
@@ -1004,13 +1608,16 @@ def _record_incomplete(
     tag_name: str,
     label: str,
     problems: list[str],
+    duplicate_detail: str = "",
 ) -> None:
     detail = "; ".join(problems)
     logger.error(f"partial publication: {label} holds an incomplete release: {detail}")
     report.failed.append(label)
     report.failure_details[label] = f"incomplete existing release ({detail})"
     report.body_states[label] = f"incomplete: {detail}"
-    _audit_destination(audit, tag_name, label, "incomplete", detail)
+    _audit_destination(
+        audit, tag_name, label, "incomplete", _with_duplicate(duplicate_detail, detail)
+    )
 
 
 async def _notify_partial(
@@ -1054,17 +1661,17 @@ async def _publish_to_destination(
     artifacts: list[tuple[str, bytes]],
     draft: bool,
     prerelease: bool,
-    tolerate_existing: bool = False,
     body_override: str | None = None,
-) -> bool:
+) -> Optional[str]:
     """Create the release on one destination and attach every artifact to it.
 
-    Returns True when the release was created and its artifacts attached. With
-    ``tolerate_existing``, a create call the forge answers as a duplicate
-    (``adapter.release_conflict``: 409 on Forgejo, 422 on GitHub) means the
-    destination already holds the release in some state the by-tag lookup did
-    not show: nothing is attached and False is returned. Only the create call
-    is read this way; an upload error stays a failure.
+    Returns None when the release was created and its artifacts attached. A
+    create call the forge answers as a duplicate (``adapter.release_conflict``:
+    409 on Forgejo, 422 on GitHub) means the destination already holds the
+    release in some state the by-tag lookup did not show: nothing is attached
+    and the duplicate detail (``http=<status> existing_release_id=<id>``) is
+    returned, so the caller continues with the existing object. Only the create
+    call is read this way; an upload error stays a failure.
 
     ``body_override``, when given, is used as the release body instead of
     ``release_notes``, so a release created here carries the full body with
@@ -1087,11 +1694,10 @@ async def _publish_to_destination(
         )
     except Exception as exc:  # noqa: BLE001 (only a duplicate answer is absorbed)
         # ``is True``: only an adapter's explicit yes absorbs the error.
-        if (
-            tolerate_existing
-            and await adapter.release_conflict(exc, destination.repo, tag_name) is True
-        ):
-            return False
+        if await adapter.release_conflict(exc, destination.repo, tag_name) is True:
+            # The duplicate answer names its status; the release id comes from
+            # the same lookup ``_conflict_detail`` runs for any 409/422.
+            return await _conflict_detail(adapter, destination, tag_name, exc)
         raise
     release_id = created["id"]
     for asset_name, data in artifacts:
@@ -1101,7 +1707,7 @@ async def _publish_to_destination(
             asset_name=asset_name,
             data=data,
         )
-    return True
+    return None
 
 
 def _collect_artifacts(artifact_dir: str | Path) -> list[tuple[str, bytes]]:
@@ -1134,6 +1740,683 @@ def _resolve_publish_destinations(
         return destinations
     wanted = set(roles)
     return [d for d in destinations if d.role in wanted]
+
+
+# REA-014: declaration types whose file is an asset of the release object.
+# ``ghcr_image`` and ``capacium_exchange`` are published elsewhere (REA-016
+# owns their fan-out), so there is nothing on the release to read back.
+_RELEASE_ASSET_TYPES = ("github_release_tarball", "github_release_zip")
+
+
+def _render_asset_name(name: str, tag_name: str) -> str:
+    """Render the ``<version>``/``<tag>`` placeholders of a declaration name.
+
+    ``<version>`` is the tag without its leading ``v`` and ``<tag>`` the tag
+    itself, the two forms the fleet writes in ``.ops.yaml``.
+    """
+    version = tag_name[1:] if tag_name.startswith("v") else tag_name
+    return name.replace("<version>", version).replace("<tag>", tag_name)
+
+
+def _declared_release_asset_names(
+    config: OpsEngineConfig,
+    repo: str,
+    repo_dir: str | Path | None,
+    tag_name: str,
+) -> list[str]:
+    """The release-object files the repo declares, names rendered from the tag.
+
+    Read through the same path the destinations come from: Layer 2 merged with
+    the Layer-3 ``.ops.yaml`` in ``repo_dir``. An absent declaration and
+    ``assets: none`` both mean "no requirement" and give an empty list, so
+    nothing is verified and the run behaves as before. Declarations that are
+    not release-object assets are dropped here.
+    """
+    org, _, name = repo.partition("/")
+    layer2 = config.get_repo_config(org, name)
+    if repo_dir is not None:
+        layer3 = load_ops_yaml(repo_dir)
+        if layer3 is not None:
+            layer2 = layer2.merge_layer3(layer3)
+    release_config = layer2.release
+    if release_config is None:
+        return []
+    declarations = release_config.assets
+    if not declarations:
+        return []
+    names: list[str] = []
+    for declaration in declarations:
+        if declaration.type not in _RELEASE_ASSET_TYPES or not declaration.name:
+            continue
+        names.append(_render_asset_name(declaration.name, tag_name))
+    return names
+
+
+def _resolved_manifest(
+    config: OpsEngineConfig,
+    repo: str,
+    repo_dir: str | Path | None,
+) -> Optional[AssetManifest]:
+    """The repo's ``release.manifest``, Layer 2 merged with its ``.ops.yaml``.
+
+    The same path the destinations and the REA-014 declaration come from, so
+    a manifest declared in the repository at the tag is the one judged. None
+    means the repo declares no manifest: every asset is forgejo-produced and
+    required at once, exactly the REA-014 behaviour (backward compatible).
+    """
+    org, _, name = repo.partition("/")
+    layer2 = config.get_repo_config(org, name)
+    if repo_dir is not None:
+        layer3 = load_ops_yaml(repo_dir)
+        if layer3 is not None:
+            layer2 = layer2.merge_layer3(layer3)
+    release_config = layer2.release
+    if release_config is None:
+        return None
+    return release_config.manifest
+
+
+def _declared_release_body_parts(
+    config: OpsEngineConfig,
+    repo: str,
+    repo_dir: str | Path | None,
+) -> tuple[str, str, str]:
+    """The repo's declared body parts, Layer 2 merged with its ``.ops.yaml``.
+
+    Returns ``(install_block, assets_line, changelog_path)``. The same path
+    the destinations and the REA-014 declaration come from, so a declaration
+    in the repository at the tag is the one composed into the body. The two
+    body parts are business data: empty here means the declaration says
+    nothing, and the composed body omits that part (REA-018).
+    """
+    org, _, name = repo.partition("/")
+    layer2 = config.get_repo_config(org, name)
+    if repo_dir is not None:
+        layer3 = load_ops_yaml(repo_dir)
+        if layer3 is not None:
+            layer2 = layer2.merge_layer3(layer3)
+    release_config = layer2.release
+    changelog_path = (
+        release_config.changelog_path if release_config is not None else "CHANGELOG.md"
+    )
+    return (
+        layer2.release_body_install_block,
+        layer2.release_body_assets_line,
+        changelog_path,
+    )
+
+
+def _declared_forgejo_assets(
+    config: OpsEngineConfig,
+    repo: str,
+    repo_dir: str | Path | None,
+) -> str:
+    """The repo's ``release.forgejo_assets`` switch, Layer 2 + Layer 3.
+
+    ``off`` unless the repository (or its ``.ops.yaml``) declares ``pull``
+    (D4: the default is off for every repository, capacium included).
+    """
+    org, _, name = repo.partition("/")
+    layer2 = config.get_repo_config(org, name)
+    if repo_dir is not None:
+        layer3 = load_ops_yaml(repo_dir)
+        if layer3 is not None:
+            layer2 = layer2.merge_layer3(layer3)
+    release_config = layer2.release
+    return release_config.forgejo_assets if release_config is not None else "off"
+
+
+def _declared_free_space_url(
+    config: OpsEngineConfig,
+    repo: str,
+    repo_dir: str | Path | None,
+) -> str:
+    """The repo's ``release.forgejo_free_space_url``, Layer 2 + Layer 3.
+
+    Empty unless the repository (or its ``.ops.yaml``) declares an HTTP
+    source. The engine never reaches the host by other means.
+    """
+    org, _, name = repo.partition("/")
+    layer2 = config.get_repo_config(org, name)
+    if repo_dir is not None:
+        layer3 = load_ops_yaml(repo_dir)
+        if layer3 is not None:
+            layer2 = layer2.merge_layer3(layer3)
+    release_config = layer2.release
+    if release_config is None:
+        return ""
+    return release_config.forgejo_free_space_url
+
+
+def _declared_tracker_prefixes(
+    config: OpsEngineConfig,
+    repo: str,
+    repo_dir: str | Path | None,
+) -> list[str]:
+    """The repo's declared audience-gate vocabulary, Layer 2 + Layer 3.
+
+    Empty means the repository declares no tracker prefixes, so the gate
+    refuses nothing (the same rule as an empty ``ticket_prefixes`` argument).
+    """
+    org, _, name = repo.partition("/")
+    layer2 = config.get_repo_config(org, name)
+    if repo_dir is not None:
+        layer3 = load_ops_yaml(repo_dir)
+        if layer3 is not None:
+            layer2 = layer2.merge_layer3(layer3)
+    return list(layer2.tracker_prefixes)
+
+
+async def _destination_clock(
+    adapter: ForgeAdapter,
+    destination: Destination,
+    tag_name: str,
+) -> Optional[datetime]:
+    """Read ONE destination's own release clock, or None when it cannot be read.
+
+    The pending deadline runs from the release object's own ``created_at``.
+    An unread clock is None — the caller must leave the destination pending,
+    never substitute another destination's clock and never assume red. Any
+    read error answers None: the clock is evidence, not a gate.
+    """
+    try:
+        found = await adapter.find_release(destination.repo, tag_name)
+    except Exception:  # noqa: BLE001 (the clock is a courtesy, never a gate)
+        return None
+    if not isinstance(found, dict):
+        return None
+    return parse_timestamp(found.get("created_at"))
+
+
+def _producer_destination(producer: str, repo: str) -> str:
+    """Where a piece with no ``destinations`` is expected: its own forge."""
+    return f"{producer}:{repo}"
+
+
+def _manifest_requirements(
+    manifest: AssetManifest,
+    repo: str,
+    tag_name: str,
+) -> dict[str, tuple[tuple[str, str], ...]]:
+    """Group the manifest's release-object assets by destination label.
+
+    Each entry is ``(rendered name, producer)``. An asset with no explicit
+    ``destinations`` is expected on its producer's own forge (D4), so a
+    github-produced binary does not burden the forgejo destination. Channel
+    pieces are judged read-only by :mod:`ops_engine.modules.asset_manifest`,
+    never here: they are not on a release object.
+    """
+    requirements: dict[str, list[tuple[str, str]]] = {}
+    for entry in manifest.assets:
+        name = _render_asset_name(entry.name, tag_name)
+        targets = entry.destinations or [_producer_destination(entry.producer, repo)]
+        for label in targets:
+            requirements.setdefault(label, []).append((name, entry.producer))
+    return {label: tuple(pieces) for label, pieces in requirements.items()}
+
+
+def _judge_manifest_pieces(
+    report: "PublicationReport",
+    audit: Optional[list[str]],
+    tag_name: str,
+    label: str,
+    manifest: AssetManifest,
+    pieces: tuple[tuple[str, str], ...],
+    declared: list[str],
+    assets: Iterable[object],
+    artifacts: list[tuple[str, bytes]],
+    since: datetime,
+    now: datetime,
+) -> None:
+    """Judge one destination's manifest pieces against the deadline.
+
+    A piece the destination holds is verified like any declared file; a
+    forgejo-produced piece is required at once, so a missing one fails the
+    destination by name. A github-produced piece missing inside the deadline
+    leaves the destination pending (D5), red only once the deadline passed.
+    """
+    attached = {
+        asset.get("name"): asset
+        for asset in assets or ()
+        if isinstance(asset, dict) and asset.get("name") is not None
+    }
+    requirements = {name: producer for name, producer in pieces}
+    problems: list[str] = []
+    pending: list[str] = []
+    entries: list[str] = []
+    # The manifest may extend the REA-014 declaration; a declared file that is
+    # not a manifest piece is still read back as before.
+    for name in declared:
+        if name in requirements:
+            continue
+        existing = attached.get(name)
+        if existing is None:
+            problems.append(f"{name} missing")
+            continue
+        data = dict(artifacts).get(name)
+        if data is None:
+            entries.append(name)
+            continue
+        difference = _asset_difference(existing, data)
+        if difference is not None:
+            problems.append(f"{name} differs ({difference})")
+            continue
+        entries.append(f"{name} {_asset_sha256(data)}")
+    for name, producer in requirements.items():
+        existing = attached.get(name)
+        if existing is None:
+            if producer == "github" and not deadline_passed(
+                since, manifest.deadline_minutes, now
+            ):
+                pending.append(
+                    f"{name} producer={producer} since={since.isoformat()}"
+                )
+                continue
+            problems.append(f"{name} missing producer={producer}")
+            continue
+        data = dict(artifacts).get(name)
+        if data is None:
+            entries.append(name)
+            continue
+        difference = _asset_difference(existing, data)
+        if difference is not None:
+            problems.append(f"{name} differs ({difference})")
+            continue
+        entries.append(f"{name} {_asset_sha256(data)}")
+    if problems:
+        _fail_manifest(report, audit, tag_name, label, problems)
+        return
+    if entries:
+        report.verified[label] = entries
+    if pending:
+        _record_pending(report, audit, tag_name, label, pending)
+        return
+    if entries:
+        _audit_destination(audit, tag_name, label, "verified", ", ".join(entries))
+
+
+async def _pull_github_assets(
+    adapter: ForgeAdapter,
+    destination: Destination,
+    report: "PublicationReport",
+    audit: Optional[list[str]],
+    tag_name: str,
+    label: str,
+    pieces: dict[str, str],
+    paired: list[tuple[Destination, ForgeAdapter]],
+    downloader: object,
+) -> None:
+    """Pull the github-produced pieces into one Forgejo release (REA-017).
+
+    Runs only after the target release exists. It reads the GitHub release
+    (the asset list carries the digest), downloads every piece with the GitHub
+    adapter's own credential and checks its SHA-256 against that digest BEFORE
+    uploading anything. Only when every piece checks out are they attached to
+    Forgejo and re-downloaded from it (which reports no digest of its own) to
+    check the bytes again. A missing GitHub piece leaves the pull for a later
+    run — the manifest's own pending judgement owns it. A digest mismatch
+    fails the destination by name and attaches nothing.
+    """
+    github = next(
+        (
+            pair
+            for pair in paired
+            if pair[0].forge == "github"
+            and pair[0].repo == destination.repo
+        ),
+        None,
+    )
+    if github is None:
+        return
+    github_adapter = github[1]
+    try:
+        found = await adapter.find_release(destination.repo, tag_name)
+        if not isinstance(found, dict) or found.get("id") is None:
+            return
+        target_id = found["id"]
+        gh_found = await github_adapter.find_release(destination.repo, tag_name)
+        if not isinstance(gh_found, dict) or gh_found.get("id") is None:
+            return
+        gh_assets = await github_adapter.list_release_assets(
+            destination.repo, gh_found["id"]
+        )
+        target_assets = await adapter.list_release_assets(
+            destination.repo, target_id
+        )
+    except Exception as exc:  # noqa: BLE001 (record — the report, not abort)
+        _fail_pull(report, audit, tag_name, label, f"read failed: {exc}")
+        return
+
+    on_github = {
+        asset.get("name"): asset
+        for asset in gh_assets or ()
+        if isinstance(asset, dict) and asset.get("name") is not None
+    }
+    on_target = {
+        asset.get("name")
+        for asset in target_assets or ()
+        if isinstance(asset, dict) and asset.get("name") is not None
+    }
+    # Every piece is downloaded and checked against the digest the GitHub API
+    # reports before any byte is uploaded, so a mismatch joins the problems
+    # list and nothing is attached — not even a piece that did match.
+    staged: list[tuple[str, bytes]] = []
+    problems: list[str] = []
+    for name in pieces:
+        if name in on_target:
+            # A previous run already attached it: the read-back verifies it,
+            # and a pull never re-uploads over itself.
+            continue
+        source = on_github.get(name)
+        if source is None:
+            # Not on GitHub yet: the manifest's pending judgement owns it.
+            continue
+        try:
+            data = await downloader.download(github_adapter, destination.repo, source)
+        except Exception as exc:  # noqa: BLE001 (record — the report, not abort)
+            problems.append(f"{name} download failed ({exc})")
+            continue
+        digest = source.get("digest") or ""
+        if digest and _asset_sha256(data) != digest:
+            problems.append(
+                f"{name} sha256 mismatch on {label} "
+                f"(github {digest}, downloaded {_asset_sha256(data)})"
+            )
+            continue
+        staged.append((name, data))
+    if problems:
+        _fail_pull(report, audit, tag_name, label, "; ".join(problems))
+        return
+
+    entries: list[str] = []
+    for name, data in staged:
+        try:
+            await adapter.upload_release_asset(
+                repo_full_name=destination.repo,
+                release_id=target_id,
+                asset_name=name,
+                data=data,
+            )
+            uploaded = await adapter.find_release(destination.repo, tag_name)
+            re_assets = await adapter.list_release_assets(
+                destination.repo, uploaded["id"]
+            )
+            re_asset = next(
+                (
+                    asset
+                    for asset in re_assets or ()
+                    if isinstance(asset, dict) and asset.get("name") == name
+                ),
+                None,
+            )
+            if re_asset is None:
+                problems.append(f"{name} not present on {label} after upload")
+                continue
+            re_data = await downloader.download(adapter, destination.repo, re_asset)
+        except Exception as exc:  # noqa: BLE001 (record — the report, not abort)
+            problems.append(f"{name} upload failed ({exc})")
+            continue
+        if re_data != data:
+            problems.append(
+                f"{name} sha256 mismatch after upload on {label} "
+                f"(uploaded {_asset_sha256(data)}, read back {_asset_sha256(re_data)})"
+            )
+            continue
+        entries.append(f"{name} {_asset_sha256(data)}")
+        _audit_destination(audit, tag_name, label, "pulled", entries[-1])
+
+    if not problems:
+        if entries:
+            report.pulled.setdefault(label, []).extend(entries)
+        return
+    _fail_pull(report, audit, tag_name, label, "; ".join(problems))
+
+
+def _fail_pull(
+    report: "PublicationReport",
+    audit: Optional[list[str]],
+    tag_name: str,
+    label: str,
+    detail: str,
+) -> None:
+    """Fail a destination whose pull could not be trusted, naming the file.
+
+    The destination leaves every success bucket it reached, exactly like a
+    manifest failure: a release that could not carry the pulled file is not
+    published in the report's eyes.
+    """
+    message = f"pull not satisfied on {label}: {detail}"
+    logger.error(f"partial publication: {label} failed: {message}")
+    report.failed.append(label)
+    report.failure_details[label] = message
+    report.body_states.setdefault(label, f"failed: {message}")
+    for bucket in (
+        report.published,
+        report.skipped,
+        report.supplemented,
+        report.up_to_date,
+    ):
+        if label in bucket:
+            bucket.remove(label)
+    report.verified.pop(label, None)
+    report.pending.pop(label, None)
+    _audit_destination(audit, tag_name, label, "pull-failed", message)
+
+
+async def _record_free_space(
+    reader: object,
+    destination: Destination,
+    label: str,
+    report: "PublicationReport",
+    audit: Optional[list[str]] = None,
+    tag_name: str = "",
+) -> None:
+    """Read the Forgejo host's free space and put the reading in the report.
+
+    A reading that cannot be made is named (``unavailable: <reason>``), never
+    left silent and never a null: it is evidence, not a gate, so it must not
+    change the destination's outcome. The reading is audited too, so a reader
+    of the run log sees it beside the destination it describes.
+    """
+    try:
+        value = await reader.free_bytes(destination)
+    except FreeSpaceUnavailable as exc:
+        reading = f"unavailable: {exc}"
+    except Exception as exc:  # noqa: BLE001 (evidence, never a gate)
+        reading = f"unavailable: {type(exc).__name__}: {exc}"
+    else:
+        if not isinstance(value, int):
+            reading = "unavailable: reader answered no byte count"
+        else:
+            reading = f"free_bytes={value}"
+    report.free_space[label] = reading
+    _audit_destination(audit, tag_name, label, "free-space", reading)
+
+
+def _fail_manifest(
+    report: "PublicationReport",
+    audit: Optional[list[str]],
+    tag_name: str,
+    label: str,
+    problems: list[str],
+) -> None:
+    """Fail a destination whose manifest piece is absent or wrong.
+
+    The detail names the piece, its producer and the destination, so an
+    operator reading the report alone knows all three.
+    """
+    detail = (
+        f"manifest not satisfied on {label}: " + "; ".join(problems)
+    )
+    logger.error(f"partial publication: {label} failed: {detail}")
+    report.failed.append(label)
+    report.failure_details[label] = detail
+    report.body_states.setdefault(label, f"failed: {detail}")
+    for bucket in (
+        report.published,
+        report.skipped,
+        report.supplemented,
+        report.up_to_date,
+    ):
+        if label in bucket:
+            bucket.remove(label)
+    report.verified.pop(label, None)
+    report.pending.pop(label, None)
+    _audit_destination(audit, tag_name, label, "manifest-failed", detail)
+
+
+def _record_pending(
+    report: "PublicationReport",
+    audit: Optional[list[str]],
+    tag_name: str,
+    label: str,
+    pending: list[str],
+) -> None:
+    """Record a destination whose pieces are still on their way: not a
+    failure, but a state an operator can read."""
+    report.pending[label] = pending
+    _audit_destination(audit, tag_name, label, "pending", "; ".join(pending))
+
+
+async def _judge_channels(
+    report: "PublicationReport",
+    audit: Optional[list[str]],
+    tag_name: str,
+    manifest: AssetManifest,
+    now: datetime,
+    since: Optional[datetime],
+    channel_reader: object,
+) -> None:
+    """Judge the manifest's channels read-only and fold them into the report.
+
+    A satisfied channel gets its own audit line. A pending or failed channel
+    is recorded under its ``<channel>:<name>`` label, so an operator sees the
+    channel as the subject and, for a failure, the producer and the channel
+    form in the same detail. Manual (unprobeable) channels are audited as
+    such and are never a failure — unknown is not a verdict.
+    """
+    unsatisfied: list[str] = []
+    verdict = await evaluate_channels(
+        manifest,
+        tag_name,
+        reader=channel_reader if channel_reader is not None else HttpxChannelReader(),
+        since=since,
+        now=now,
+        unsatisfied=unsatisfied,
+    )
+    for label in verdict.satisfied:
+        _audit_destination(audit, tag_name, label, "channel-satisfied")
+    for label in verdict.manual:
+        _audit_destination(audit, tag_name, label, "channel-manual")
+    for piece in verdict.pending:
+        label = f"{piece.channel}:{piece.name}"
+        _record_pending(report, audit, tag_name, label, [piece.as_text()])
+    for piece in verdict.failed:
+        label = f"{piece.channel}:{piece.name}"
+        _fail_manifest(report, audit, tag_name, label, [piece.as_text()])
+    if unsatisfied:
+        # A forgejo-produced channel is red on absence at once.
+        for entry in unsatisfied:
+            label = entry.split(" ", 1)[0]
+            _fail_manifest(report, audit, tag_name, label, [entry])
+
+
+async def _verify_destination_assets(
+    adapter: ForgeAdapter,
+    destination: Destination,
+    report: "PublicationReport",
+    audit: Optional[list[str]],
+    tag_name: str,
+    label: str,
+    declared: list[str],
+    artifacts: list[tuple[str, bytes]],
+) -> bool:
+    """Read the destination's release back and check every declared file.
+
+    The asset set comes from ``list_release_assets`` on the release found by
+    tag (REA-013), never from a download (REL-010): the build's bytes are on
+    disk, so a missing name or another digest/size is proven locally. On
+    success the destination is recorded in ``report.verified`` as
+    ``"<name> sha256:<hex>"`` per file, and the audit line reads
+    ``result=verified``. On failure the destination leaves ``published`` /
+    ``skipped`` / ``supplemented`` / ``up_to_date`` and is recorded in
+    ``failed`` with a detail naming each failing file (and both digests where
+    the forge exposes one); the audit line reads ``result=verify-failed``.
+    """
+    try:
+        found = await adapter.find_release(destination.repo, tag_name)
+        if not isinstance(found, dict) or found.get("id") is None:
+            return _fail_verification(
+                report, audit, tag_name, label,
+                [f"release for {tag_name} not found after publication"],
+            )
+        assets = await adapter.list_release_assets(destination.repo, found["id"])
+    except Exception as exc:  # noqa: BLE001 (record — the report, not abort)
+        return _fail_verification(
+            report, audit, tag_name, label, [f"read-back failed: {exc}"]
+        )
+    attached = {
+        asset.get("name"): asset
+        for asset in assets or ()
+        if isinstance(asset, dict) and asset.get("name") is not None
+    }
+    build = dict(artifacts)
+    problems: list[str] = []
+    entries: list[str] = []
+    for name in declared:
+        existing = attached.get(name)
+        if existing is None:
+            problems.append(f"{name} missing")
+            continue
+        data = build.get(name)
+        if data is None:
+            # Attached, but this run's build does not carry it: there is no
+            # local truth to compare against, so it cannot be proven bad.
+            entries.append(name)
+            continue
+        difference = _asset_difference(existing, data)
+        if difference is not None:
+            problems.append(f"{name} differs ({difference})")
+            continue
+        entries.append(f"{name} {_asset_sha256(data)}")
+    if problems:
+        return _fail_verification(report, audit, tag_name, label, problems)
+    report.verified[label] = entries
+    _audit_destination(audit, tag_name, label, "verified", ", ".join(entries))
+    return True
+
+
+def _fail_verification(
+    report: "PublicationReport",
+    audit: Optional[list[str]],
+    tag_name: str,
+    label: str,
+    problems: list[str],
+) -> bool:
+    """Record a destination whose asset set failed the read-back."""
+    detail = "verification failed: " + "; ".join(problems)
+    logger.error(f"partial publication: {label} failed: {detail}")
+    report.failed.append(label)
+    report.failure_details[label] = detail
+    # The state is the verification outcome, not the pre-verification one: a
+    # destination that published (``written``) and then failed the read-back
+    # must not keep reporting that it was written.
+    report.body_states[label] = f"failed: {detail}"
+    for bucket in (
+        report.published,
+        report.skipped,
+        report.supplemented,
+        report.up_to_date,
+    ):
+        if label in bucket:
+            bucket.remove(label)
+    report.verified.pop(label, None)
+    # One line per destination: the judgement's earlier line (``skipped``,
+    # ``incomplete``, ``supplemented``) described a state this failure
+    # supersedes, so it is removed rather than left beside the failure.
+    _supersede_audit(audit, tag_name, label)
+    _audit_destination(audit, tag_name, label, "verify-failed", detail)
+    return False
 
 
 async def _release_tag(
@@ -1225,21 +2508,23 @@ async def _release_tag(
 
         identity = context.identity
 
-        # Compose the full release body (P36-017).  The install block and
-        # assets line come from the per-repository declaration at the tag,
-        # never from engine defaults.
+        # Compose the full release body (P36-017) with the engine's composer,
+        # from the per-repository declaration at the tag — never from engine
+        # defaults. The same composer runs inside ``publish_release``, so the
+        # body judged here is the body published there.
         canonical_url = identity.canonical_url.removesuffix(".git")
         changelog_url = (
             f"{canonical_url}/src/tag/{tag_name}/{config.changelog_path}"
         )
-        body = f"## {render_release_name(name_template, repo, tag_name)}\n\n{notes}\n"
-        if install_block:
-            body += f"### Install\n{install_block}\n\n"
-        if assets_line:
-            body += f"{assets_line}\n\n"
-        body += (
-            f"See [{config.changelog_path}]({changelog_url})"
-            f" for all changes.\n"
+        body = compose_release_body(
+            repo,
+            tag_name,
+            notes,
+            name_template=name_template,
+            install_block=install_block,
+            assets_line=assets_line,
+            changelog_path=config.changelog_path,
+            changelog_url=changelog_url,
         )
 
         # The external-audience gate runs on the FINAL body before any
@@ -1279,6 +2564,7 @@ async def _release_tag(
             audit=context.audit,
             publisher_login=context.publisher_login,
             release_body=body,
+            channel_reader=context.channel_reader,
         )
     if report.partial:
         await _notify_partial(context.ops_config, repo, tag_name, report)

@@ -17,6 +17,15 @@ RETRY_DELAYS = [1.0, 2.0, 4.0]
 MAX_PAGES = 1000
 
 
+def _row_key(row: Any) -> str:
+    """Identity of one list row: its whole JSON text.
+
+    Not the ``id`` field: tag rows share one ``id`` (the tag object) across
+    different tags, so an id alone would read distinct rows as repeats.
+    """
+    return json.dumps(row, sort_keys=True, default=str)
+
+
 class ForgejoAdapter(ForgeAdapter):
     def __init__(self, base_url: str, token: str, webhook_secret: str):
         self.base_url = base_url.rstrip("/")
@@ -184,6 +193,16 @@ class ForgejoAdapter(ForgeAdapter):
         )
         return resp.json()
 
+    async def list_release_assets(
+        self, repo_full_name: str, release_id: int
+    ) -> list[dict[str, Any]]:
+        # GET /repos/{repo}/releases/{id}/assets, every page. A Forgejo asset
+        # object carries ``name`` and ``size`` and reports ``digest`` as null
+        # (measured 2026-07-28), so a comparison must fall back to ``size``.
+        return await self._list_all_pages(
+            f"/repos/{repo_full_name}/releases/{release_id}/assets"
+        )
+
     async def update_release_title(
         self, repo_full_name: str, release_id: int, name: str
     ) -> dict[str, Any]:
@@ -336,7 +355,14 @@ class ForgejoAdapter(ForgeAdapter):
             chunk = resp.json()
             if not chunk:
                 return items
-            items.extend(chunk)
+            # Some Forgejo list routes (release assets) ignore ``page`` and
+            # return the whole list every time, so the empty page never comes.
+            # A page that adds nothing new ends the walk instead of looping.
+            seen = {_row_key(row) for row in items}
+            fresh = [row for row in chunk if _row_key(row) not in seen]
+            if not fresh:
+                return items
+            items.extend(fresh)
         raise RuntimeError(f"{path}: more than {MAX_PAGES} pages, refusing to truncate")
 
     async def list_branches(self, repo_full_name: str) -> dict[str, str]:

@@ -19,6 +19,8 @@ adapter's own ``_request`` retry/error pipeline runs for real, only the socket
 is replaced by an ``httpx``-shaped mock.
 """
 
+import asyncio
+
 import httpx
 import pytest
 from unittest.mock import MagicMock, AsyncMock
@@ -187,3 +189,128 @@ async def test_forgejo_upload_failure_surfaces_named_http_error(forgejo_adapter)
             "langevc/ops-engine", 42, "sha256", ASSET_BYTES,
         )
     assert exc_info.value.response.status_code == 500
+
+
+# --- REA-013: list_release_assets, the read side of the attach rule ----------
+
+
+def _paging_client(adapter, pages):
+    """Attach a fake async client that answers page 1, 2, … from ``pages`` and
+    records every outgoing call. A missing page answers ``[]`` and ends the
+    walk, exactly as both forges do on the last page."""
+
+    calls = []
+
+    async def request(method, url_or_path, **kwargs):
+        page = int(kwargs["params"]["page"])
+        calls.append(
+            {
+                "method": method,
+                "url": url_or_path,
+                "limit": kwargs["params"]["limit"]
+                if "limit" in kwargs["params"]
+                else kwargs["params"].get("per_page"),
+                "page": page,
+            }
+        )
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.json.return_value = pages[page - 1] if page <= len(pages) else []
+        return resp
+
+    client = MagicMock()
+    client.is_closed = False
+    client.request = request
+    adapter._client = client
+    return calls
+
+
+def test_list_release_assets_is_not_abstract_and_defaults_to_empty():
+    """The new read method is non-abstract with an empty-list default, so every
+    adapter (and every older fake) that cannot list assets keeps working and a
+    caller never invents a mismatch."""
+    assert "list_release_assets" not in ForgeAdapter.__abstractmethods__
+
+    async def _stub(self, *args, **kwargs):
+        raise AssertionError("stub must not be reached")
+
+    concrete = type(
+        "Concrete",
+        (ForgeAdapter,),
+        {name: _stub for name in ForgeAdapter.__abstractmethods__},
+    )
+    instance = concrete()
+    assert asyncio.run(
+        instance.list_release_assets("langevc/ops-engine", 7)
+    ) == []
+
+
+@pytest.mark.asyncio
+async def test_github_list_release_assets_reads_the_asset_path_every_page(
+    github_adapter,
+):
+    first = [{"name": "a.whl", "size": 1, "digest": "sha256:" + "a" * 64}]
+    second = [{"name": "b.tar.gz", "size": 2, "digest": None}]
+    calls = _paging_client(github_adapter, [first, second])
+
+    assets = await github_adapter.list_release_assets("langevc/ops-engine", 900)
+
+    assert assets == [*first, *second]
+    assert [c["page"] for c in calls] == [1, 2, 3]
+    assert {c["method"] for c in calls} == {"GET"}
+    assert {c["url"] for c in calls} == {
+        "/repos/langevc/ops-engine/releases/900/assets"
+    }
+    assert {c["limit"] for c in calls} == {"100"}
+
+
+@pytest.mark.asyncio
+async def test_forgejo_list_release_assets_reads_the_asset_path_every_page(
+    forgejo_adapter,
+):
+    first = [{"name": "a.whl", "size": 1, "digest": None}]
+    second = [
+        {"name": "b.tar.gz", "size": 2, "digest": None},
+        {"name": "SHA256SUMS", "size": 3, "digest": None},
+    ]
+    calls = _paging_client(forgejo_adapter, [first, second])
+
+    assets = await forgejo_adapter.list_release_assets("langevc/ops-engine", 42)
+
+    assert assets == [*first, *second]
+    assert [c["page"] for c in calls] == [1, 2, 3]
+    assert {c["url"] for c in calls} == {
+        "/repos/langevc/ops-engine/releases/42/assets"
+    }
+    assert {c["limit"] for c in calls} == {"50"}
+
+
+@pytest.mark.asyncio
+async def test_forgejo_list_release_assets_ends_when_the_forge_ignores_page(
+    forgejo_adapter,
+):
+    """Forgejo's release-asset route ignores ``page`` and returns the whole
+    list every time (measured against the live forge, REA-022). The walk must
+    end at the first page that adds nothing, with each asset once."""
+    whole = [
+        {"id": 244, "name": "a.zip", "size": 406},
+        {"id": 245, "name": "b.whl", "size": 7},
+    ]
+    calls = []
+
+    async def request(method, url_or_path, **kwargs):
+        calls.append(int(kwargs["params"]["page"]))
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.json.return_value = list(whole)
+        return resp
+
+    client = MagicMock()
+    client.is_closed = False
+    client.request = request
+    forgejo_adapter._client = client
+
+    assets = await forgejo_adapter.list_release_assets("langevc/release-e2e", 483)
+
+    assert assets == whole
+    assert calls == [1, 2]

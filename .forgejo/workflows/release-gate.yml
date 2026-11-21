@@ -152,3 +152,36 @@ jobs:
             args+=(--allow-prereleases)
           fi
           python3 scripts/version-sync.py "${args[@]}"
+      # REA-023 — a release exists only for a commit the E2E harness proved
+      # green. The candidate is the commit the tag PEELS to, not the tag
+      # object. The verdict about that commit is produced after it and is
+      # committed next to it, so it cannot sit in the tag's own tree: read it
+      # at the repository path from the checkout, else from the default branch.
+      # It is repository content, never a secret or a CI variable.
+      - name: Require a green E2E verdict for the candidate commit
+        env:
+          TAG_NAME: "${{ github.ref_name }}"
+          VERDICT_PATH: "e2e-verdict.json"
+          DEFAULT_BRANCH: "main"
+        run: |
+          set -euo pipefail
+          # The checkout may be shallow or tagless; fetch the tag so the peel
+          # has a ref to resolve.
+          if ! git rev-parse --verify --quiet "refs/tags/${TAG_NAME}^{}" \
+               >/dev/null; then
+            git fetch --quiet --depth=1 origin \
+              "refs/tags/${TAG_NAME}:refs/tags/${TAG_NAME}" || true
+          fi
+          candidate="$(git rev-parse "refs/tags/${TAG_NAME}^{}")"
+          echo "e2e-verdict-gate: candidate ${TAG_NAME} peels to ${candidate}"
+          if [[ ! -f "$VERDICT_PATH" ]] \
+             && git remote get-url origin >/dev/null 2>&1; then
+            git fetch --quiet --no-tags origin "$DEFAULT_BRANCH" || true
+            if git cat-file -e "FETCH_HEAD:${VERDICT_PATH}" 2>/dev/null; then
+              git show "FETCH_HEAD:${VERDICT_PATH}" > "$VERDICT_PATH"
+              echo "e2e-verdict-gate: read ${VERDICT_PATH} from origin/${DEFAULT_BRANCH}"
+            fi
+          fi
+          python3 scripts/e2e_verdict_gate.py \
+            --verdict "$VERDICT_PATH" \
+            --candidate-sha "$candidate"

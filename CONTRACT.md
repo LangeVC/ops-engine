@@ -401,6 +401,138 @@ under the same name; a refusal names the repository whose release block declared
 the template, and the other repositories of the same run keep running. Without a
 configured template the release keeps the derived default.
 
+## Release assets declaration
+
+`release.assets` (`ReleaseConfig.assets`, an optional key, default absent) is a
+repository's declaration of the artifacts a release must carry. It is
+**additive and optional**: an absent key, a YAML `null`, and the bare string
+`none` the layover writes all mean "no required assets", so a config that does
+not declare it behaves exactly as before. An explicit `none`/`null` is still a
+declaration: in a Layer-3 `.ops.yaml` it clears a Layer-2 `assets` list instead
+of leaving it in force. The key is not a `model_fields`
+entry — it is read and validated as it is parsed, and exposed through
+`ReleaseConfig.assets`, which is `None` or a sequence of declarations.
+
+A declaration is a mapping with a required `type`, one of
+`github_release_zip`, `github_release_tarball`, `ghcr_image` and
+`capacium_exchange`. `github_release_*`, `ghcr_image` and any other type
+require `name`; `capacium_exchange` requires `via` (the workflow step that
+publishes it) instead. `frameworks` is an optional list for the types that
+fan out over a matrix. Any other key inside a declaration is refused: a typo
+is a refusal, never a silently ignored key.
+
+The declarations belong to the release block, so they take part in the layer
+merge as that block's value: a Layer-3 `.ops.yaml` that declares
+`release.assets` makes the resolved config carry those declarations, replacing
+the Layer-2 release block whole. An unknown type, a declaration missing the key
+its type requires, an unknown key inside a declaration, or an `assets` value
+that is neither a list nor `none`/`null` is refused. From a `.ops.yaml` the
+refusal is `OpsYamlError` naming the `.ops.yaml` file; from the layover
+`config.yml` it is `ConfigSectionError` naming the `release` section. In both
+cases the detail names `release.assets` and the offending entry.
+
+The change is a **minor** bump: it adds an optional key to a previously-sealed
+config model and removes nothing, so a consumer pinned to the current version
+is unaffected until it chooses to read the key.
+
+## Release attach CLI
+
+`ops-engine-release-attach` is the one command a repository workflow runs after
+its build (`console_scripts` entry point in `pyproject.toml`, module
+`ops_engine.release_attach`). It takes a tag and an artifact directory and, for
+every declared release destination, finds or creates the release, converges it
+(REA-012), attaches the files (REA-013) and verifies the declared asset set by
+reading the release back (REA-014). It works the same from a Forgejo runner and
+a GitHub runner: the argv does not name a forge, and each destination is
+resolved from the same Layer-2 + `.ops.yaml` merge the engine uses.
+
+```text
+ops-engine-release-attach [--config config.yml] --repo org/name --tag v1.2.3 \
+    --artifacts dist [--repo-dir .] [--name-template T] \
+    [--notes-file F] [--body-file F] [--ticket-prefix P ...]
+```
+
+`--config` is optional. Without it the command builds the minimal Layer-2
+stand-in the engine needs — one repository entry named by `--repo` — and the
+repository's own `.ops.yaml` in `--repo-dir` supplies the destinations, the
+release block and `release.assets`. A product repository therefore publishes
+from the same declaration the engine reads, without shipping or inventing an
+org `config.yml` that would drift from the layover's release block. With
+`--config` the command reads that Layer-2 file first and merges the Layer-3
+`.ops.yaml` over it, exactly as before. The command writes nothing of its own:
+it is a wire around `ReleaseHandler.publish_release`, which remains the one
+publication function (*One release path*).
+
+The credentials come from the environment variables each destination declares
+(`credential_variable`); the runner populates the ones it holds. `--repo-dir`
+is the repository root holding `.ops.yaml`; it is always passed to the engine,
+so `release.assets` is read and verified.
+
+**Report schema v1** (`ops-engine-release-attach-report/v1`) is printed to
+stdout as JSON, one run per invocation:
+
+```json
+{
+  "schema": "ops-engine-release-attach-report/v1",
+  "repo": "org/name",
+  "tag_name": "v1.2.3",
+  "ok": true,
+  "exit_code": 0,
+  "destinations": [
+    {
+      "destination": "forgejo:org/name",
+      "outcome": "published",
+      "verified": ["name-1.2.3.whl sha256:<hex>", "SHA256SUMS sha256:<hex>"],
+      "failure": null,
+      "pulled": ["ops-engine-tool-1.2.3-linux-amd64.tar.gz"],
+      "free_space": 21474836480,
+      "pending": [
+        {"name": "ops-engine-tool-1.2.3-windows-amd64.zip",
+         "producer": "github", "since": "2026-11-20T08:00:00+00:00"}
+      ]
+    }
+  ]
+}
+```
+
+`destinations` has one entry per destination the run touched, in the engine's
+order. `outcome` is one of `published`, `converged`, `skipped`, `up-to-date`,
+`rc-skipped`, `verified` or `failed`. `verified` lists each declared
+release-object file found on read-back with the build's own SHA-256 (empty when
+the repository declares none). `failure` is `null` on success and otherwise
+names the destination and the failing file(s). The schema is **additive**: new
+keys may appear; existing keys keep their meaning.
+
+Three per-destination keys carry the REA-016/REA-017 decidable evidence:
+
+- `pulled` — the file **names** of the GitHub-produced assets this run pulled
+  into the Forgejo release (REA-017; empty when the switch is off or nothing
+  was pulled). The digest of each pulled file is in `verified`.
+- `free_space` — the Forgejo host's free-space reading as an **integer byte
+  count**, or the string `unavailable: <reason>` when no reading could be made
+  (for example `unavailable: no source declared`). It is **never `null`**: a
+  missing reading is named evidence, not a hole, and it never changes the
+  destination's outcome.
+- `pending` — the manifest pieces still on their way (REA-016), each as
+  `{"name", "producer", "since"}`. A pending piece is inside its deadline and
+  is not a failure; an empty list means nothing is owed.
+
+Two defect fixes from the REA-014 review ride in this change:
+`body_states` records `failed: <detail>` for a destination that failed
+verification (it no longer keeps its pre-verification state), and the
+judgement's earlier audit line for that destination (`result=skipped`,
+`incomplete`, `supplemented`) is superseded, so one destination carries one
+audit line.
+
+Exit codes (this is the promise; a consumer reads `exit_code` in the report for
+the same value):
+
+| Code | Meaning |
+| ---- | ------- |
+| 0 | Every destination is done: published, converged, already equal or verified. |
+| 1 | At least one destination failed by name; `failure` names the file and the destination. |
+| 2 | The run could not start: an unreadable config, a missing artifact directory, no `--config` and a `.ops.yaml` in `--repo-dir` that is absent, malformed, or declares no destination (the error names the file), or an error that escaped the engine. The report is still JSON, with `error` set and `destinations` empty. |
+
 ## Release reconcile entry point
 
 `ReconcileHandler.reconcile_release_tags` (`ReconcileHandler` is a `contract`
@@ -1049,12 +1181,14 @@ serializes that state to a plain dict so a cockpit (or an operator) can see
 that a mirror is behind without parsing log lines.
 
 `PublicationReport` also carries three additive fields for the one-publisher
-contract (P36-003):
+contract (P36-003, as amended by decision D1):
 
-- `up_to_date` — destinations whose release for the tag already exists from
-  **another** publisher (the release's `author.login` does not name the engine's
-  own account). These destinations are recorded, never edited and never
-  duplicated.
+- `up_to_date` — destinations whose existing release for the tag already **is**
+  the intended state, so nothing was written. That includes a release from
+  **another** publisher (its `author.login` does not name the engine's own
+  account): under D1 such an object is judged and converged like any other (see
+  below), so only one that is already complete lands here. These destinations
+  are recorded, never edited and never duplicated.
 - `publishers` — a `dict[str, str]` mapping each destination label to `"engine"`
   (the release names the engine's own account) or `"other"`.
 - `publisher` — a convenience property returning `dict(self.publishers)`: the
@@ -1067,10 +1201,14 @@ one plain `str` used for every destination, or a `dict[str, str]` mapping
 credential-variable names to logins — the per-destination shape (P36-003 design
 C1). In the dict shape each destination is attributed from its own credential;
 a missing or empty entry fails that destination by name, and nothing there is
-supplemented, edited or duplicated. When `publisher_login` is absent (the empty
-string), the engine cannot attribute a release and falls back to the
-pre-P36-003 behaviour — a pre-existing release from any author is judged as
-before and may be edited, supplemented or failed. The production workflow
+supplemented, edited or duplicated. Attribution is a report fact, not a write
+gate: under D1 a release authored by another account is converged like any
+other — the intended title, the CHANGELOG body and any missing files are
+written, the old and new value are audited, and the object is never deleted or
+re-created — while `publishers` still names the publisher. When
+`publisher_login` is absent (the empty string), the engine cannot attribute a
+release and simply never fills `publishers`; the judgement of a pre-existing
+release is unchanged. The production workflow
 derives one login per destination credential, each from its own forge's
 identity endpoint: `GET /api/v1/user` for the Forgejo token and `GET /user` for
 the GitHub token. No operator-provisioned secret is required. The derivation is
@@ -1079,49 +1217,137 @@ it.
 
 ### Release body (P36-017)
 
-`publish_release` accepts an optional keyword-only `release_body: str | None`
-parameter. When given, it is used as the full release body on every destination
-instead of the raw release notes. The body is composed by the caller (the
-webhook path in `_release_tag`, and the workflow path in
-`.forgejo/workflows/forgejo-release.yml`) from these parts, in this order:
+**Measurement at 2f5c255 (REA-018).** The P36-017 writer **exists** at
+`2f5c25588dfd3bcad304438d6df5d1e7bb32dae7`: it is fully implemented there and
+`tests/test_release_body_writer.py` is green (15 passed) against a clean
+`git archive` of that commit. file:line at 2f5c255:
+
+- `src/ops_engine/modules/release.py:226-227` — `ReleaseContext`
+  `release_body_install_block` / `release_body_assets_line`.
+- `src/ops_engine/modules/release.py:1188-1198` — the per-repository
+  declaration read through `load_ops_yaml` at the tag.
+- `src/ops_engine/modules/release.py:1230-1248` — the five-part composition and
+  `check_release_notes_audience(body, ...)` on the final body.
+- `src/ops_engine/config_loader.py:470-471` — the two `RepoConfig` fields;
+  `:848-849` — their merge into the resolved repo config.
+- `.forgejo/workflows/forgejo-release.yml:941-983` — the workflow composing the
+  same body itself and passing it as `release_body`.
+
+The writer was therefore not the gap; at 2f5c255 the composition lived in the
+**callers** (`_release_tag` in the webhook path and the shipped workflow), not
+in `publish_release`, so a caller that passed raw notes without a composed
+`release_body` — for example the attach path (`release_attach.run_attach`) —
+still produced a body without the declared install block. **REA-018 moved the
+composition into the engine** (`compose_release_body`, called from
+`publish_release`), so every caller and every destination gets it: the author
+writes the change once in the CHANGELOG and does not repeat the install
+instructions there.
+
+`publish_release` composes the body itself from the parts the repository
+declares, in this order:
 
 1. **Product heading** — rendered from the configured `name_template`.
 2. **Release notes** — the CHANGELOG section extracted by the gate.
 3. **Install block** — when the per-repository declaration
-   `release_body_install_block` in `.ops.yaml` is non-empty, a `### Install`
-   heading followed by its value.
+   `release_body_install_block` is non-empty, a `### Install` heading followed
+   by its value.
 4. **Assets line** — when the per-repository declaration
-   `release_body_assets_line` in `.ops.yaml` is non-empty, appended verbatim.
-5. **CHANGELOG link** — a markdown link to the tag's CHANGELOG.md on the
-   canonical forge.
+   `release_body_assets_line` is non-empty, appended verbatim.
+5. **CHANGELOG link** — when the caller supplies `changelog_url`, a markdown
+   link to the tag's CHANGELOG.md. The engine holds no canonical host, so it
+   omits the link rather than inventing one.
 
 The install block and assets line are **business data**, never engine defaults:
-both come from the per-repository declaration at the tag (a key in the
-repository's `.ops.yaml`), read via `load_ops_yaml` in the webhook path and via
-`getattr(layer3, ...)` in the workflow path. An empty install block produces no
-`### Install` heading; an empty assets line produces no line.
+both come from the per-repository declaration (Layer 2 merged with the
+repository's `.ops.yaml`, read by `_declared_release_body_parts`). An empty
+install block produces no `### Install` heading; an empty assets line produces
+no line.
 
-**Audience gate.** `check_release_notes_audience` runs on the **final** body —
-after the install block and assets line are composed in — so a tracker reference
-introduced only by the install block (not by the raw notes) is still refused
-before any destination write.
+**When the engine composes.** Composition runs when the repository declares an
+install block or an assets line, or the caller supplies a `changelog_url`. With
+nothing declared and no link, `effective_body` stays `None` and the historical
+path stands: the body is the raw release notes and the supplement check keys on
+them — a repository that declares nothing sees no change.
+
+**Override.** `release_body` remains a keyword-only, optional override: when
+given, it is written verbatim instead of the composed body (a caller that has
+already composed and wants exactly that one).
+
+**Audience gate.** `check_release_notes_audience` runs per destination on the
+**final** body this call writes — the composed body or the caller's override,
+after the install block and assets line are in — so a tracker reference
+introduced only by the install block (not by the raw notes) is refused before
+any write on that destination. The gate vocabulary is the explicit
+`ticket_prefixes` argument when given, otherwise the repository's declared
+`tracker_prefixes` (Layer 2 + Layer 3); an empty declaration refuses nothing.
+The shipped console script delivers that distinction: `--ticket-prefix`
+defaults to `None` when absent (`src/ops_engine/release_attach.py:306`) and
+`request_from_args` keeps it `None` (`:140`), so an operator who passes no flag
+gets the repository's declared vocabulary instead of an empty list. `_release_tag`
+still raises from its own gate on the same composed body before any destination
+is considered.
 
 **Effect on existing releases.** An existing release on a destination is judged
-against the supplied `release_body`, not the raw notes:
+against the body this call writes, not the raw notes:
 
 - A destination release that does not exist is created with that body.
 - One that already exists with an empty body gets the body supplemented (patched
-  in, not re-created).
+  in, not re-created), and its title is set to the intended title.
+- An existing release missing files declared for the tag gets them uploaded;
+  nothing is deleted or re-created.
 - An existing release whose body does not contain the tag's CHANGELOG section
   is left untouched and fails that destination with a named error that names the
   difference — the same rule as the title and notes handling.
 - An existing release whose body already matches (the tag's CHANGELOG section is
   present) is left alone.
+- Attribution does not change those outcomes (D1): a release authored by
+  another account is judged and converged the same way, while `publishers`
+  still names the publisher. The only outcome specific to a foreign release is
+  a complete one, which is recorded `up_to_date` without a write.
 
-The `release_body` parameter is keyword-only and optional. When it is `None` or
-absent, the existing behaviour is unchanged: the body is the raw release notes,
-and the supplement check keys on those notes. This is a backwards-compatible
-extension: a caller that omits the parameter sees no change.
+The `release_body` parameter is keyword-only and optional. Omitting it does not
+mean "raw notes": the engine composes the body from the repository's
+declaration (above). The raw-notes path survives only for a repository that
+declares no install block or assets line and passes no `changelog_url`, so a
+caller that omits the parameter on such a repository sees no change. This keeps
+the extension backwards-compatible without leaving the declared install block
+out of the body.
+
+**Implementation (REA-018).** `compose_release_body` is the one composer
+(`src/ops_engine/modules/release.py:103`); `publish_release` calls it from the
+prologue (`:585`) after `_declared_release_body_parts` (`:1736`) has read the
+declaration, and the per-destination gate (`:788`) judges the result.
+`_declared_tracker_prefixes` (`:1766`) supplies the declared vocabulary.
+`_release_tag` calls the same composer instead of building the string itself.
+The shipped workflow (`.forgejo/workflows/forgejo-release.yml`) now only carries
+the declaration into its `OpsEngineConfig` (`:776`) and supplies the CHANGELOG
+link (`:959`), passing `changelog_url` to `publish_release` (`:979`); it no
+longer composes. The RED proof is in `tests/test_release_body_writer.py`: the
+attach-path call shape (`release_attach.run_attach` passes notes and no body)
+writes the declared block on both destinations
+(`test_attach_path_composes_declared_install_block`, `:614`), a repository that
+declares nothing keeps the raw notes
+(`test_attach_path_without_declaration_keeps_raw_notes`, `:643`), and the
+declared-vocabulary gate refuses a body only the engine composed
+(`test_declared_gate_refuses_engine_composed_body`, `:657`). Against a clean
+`git archive` of 2f5c255 three tests are red — the attach-path composition
+(`:614`, the created body is the raw notes), the declared-vocabulary gate
+(`:657`, the destination is written), and the pre-existing
+`test_audience_gate_runs_through_publish_release_call_shape` (`:569`, which
+raises out of `publish_release` instead of recording a failed destination) —
+for `3 failed, 15 passed`. `test_attach_path_without_declaration_keeps_raw_notes`
+is green in both (the scoping control), and the file is `15 passed` at 2f5c255
+and `18 passed` here. The seven release files listed in the attempt report move
+`115 -> 120`; adding `tests/test_release_webhook_path.py` gives `140 -> 145`.
+
+The shipped console script is covered on its own path in
+`tests/test_release_attach_cli.py`: with no `--ticket-prefix` the declared
+`tracker_prefixes` arm the gate against the engine-composed block and nothing is
+written (`test_the_cli_arms_the_gate_from_the_declared_prefixes`, `:467`,
+**red** against the pre-change `release_attach.py`, whose empty-list default
+disarmed the gate — the run exited 0 and wrote); an explicit `--ticket-prefix`
+wins while the declared block still composes on both destinations
+(`test_an_explicit_prefix_wins_and_the_declared_block_still_composes`, `:501`).
 
 **Write surface.** The release body is written on every release destination,
 GitHub included. `ForgeAdapter.update_release_body(repo, release_id, body)` is an
@@ -1130,6 +1356,238 @@ async method on the internal adapter base class, implemented by
 (PATCH `/repos/{repo}/releases/{id}`). Both adapters use their respective
 forge's API to update the body field of an existing release; neither re-creates
 or deletes the release object.
+
+### Release asset attachment (REA-013)
+
+Each file of the build is attached to the release on every destination, by
+name, idempotently. `ForgeAdapter.list_release_assets(repo_full_name,
+release_id)` is an async method on the internal adapter base class that returns
+the release's assets, **every page**: each item is the forge's own asset
+object, `{"name": ..., "size": ...}` and, where the forge exposes it, a
+`"digest"`. It is **not abstract** and its default answers `[]` ("no asset
+details known"), so an adapter — or a test fake — that cannot list assets keeps
+working for every other call and a caller never invents a mismatch from a
+missing list. `ForgejoAdapter` and `GithubAdapter` both implement it as
+`GET /repos/{repo}/releases/{id}/assets` through the shared page walker (a page
+limit never truncates the list).
+
+The comparison against the build's own bytes, which are on disk and never
+downloaded (REL-010), comes from a SHA-256 computed locally:
+
+- **GitHub** asset objects expose `digest` as `sha256:<hex>`; a name present
+  with a different digest is a **conflict**.
+- **Forgejo** asset objects report `digest: null` (measured 2026-07-28) but
+  expose `size`; the comparison falls back to `size`, and a different size is a
+  conflict.
+- An asset that carries neither a digest nor a size (the bare `{"name": ...}`
+  shape of older fixtures) cannot be proven different and stays a **no-op**.
+
+The outcomes per destination:
+
+- A name absent from the release is uploaded once — on a freshly created
+  release, on an empty-body supplement, on a title correction, and on a rerun
+  that finds only some names attached.
+- A name present with the same digest (or the same size where no digest is
+  exposed) is a no-op: attaching twice leaves one asset per name and writes
+  nothing on the second run.
+- A name present with **another** digest fails that destination **by name**,
+  and the existing asset is unchanged: no upload, no patch, no delete. The
+  failure detail names the file and both the recorded and the expected digest
+  (or size), beside any title or body difference.
+
+The change is **additive**: `list_release_assets` is a new, non-abstract read
+method; `upload_release_asset` keeps its shape; and the existing upload path
+(create then attach) now uploads only the names the release lacks.
+
+### Release asset verification after publishing (REA-014)
+
+After create/converge/attach, `publish_release` reads each destination's
+release back with `find_release(repo, tag)` and `list_release_assets(repo,
+release_id)` and compares it to the files the repo declares in
+`release.assets` (REA-010) and to the build's own bytes on disk. Nothing is
+downloaded (REL-010): the expected digest is computed locally.
+
+The declarations to verify are resolved through the same Layer 2 +
+Layer-3 `.ops.yaml` merge the destinations come from (`repo_dir` at the tag),
+and their `<version>`/`<tag>` placeholders are rendered from the tag
+(`<version>` is the tag without a leading `v`). Only declarations whose type
+is an asset of the release object are verified — `github_release_zip` and
+`github_release_tarball`. `ghcr_image` and `capacium_exchange` are published
+elsewhere (REA-016 owns their fan-out) and are never read back. With no
+declaration, `assets: none`, or only non-release-object declarations there is
+nothing to verify and the run is unchanged.
+
+The comparison is the same one the attachment path uses (REA-013): GitHub's
+`digest` where the forge exposes it, otherwise Forgejo's `size`. Per declared
+file:
+
+- **Present and equal** — the destination carries the file with the build's
+  digest (or size). The destination is recorded in
+  `PublicationReport.verified: dict[str, list[str]]` as
+  `"<name> sha256:<hex>"` per file, and its audit line is
+  `release-publish tag=<tag> dest=<forge:repo> result=verified <entries>`.
+- **Present, not equal** — another digest or size fails the destination, and
+  the failure detail names the file with both values.
+- **Absent** — the destination lacks the declared file (never attached, or
+  absent from the build so it could not be): the destination fails, and the
+  detail names the file.
+- **Attached but not part of this run's build** — there is no local truth to
+  compare, so the file cannot be proven wrong and is recorded present.
+
+A destination that published or converged and then fails verification is
+**moved** out of `published`/`skipped`/`supplemented`/`up_to_date` and into
+`failed` (the destination label stays the `forge:repo` form), with its detail
+in `failure_details` and its audit line
+`result=verify-failed verification failed: <detail>`. Another destination's
+outcome is unaffected: verification is per destination and a read error is
+recorded, not raised. The exit code is not part of this surface — REA-015
+derives it from `report.failed`.
+
+The change is **additive**: `PublicationReport` gains an optional
+`verified` field defaulting to `{}`; `to_dict()` keeps its existing keys; and
+a run with no declaration emits exactly the audit lines it did before.
+
+### Release manifest: producer and destination per piece (REA-016)
+
+`release.manifest` (`ReleaseConfig.manifest`, an optional key, default absent)
+is the **additive extension** of the REA-010 `release.assets` declaration. It
+names, per piece, the forge that produces it and the destinations that must
+hold it:
+
+```yaml
+release:
+  manifest:
+    deadline_minutes: 60          # optional, default 60, overridable per repo
+    assets:
+      - type: github_release_tarball      # github_release_zip | github_release_tarball
+        name: ops-engine-tool-<version>-linux-amd64.tar.gz
+        producer: github                  # forgejo | github (default forgejo)
+        destinations: ['github:langevc/ops-engine']   # default: <producer>:<repo>
+    channels:
+      - channel: pypi                     # pypi | ghcr | homebrew | winget
+        name: ops-engine
+        producer: github
+```
+
+An **absent block** means every asset is forgejo-produced and required at once
+— exactly the REA-014 behaviour, unchanged. A piece's `name` takes the same
+`<version>`/`<tag>` placeholders as `release.assets`, rendered from the tag.
+`producer` is one of `forgejo`/`github`; an unknown producer, a channel that
+is not one of the four, or a non-release-object type (e.g. `ghcr_image`) under
+`manifest.assets` is refused, naming `release.manifest`. A `ghcr_image` is a
+*channel*, declared under `manifest.channels`, not a release-object asset.
+
+Per destination, after create/converge/attach:
+
+- **Forgejo-produced piece absent** — required at once. The destination fails
+  and the detail names the piece and the producer. This holds for a channel
+  too: a forgejo-published PyPI package, image or tap is red on absence, with
+  no grace.
+- **GitHub-produced piece absent, deadline not passed** — *pending*, not an
+  error. The destination stays in `published`; `PublicationReport.pending`
+  records `"<name> producer=github since=<iso>"` for it and the audit line is
+  `release-publish tag=<tag> dest=<forge:repo> result=pending <pieces>`.
+- **GitHub-produced piece absent, deadline passed** — red. The destination is
+  moved to `failed`, and `failure_details` names the piece, its producer and
+  the destination label; the audit line is
+  `result=manifest-failed manifest not satisfied on <label>: <pieces>`.
+- **Piece present** — verified like any declared file: `PublicationReport.verified`
+  gains `"<name> sha256:<hex>"` and the destination's line is `result=verified`.
+
+The deadline is `manifest.deadline_minutes` (default 60) and runs from the
+release object's own `created_at` on the destination that carries the run's
+release; a destination without a timestamp starts the clock at the run. A
+manifest destination this run does not publish to (D4: a GitHub-built binary on
+a GitHub destination another workflow owns) is still named, but this run never
+reads it and therefore holds no evidence against any piece there: its pieces
+are recorded as `pending`, never red, and never on another destination's clock.
+
+The channels are read **read-only**, the way capacium's `verify-channels` step
+reads them (`ops_engine.modules.asset_manifest.evaluate_channels`): a present
+channel is satisfied; an absent `github`-produced channel is pending within the
+deadline and failed after it, while an absent `forgejo`-produced channel is
+failed at once (the producer rule of the release-object pieces); an unprobeable
+one (`winget`, or any read error) is `manual` and is never a failure — unknown
+is not a verdict. A channel is labelled `<channel>:<name>`; a satisfied one is
+audited as `result=channel-satisfied` and a manual one as
+`result=channel-manual`, while a pending or failed one uses the same
+`result=pending`/`result=manifest-failed` lines and report buckets as a
+release-object piece. `HttpxChannelReader` issues `GET` only; a caller may
+inject its own reader through the `channel_reader` keyword of
+`publish_release` (and `ReleaseContext.channel_reader`).
+
+The change is **additive**: `PublicationReport` gains an optional `pending`
+field defaulting to `{}`; `to_dict()` keeps its existing keys; and a run with
+no manifest (or with only forgejo-produced pieces) emits exactly the audit
+lines it did before.
+
+### Pulling a GitHub-built asset and reading the Forgejo host (REA-017)
+
+`release.forgejo_assets` (an optional key, default `off`) decides whether a
+`github`-produced piece is pulled into the Forgejo release:
+
+```yaml
+release:
+  forgejo_assets: pull          # off (default) | pull; anything else is refused
+  forgejo_free_space_url: https://forge.example/metrics/free.json
+```
+
+D4 keeps a GitHub-built binary on GitHub. With `pull`, once the piece is
+present on the GitHub release the engine downloads it with its own GitHub
+credential (`HttpxAssetDownloader`, `GET` only, redirects followed), checks its
+SHA-256 against the digest the GitHub API reports, attaches it to the Forgejo
+release and re-downloads it from Forgejo to check the bytes again — Forgejo
+reports no digest of its own, only a size.
+
+- **Switch off** (the default for every repository) — nothing is downloaded and
+  the Forgejo release carries only forgejo-produced assets.
+- **Digest matches** — the file is attached; `PublicationReport.pulled` gains
+  `"<name> sha256:<hex>"` and the audit line is
+  `result=pulled <name> sha256:<hex>`.
+- **Digest mismatch, or the read-back differs** — the destination fails by
+  name, attaches or keeps nothing it cannot prove, and the audit line is
+  `result=pull-failed pull not satisfied on <label>: <detail>`; the detail
+  names the file and both digests where they differ.
+- **Not yet on GitHub inside the manifest deadline** — the piece stays pending
+  (REA-016); past the deadline it is red by name.
+
+`release.forgejo_free_space_url` is the **declared HTTP source** of the Forgejo
+host's free-space reading. The engine reads it unauthenticated — the source is
+a host endpoint, not a forge, so no credential is sent — with a timeout. The
+answer is a plain-text integer byte count or JSON carrying `free_bytes`, `free`
+or `available_bytes` (`HttpxFreeSpaceReader`). An undeclared source and a
+failed read (`no source declared`, `read failed: ...`, `unreadable answer:
+...`) raise `FreeSpaceUnavailable`; the engine turns that into the report's
+`free_space: "unavailable: <reason>"`. The engine never reaches the host any
+other way: no ssh, no docker. Host capacity is an operator decision, and the
+reading is evidence, never a gate — no reading fails a release.
+
+The reading is recorded for the Forgejo destination of every run that reached
+it, and audited:
+`release-publish tag=<tag> dest=<forge:repo> result=free-space free_bytes=<n>`
+(or `... result=free-space unavailable: <reason>`).
+
+Both readers are injectable collaborators, like the REA-016 channel reader: a
+caller may pass `asset_downloader=` and `free_space_reader=` to
+`publish_release`, to the CLI helper `run_attach`, or to the CLI's `main` as
+test seams; the shipped `HttpxAssetDownloader`/`HttpxFreeSpaceReader` take an
+optional `httpx.AsyncClient`. None of them changes what is resolved or
+published.
+
+The change is **additive**: `PublicationReport` gains optional `pulled` and
+`free_space` fields defaulting to `{}`; `to_dict()` keeps its existing keys
+(the CLI report adds `pulled`, `free_space` and `pending` per destination);
+`release.forgejo_assets` and `release.forgejo_free_space_url` are extras that
+stay out of `model_fields`, so a release block that never sets them is
+unchanged; and a run with the switch off and no source declared behaves
+exactly as before, with one extra `result=free-space` audit line naming that
+no source was declared.
+
+**Known limitation.** Layer 3 overrides Layer 2 field by field on the
+`release` object: a `.ops.yaml` that sets any `release` key replaces the
+Layer-2 `release` object, so the Layer-2 `forgejo_assets`/`forgejo_free_space_url`
+must be repeated in `.ops.yaml` when that file declares other release keys.
+This is the existing `merge_layer3` semantics, named here rather than changed.
 
 `RepoConfig.release_body_install_block: str = ""`
 `RepoConfig.release_body_assets_line: str = ""`
@@ -1149,13 +1607,16 @@ create or supplement call. A private destination is not skipped.
 ### Run summary body state (P36-018)
 
 `PublicationReport.body_states` is a `dict[str, str]` mapping each destination
-label to one of four body-state values produced during publication:
+label to one of five body-state values produced during publication:
 
 - `"written"` — the release was created with the full body.
 - `"supplemented"` — the release existed with an empty body; the body was
-  patched in.
+  patched in. The same value records a foreign release that was converged
+  (title, body or missing files) under D1.
 - `"already_equal"` — the release existed and its body already contained the
   tag's CHANGELOG section.
+- `"up_to_date"` — the existing release already was the intended state; nothing
+  was written. This is the only outcome a complete foreign release can have.
 - `"failed: <detail>"` — the body lacked the CHANGELOG section; the destination
   is failed and the detail names the difference.
 

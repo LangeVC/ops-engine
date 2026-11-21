@@ -1,17 +1,22 @@
-"""P36-003: one publisher per repository.
+"""P36-003: one publisher per repository, under decision D1.
 
 Two publishers exist for a repository: the ops bot (the account the engine
 publishes as) and a repository-local workflow (D35 / FAI-211). With the public
 mirror back on, both would write the same release.
 
+Decision D1 (REA-012) supersedes P36-003's "an existing object of another
+publisher is only recorded": such a release is now converged to the intended
+state — title, body and missing files — exactly like one without an author,
+and is never duplicated or deleted. Attribution is still reported.
+
 Criterion 1: for a tag the engine creates exactly one release; a release that
-already exists from ANOTHER publisher is recorded as up to date and is neither
-edited nor duplicated.
+already exists from ANOTHER publisher is converged in place when incomplete
+and recorded as up to date — without a write — when it already is the
+intended state.
 Criterion 2: the report names the publisher found (``engine`` or ``other``)
 per tag.
-Criterion 3 (RED PROOF): the 3.5.2 call shape turns the same pre-existing
-release into a failed destination (the run goes red); the new behaviour
-neither fails nor writes.
+Criterion 3: attribution no longer gates a write: the legacy call shape and
+the attributed one judge the same release the same way.
 
 The publisher is read from the release object's own ``author.login`` — the
 forge's release object carries the account that created it (Forgejo/Gitea
@@ -166,23 +171,29 @@ async def _publish(forge: str, adapter, tmp_path, **over):
 
 @pytest.mark.parametrize("forge,make", [("forgejo", _forgejo), ("github", _github)])
 @pytest.mark.asyncio
-async def test_another_publishers_release_is_up_to_date_and_untouched(forge, make, tmp_path):
-    """Criterion 1: a pre-existing release from another publisher is recorded
-    as up to date. Not edited (no title PATCH, no asset upload) and not
-    duplicated (no create)."""
-    dest = FakeDestination(_release(author=OTHER_LOGIN))
+async def test_another_publishers_release_is_converged_not_recorded_only(
+    forge, make, tmp_path
+):
+    """Criterion 1 and D1: a pre-existing release from another publisher is
+    judged exactly like one without an author — its missing files are attached
+    in place and it is recorded as supplemented — while the report still names
+    that publisher. It is never duplicated."""
+    dest = FakeDestination(
+        _release(author=OTHER_LOGIN, name=TITLE, body="\n" + NOTES + "\n\n", assets=[])
+    )
     report, audit = await _publish(
         forge, make(dest), tmp_path, publisher_login=ENGINE_LOGIN
     )
 
     label = f"{forge}:{REPO}"
-    assert dest.writes() == []
-    assert report.up_to_date == [label]
+    assert dest.creates() == 0
+    assert sorted(dest.uploads) == sorted(FILES)
+    assert report.supplemented == [label]
+    assert report.up_to_date == []
     assert report.failed == [] and report.failure_details == {}
-    assert report.published == [] and report.supplemented == [] and report.skipped == []
-    assert audit == [
-        f"release-publish tag={TAG} dest={label} result=up-to-date publisher=other"
-    ]
+    assert report.published == []
+    assert report.publishers == {label: "other"}
+    assert "result=supplemented" in audit[0]
 
 
 @pytest.mark.parametrize("forge,make", [("forgejo", _forgejo), ("github", _github)])
@@ -252,13 +263,20 @@ async def test_a_release_without_an_author_is_named_other_and_never_engine(tmp_p
     "forge,make,status", [("forgejo", _forgejo, 409), ("github", _github, 422)]
 )
 @pytest.mark.asyncio
-async def test_a_duplicate_answered_for_another_publishers_release_is_up_to_date(
+async def test_a_duplicate_answered_for_a_complete_foreign_release_is_up_to_date(
     forge, make, status, tmp_path
 ):
-    """Criterion 1: the by-tag lookup cannot see a draft, the create answers a
-    duplicate; when the release belongs to another publisher it is recorded as
-    up to date and no second create is attempted."""
-    dest = FakeDestination(_release(author=OTHER_LOGIN), create_status=status)
+    """Criterion 1 under D1: the by-tag lookup cannot see a draft, the create
+    answers a duplicate; when the object belongs to another publisher and
+    already IS the intended state it is recorded as up to date — the only
+    foreign outcome without a write — and no second create is attempted."""
+    dest = FakeDestination(
+        _release(
+            author=OTHER_LOGIN, name=TITLE, body=NOTES,
+            assets=[{"name": n} for n in FILES],
+        ),
+        create_status=status,
+    )
     # by-tag 404 until the create has been attempted, then the release shows.
     calls = dest.calls
     real = dest.handler
@@ -289,17 +307,23 @@ async def test_a_duplicate_answered_for_another_publishers_release_is_up_to_date
     assert report.up_to_date == [label]
     assert report.failed == [] and report.published == []
     assert report.publisher == {f"{forge}:{REPO}": "other"}
-    assert audit[0].endswith("result=up-to-date publisher=other")
+    # The duplicate answer is still named, then the publisher (REA-011, D1).
+    assert "result=up-to-date" in audit[0]
+    assert "http=" in audit[0] and "existing_release_id=77" in audit[0]
+    assert audit[0].endswith("publisher=other")
 
 
 @pytest.mark.asyncio
-async def test_legacy_call_shape_still_fails_a_foreign_release_and_the_new_one_does_not(
+async def test_the_legacy_and_the_attributed_call_judge_a_foreign_release_the_same(
     tmp_path,
 ):
-    """Criterion 3 (RED PROOF): with the same pre-existing release the 3.5.2
-    call shape (``skip_existing`` only, no publisher input) records the
-    destination as failed — the run goes red — while the new shape records it
-    as up to date and writes nothing."""
+    """Criterion 3 under D1: attribution is a report fact, not a write gate.
+    With the same pre-existing release the 3.5.2 call shape (``skip_existing``
+    only, no publisher input) and the attributed shape reach the same verdict
+    and write the same thing; only the attributed report names the publisher.
+
+    RED PROOF against P36-003: there the attributed call returned early and
+    recorded ``up-to-date`` while the legacy one failed the destination."""
     legacy = FakeDestination(_release(author=OTHER_LOGIN))
     legacy_report, legacy_audit = await _publish("forgejo", _forgejo(legacy), tmp_path)
     assert legacy.writes() == []
@@ -312,9 +336,14 @@ async def test_legacy_call_shape_still_fails_a_foreign_release_and_the_new_one_d
         "forgejo", _forgejo(new), tmp_path, publisher_login=ENGINE_LOGIN
     )
     assert new.writes() == []
-    assert new_report.failed == []
-    assert new_report.up_to_date == [f"forgejo:{REPO}"]
-    assert "result=up-to-date" in new_audit[0]
+    assert new_report.failed == [f"forgejo:{REPO}"]
+    assert new_report.failure_details == legacy_report.failure_details
+    assert new_report.failure_details[f"forgejo:{REPO}"] == (
+        legacy_report.failure_details[f"forgejo:{REPO}"]
+    )
+    assert "result=incomplete" in new_audit[0]
+    # Attribution is the only difference: the publisher is named.
+    assert new_report.publisher == {f"forgejo:{REPO}": "other"}
 
 
 # --- Production call shape: publisher_login through ReleaseContext → _release_tag ---
@@ -326,8 +355,9 @@ async def test_release_context_publisher_login_reaches_publish_release(
 ):
     """A ReleaseContext with publisher_login set wires it through to
     publish_release, so the production webhook path (process_event →
-    _release_tag) records a foreign-authored release as up to date without
-    the caller passing publisher_login explicitly."""
+    _release_tag) converges a foreign-authored softprops-style release
+    without the caller passing publisher_login explicitly — and still names
+    the publisher (D1)."""
     from unittest.mock import AsyncMock
 
     from ops_engine.config_loader import ReleaseConfig
@@ -338,7 +368,8 @@ async def test_release_context_publisher_login_reaches_publish_release(
         TagIdentitySpec,
     )
 
-    dest = FakeDestination(_release(author=OTHER_LOGIN))
+    # The softprops/workflow shape: the tag as title and an empty body.
+    dest = FakeDestination(_release(author=OTHER_LOGIN, name=TAG, body="", assets=[]))
     adapter = _forgejo(dest)
 
     source = AsyncMock()
@@ -393,13 +424,23 @@ async def test_release_context_publisher_login_reaches_publish_release(
         context,
     )
 
-    # The foreign-authored release was NOT written to — no create, no upload, no PATCH.
-    assert dest.writes() == []
+    # D1: the foreign-authored object was converged in place — the title per
+    # the template, the body, the missing files — and never re-created.
     assert dest.creates() == 0
-    # And it was NOT failed: it was recorded as up-to-date with the publisher named.
+    assert not any(m == "DELETE" for m, _ in dest.calls)
+    patched = {}
+    for body in dest.patches:
+        patched.update(body)
+    assert patched.get("name") == TITLE
+    # The body is the CHANGELOG section of the tag, read through the real path.
+    assert "- Release." in (patched.get("body") or "")
+    assert "See [CHANGELOG.md]" in (patched.get("body") or "")
+    assert sorted(dest.uploads) == sorted(FILES)
+    # And the publisher is still named on the report.
     report = captured["report"]
     label = f"forgejo:{REPO}"
-    assert report.up_to_date == [label]
+    assert report.supplemented == [label]
+    assert report.failed == []
     assert report.publisher == {label: "other"}
 
 
@@ -505,8 +546,9 @@ async def test_per_destination_publisher_login_empty_entry_fails_destination(tmp
         publisher_login={"FORGEJO_TOKEN": ENGINE_LOGIN, "GH_MIRROR_TOKEN": ""},
     )
 
-    # The forgejo destination is attributed (foreign release -> up_to_date).
+    # The forgejo destination is attributed and converged (foreign -> supplemented).
     assert report.publishers.get(f"forgejo:{REPO}") == "other"
+    assert f"forgejo:{REPO}" in report.supplemented
     # The github destination failed by name.
     assert f"github:{REPO}" in report.failed
     assert "publisher_login unavailable" in report.failure_details.get(f"github:{REPO}", "")
