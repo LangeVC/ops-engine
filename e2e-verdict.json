@@ -1,5 +1,5 @@
 {
-  "candidate_sha": "01dde504b130a30165b9c78fce976400f7b8c196",
+  "candidate_sha": "bcc82258688c748fb0d040fa461bf24079e4e350",
   "result": "green",
   "runs": [
     {
@@ -21,7 +21,7 @@
       "names_file": "release-e2e-0.1.1.zip"
     }
   ],
-  "engine": "ops-engine 3.7.0 wheel built from 01dde50",
-  "harness": "release-e2e ops/REA-022 edf5962153e5ea7a983b99a402db9fffa7681ce0",
-  "produced_at": "2026-11-21T21:25:58Z"
+  "engine": "ops-engine 3.7.1 wheel built from bcc8225",
+  "harness": "release-e2e fix/harness-concurrent-tag a79d81cc9577f81ffcda86aac183527c6f5104b2",
+  "produced_at": "2026-11-21T23:44:08Z"
 }
