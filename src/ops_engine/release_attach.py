@@ -92,6 +92,10 @@ class AttachRequest:
     # "supplied, and it names nothing".
     ticket_prefixes: Optional[list[str]]
     credentials: dict[str, Credential]
+    # The Forgejo instance address, read from FORGEJO_BASE_URL (the variable the
+    # release workflows export). Empty means "not supplied": a Forgejo
+    # destination then has no host to call, which the run reports by name.
+    base_url: str = ""
 
 
 def request_from_args(
@@ -177,6 +181,7 @@ def request_from_args(
         release_body=release_body,
         ticket_prefixes=list(args.ticket_prefix) if args.ticket_prefix else None,
         credentials=credentials,
+        base_url=(env.get("FORGEJO_BASE_URL") or "").strip(),
     )
 
 
@@ -252,6 +257,7 @@ async def run_attach(
     skip_existing: bool = True,
     asset_downloader: object = None,
     free_space_reader: object = None,
+    base_url: str = "",
 ) -> PublicationReport:
     """Run one attach and return the engine's publication report.
 
@@ -279,6 +285,7 @@ async def run_attach(
         ticket_prefixes=ticket_prefixes,
         asset_downloader=asset_downloader,
         free_space_reader=free_space_reader,
+        base_url=base_url,
     )
 
 
@@ -510,6 +517,7 @@ def main(
                 audit=audit,
                 asset_downloader=asset_downloader,
                 free_space_reader=free_space_reader,
+                base_url=request.base_url,
             )
         )
     except Exception as exc:  # noqa: BLE001 (a named failure, never a traceback)
