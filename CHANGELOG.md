@@ -1,5 +1,18 @@
 # Changelog
 
+## 3.7.0
+
+One release chain across the canonical Forgejo and its GitHub mirror, assets included. A repository declares the files its release carries; the engine converges one release object per destination and verifies that every declared file is on it.
+
+- A release block may declare `assets`. The repository builds the files, the engine attaches the ones a destination lacks and verifies the declared set on every destination.
+- A duplicate create answer no longer ends the run: the engine continues with the release that exists. An existing release object, including one another publisher wrote, is converged to the intended state and is never deleted.
+- `ops-engine-release-attach` is the one entry point for repository workflows: it attaches and verifies, writes a report (schema v1) and ends with documented exit codes. Without `--config` the destinations resolve from the repository's `.ops.yaml`.
+- A release manifest names each asset's producer and deadline. A destination that has not been read yet is judged on the run's own clock and never turns red; a release stays pending until its deadline.
+- Optionally, files built on GitHub can be pulled onto the Forgejo release (`forgejo_assets: pull`, off by default). The report carries `pulled`, `free_space` and `pending`.
+- The engine composes the release body itself: the title, the CHANGELOG section and a link to the CHANGELOG, and the final body is gated.
+- The release workflow has a `gate` job. A release object is created only when the repository carries a green end-to-end verdict (`e2e-verdict.json`) for the commit the tag peels to.
+- The Forgejo asset listing ended in an endless loop when the forge ignored the `page` parameter. The page walk now ends when a page adds nothing new.
+
 ## 3.6.3
 
 No change to the engine's behaviour. Release tooling of this repository only.
