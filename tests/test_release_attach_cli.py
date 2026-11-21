@@ -875,3 +875,54 @@ def test_the_cli_report_names_an_undeclared_free_space_source(
     assert entry["pending"] == []
     assert entry["free_space"].startswith("unavailable:")
     assert "no source declared" in entry["free_space"]
+
+
+# --- The Forgejo host reaches the engine on the shipped command -------------
+
+
+def test_the_forgejo_base_url_from_the_environment_reaches_the_engine(
+    tmp_path, monkeypatch, capsys
+):
+    """The release workflows export ``FORGEJO_BASE_URL``; the command passes it
+    to the engine as ``base_url``. Without it a Forgejo destination built its
+    adapter with an empty address and every request failed with "Request URL is
+    missing an 'http://' or 'https://' protocol"."""
+    from ops_engine.modules.release import PublicationReport, ReleaseHandler
+
+    seen = {}
+
+    async def capture(config, repo, tag_name, notes, artifact_dir, **kwargs):
+        seen.update(kwargs)
+        return PublicationReport()
+
+    monkeypatch.setattr(ReleaseHandler, "publish_release", staticmethod(capture))
+    monkeypatch.setenv("OPS_TOKEN", "rw-token")
+    monkeypatch.setenv("FORGEJO_BASE_URL", "https://forge.example")
+    _artifacts(tmp_path)
+
+    main(_argv(tmp_path, _config_file(tmp_path, "forgejo", assets=DECLARED)))
+    capsys.readouterr()
+
+    assert seen.get("base_url") == "https://forge.example"
+
+
+def test_the_base_url_is_empty_when_the_environment_names_none(
+    tmp_path, monkeypatch, capsys
+):
+    from ops_engine.modules.release import PublicationReport, ReleaseHandler
+
+    seen = {}
+
+    async def capture(config, repo, tag_name, notes, artifact_dir, **kwargs):
+        seen.update(kwargs)
+        return PublicationReport()
+
+    monkeypatch.setattr(ReleaseHandler, "publish_release", staticmethod(capture))
+    monkeypatch.setenv("OPS_TOKEN", "rw-token")
+    monkeypatch.delenv("FORGEJO_BASE_URL", raising=False)
+    _artifacts(tmp_path)
+
+    main(_argv(tmp_path, _config_file(tmp_path, "forgejo", assets=DECLARED)))
+    capsys.readouterr()
+
+    assert seen.get("base_url") == ""

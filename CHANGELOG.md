@@ -1,5 +1,9 @@
 # Changelog
 
+## 3.7.1
+
+`ops-engine-release-attach` never told the engine which Forgejo instance to call. A destination on Forgejo was built with an empty address, and every request ended with "Request URL is missing an 'http://' or 'https://' protocol", so a repository whose release workflow calls the command could not publish to Forgejo. The command now reads the address from `FORGEJO_BASE_URL`, the variable the release workflows already export, and hands it to the engine.
+
 ## 3.7.0
 
 One release chain across the canonical Forgejo and its GitHub mirror, assets included. A repository declares the files its release carries; the engine converges one release object per destination and verifies that every declared file is on it.
