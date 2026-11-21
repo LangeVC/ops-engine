@@ -1,0 +1,27 @@
+{
+  "candidate_sha": "01dde504b130a30165b9c78fce976400f7b8c196",
+  "result": "green",
+  "runs": [
+    {
+      "name": "run1",
+      "ok": true
+    },
+    {
+      "name": "run2",
+      "ok": true
+    },
+    {
+      "name": "run3",
+      "ok": true
+    },
+    {
+      "name": "negative-control",
+      "ok": false,
+      "expected": "red",
+      "names_file": "release-e2e-0.1.1.zip"
+    }
+  ],
+  "engine": "ops-engine 3.7.0 wheel built from 01dde50",
+  "harness": "release-e2e ops/REA-022 edf5962153e5ea7a983b99a402db9fffa7681ce0",
+  "produced_at": "2026-11-21T21:25:58Z"
+}
