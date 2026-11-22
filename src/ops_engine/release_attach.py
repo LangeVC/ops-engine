@@ -96,6 +96,11 @@ class AttachRequest:
     # release workflows export). Empty means "not supplied": a Forgejo
     # destination then has no host to call, which the run reports by name.
     base_url: str = ""
+    # The CHANGELOG link the engine composes into the body. Derived from
+    # FORGEJO_BASE_URL by the CLI (``--changelog-url`` overrides), so an attach
+    # run composes the same body a layover did. Empty composes no link, as
+    # 3.7.1 did.
+    changelog_url: str = ""
 
 
 def request_from_args(
@@ -182,7 +187,66 @@ def request_from_args(
         ticket_prefixes=list(args.ticket_prefix) if args.ticket_prefix else None,
         credentials=credentials,
         base_url=(env.get("FORGEJO_BASE_URL") or "").strip(),
+        changelog_url=_resolve_changelog_url(args, config, env, repo_dir),
     )
+
+
+def _resolve_changelog_url(
+    args: argparse.Namespace,
+    config: OpsEngineConfig,
+    env: dict[str, str],
+    repo_dir: Path,
+) -> str:
+    """The CHANGELOG link the CLI passes to the engine, or "" for none.
+
+    The layover derives the link from its declared canonical host (the same
+    ``<host>/<repo>/src/tag/<tag>/<path>`` shape ``_release_tag`` builds); the
+    attach CLI only sees ``FORGEJO_BASE_URL``, the variable the release
+    workflows export as ``github.server_url``. Deriving the same link here is
+    what makes a release the layover created and one this command creates the
+    same body.
+
+    ``--changelog-url`` wins when passed. Absent both the flag and the
+    variable, the result is "" — and the engine then composes no link, exactly
+    as 3.7.1 did. ``--body-file`` is unaffected: a supplied body is published
+    verbatim and never composed.
+    """
+    if getattr(args, "changelog_url", ""):
+        return args.changelog_url
+    if getattr(args, "body_file", ""):
+        # A supplied body is published verbatim and the engine never composes
+        # one, so no link is needed and the config is not read for one.
+        return ""
+    base_url = (env.get("FORGEJO_BASE_URL") or "").strip()
+    if not base_url or not args.tag:
+        return ""
+    try:
+        changelog_path = _declared_changelog_path(config, args.repo, repo_dir)
+    except Exception as exc:  # noqa: BLE001 (a usage error, reported by name)
+        # Deriving the link reads the same config the run will. A bad config is
+        # the documented exit-2 usage error named by its type, exactly as the
+        # run itself would report it — never a traceback out of the command.
+        raise AttachUsageError(f"{type(exc).__name__}: {exc}") from exc
+    link_path = (changelog_path or "CHANGELOG.md").strip("/")
+    return f"{base_url.rstrip('/')}/{args.repo}/src/tag/{args.tag}/{link_path}"
+
+
+def _declared_changelog_path(config: OpsEngineConfig, repo: str, repo_dir: Path) -> str:
+    """The repository's declared CHANGELOG path, Layer 2 merged with ``.ops.yaml``.
+
+    The link the CLI passes names the same file the engine's own composition
+    would: the declared path from the same merge, or the engine default when
+    nothing is declared.
+    """
+    org, _, name = repo.partition("/")
+    layer2 = config.get_repo_config(org, name)
+    layer3 = load_ops_yaml(repo_dir)
+    if layer3 is not None:
+        layer2 = layer2.merge_layer3(layer3)
+    release_config = layer2.release
+    if release_config is None:
+        return "CHANGELOG.md"
+    return release_config.changelog_path
 
 
 def _all_destinations(config: OpsEngineConfig) -> Iterable:
@@ -258,6 +322,7 @@ async def run_attach(
     asset_downloader: object = None,
     free_space_reader: object = None,
     base_url: str = "",
+    changelog_url: str = "",
 ) -> PublicationReport:
     """Run one attach and return the engine's publication report.
 
@@ -267,7 +332,8 @@ async def run_attach(
     the test injection point of :meth:`ReleaseHandler.publish_release` and
     never changes the destination resolution. ``asset_downloader`` and
     ``free_space_reader`` are the REA-017 injection points; ``None`` lets the
-    engine build the shipped HTTP collaborators.
+    engine build the shipped HTTP collaborators. ``changelog_url`` is the link
+    the engine composes into the body when the caller supplied no body file.
     """
     return await ReleaseHandler.publish_release(
         config,
@@ -286,6 +352,7 @@ async def run_attach(
         asset_downloader=asset_downloader,
         free_space_reader=free_space_reader,
         base_url=base_url,
+        changelog_url=changelog_url,
     )
 
 
@@ -467,6 +534,14 @@ def _parser() -> argparse.ArgumentParser:
         "--body-file", default="", help="a file holding the composed release body"
     )
     parser.add_argument(
+        "--changelog-url",
+        default="",
+        help=(
+            "the CHANGELOG link the composed body carries; absent it is derived "
+            "from FORGEJO_BASE_URL, and absent both no link is composed"
+        ),
+    )
+    parser.add_argument(
         "--ticket-prefix",
         action="append",
         default=None,
@@ -518,6 +593,7 @@ def main(
                 asset_downloader=asset_downloader,
                 free_space_reader=free_space_reader,
                 base_url=request.base_url,
+                changelog_url=request.changelog_url,
             )
         )
     except Exception as exc:  # noqa: BLE001 (a named failure, never a traceback)
