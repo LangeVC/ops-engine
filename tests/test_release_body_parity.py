@@ -47,14 +47,24 @@ host and FORGEJO_BASE_URL name the same host in the deployed config? **No.**
     elementeer ``.ops.yaml`` files carry ``forge_hosts: [git.langevc.com]``
     for exactly this reason).
 
-They differ. Consequence: RB-002's derivation reproduces the layover URL byte
-for byte only when ``FORGEJO_BASE_URL`` names the declared canonical host. The
-parity tests therefore set ``FORGEJO_BASE_URL`` to ``https://git.langevc.com``
-(the declared canonical host) and hand the CLI the same ``--name-template`` the
-repository declares, which is how the release workflow invokes it. RB-002's
-derivation itself is pinned separately in
-``test_the_derivation_uses_the_declared_canonical_host``, which proves the URL
-shape and shows the runner address would produce a different one.
+They differ. RB-002's derivation does not read the declared canonical host:
+``_resolve_changelog_url`` builds the link from ``FORGEJO_BASE_URL`` alone, and
+the config loader ignores the ``forge_hosts`` key (it is not a
+``RepoConfig``/``OpsEngineConfig`` field). With the deployed
+``FORGEJO_BASE_URL`` (``http://forgejo:3000``) the attach path therefore
+composes a different CHANGELOG link than the layover, and the bodies disagree.
+
+The parity tests consequently set ``FORGEJO_BASE_URL`` to the declared
+canonical host (``https://git.langevc.com``) and hand the CLI the same
+``--name-template`` the repository declares — the command shape a workflow that
+supplies the canonical host would use. Parity therefore holds only under that
+condition; making the deployed workflow supply the canonical host is outside
+this lane (``must_not_touch: ops-engine:src/``, and the workflows belong to the
+rollout lanes). ``test_the_derivation_follows_forgejo_base_url_only`` pins the
+gap: given the declared host the derivation reproduces the layover link, given
+the runner address it reproduces the runner address, and with the variable
+unset — even for a repository that declares ``forge_hosts: [git.langevc.com]``
+— it composes no link at all.
 
 RED proof (RB-003 criterion 3): against the RB-001 base (90dc06d) the attach
 path has no ``changelog_url`` at all, so its effective body stays ``None`` and
@@ -73,6 +83,7 @@ import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 from unittest.mock import AsyncMock
 
 import httpx
@@ -461,27 +472,77 @@ def test_layover_body_and_attach_body_agree(shape, tmp_path, monkeypatch, capsys
     assert (len(forgejo.uploaded), len(github.uploaded)) == uploaded
 
 
-def test_the_derivation_uses_the_declared_canonical_host(tmp_path, monkeypatch):
-    """RB-003 criterion 2: RB-002's derivation reproduces the layover link.
+def test_under_the_runner_host_the_two_paths_disagree(
+    tmp_path, monkeypatch, capsys
+):
+    """The deployed ``FORGEJO_BASE_URL`` yields a different attach body.
+
+    Composes the layover body, then runs the shipped command with
+    ``FORGEJO_BASE_URL`` set to the runner's address (``github.server_url``,
+    ``http://forgejo:3000``). The attach body carries that host in its
+    CHANGELOG link and is therefore not the layover body — the gap criterion 2
+    records. Parity holds only when the workflow supplies the declared
+    canonical host; changing what the workflow supplies or what the CLI reads
+    is outside this lane.
+    """
+    shape = "skillweave-sdk"
+    repo = SHAPES[shape]["repo"]
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / ".ops.yaml").write_text(_fixture_text(shape), encoding="utf-8")
+    dist = _write_artifacts(repo_dir, _declared_assets(shape, repo_dir))
+
+    monkeypatch.setattr(release_module, "HttpxChannelReader", _ManualChannels)
+    monkeypatch.setenv("FORGEJO_BASE_URL", CANONICAL_HOST)
+    layover_body = _layover_body(shape, repo_dir, dist, monkeypatch)
+
+    monkeypatch.setenv("FORGEJO_BASE_URL", RUNNER_BASE_URL)
+    forgejo = FakeForge(forge="forgejo")
+    github = FakeForge(forge="github")
+    code = main(
+        _attach_argv(shape, repo_dir, dist),
+        adapters=[_adapter("forgejo", forgejo), _adapter("github", github)],
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0 and payload["ok"] is True, payload
+
+    attach_body = forgejo.created[0]["body"]
+    assert attach_body == github.created[0]["body"]
+    assert attach_body != layover_body
+    assert (
+        f"{RUNNER_BASE_URL}/{repo}/src/tag/{TAG}/CHANGELOG.md" in attach_body
+    )
+
+
+def test_the_derivation_follows_forgejo_base_url_only(tmp_path, monkeypatch):
+    """RB-003 criterion 2: RB-002's derivation does not read the declared host.
 
     The finding is that the layover's canonical host (``git.langevc.com``) and
-    the runner's ``FORGEJO_BASE_URL`` (``http://forgejo:3000``) differ. Set to
-    the declared canonical host, the derivation builds exactly the layover's
-    ``<host>/<repo>/src/tag/<tag>/<changelog_path>``; set to the runner address
-    it builds that address instead — proving the two hosts are not the same and
-    that the parity tests' choice of ``FORGEJO_BASE_URL`` is what makes the link
-    agree.
+    the runner's ``FORGEJO_BASE_URL`` (``http://forgejo:3000``) differ, and
+    that ``_resolve_changelog_url`` derives from ``FORGEJO_BASE_URL`` alone.
+    Given the declared canonical host it reproduces the layover link byte for
+    byte; given the runner address it reproduces the runner address. With the
+    variable unset it composes no link even though the ``.ops.yaml`` declares
+    ``forge_hosts: [git.langevc.com]`` — the config loader does not read that
+    key, so the reader's own declaration cannot reach the derivation. This gap
+    is under ``tests/`` to record; closing it touches ``src/`` and is out of
+    this lane.
     """
-    repo = SHAPES["skillweave-sdk"]["repo"]
+    # elementeer-bridge declares `forge_hosts: [git.langevc.com]`.
+    repo = SHAPES["elementeer-bridge"]["repo"]
+    assert "forge_hosts: [git.langevc.com]" in _fixture_text("elementeer-bridge")
     repo_dir = tmp_path / "repo"
     repo_dir.mkdir()
     (repo_dir / ".ops.yaml").write_text(
-        _fixture_text("skillweave-sdk"), encoding="utf-8"
+        _fixture_text("elementeer-bridge"), encoding="utf-8"
     )
     (repo_dir / "dist").mkdir()
 
-    def derive(base_url: str) -> str:
-        monkeypatch.setenv("FORGEJO_BASE_URL", base_url)
+    def derive(base_url: Optional[str]) -> str:
+        if base_url is None:
+            monkeypatch.delenv("FORGEJO_BASE_URL", raising=False)
+        else:
+            monkeypatch.setenv("FORGEJO_BASE_URL", base_url)
         args = _parser().parse_args(
             [
                 "--repo",
@@ -506,3 +567,7 @@ def test_the_derivation_uses_the_declared_canonical_host(tmp_path, monkeypatch):
     runner_url = f"{RUNNER_BASE_URL}/{repo}/src/tag/{TAG}/CHANGELOG.md"
     assert derive(RUNNER_BASE_URL) == runner_url
     assert runner_url != expected
+
+    # Even with the repository declaring the canonical host, an unset variable
+    # yields no link: `forge_hosts` never reaches the derivation.
+    assert derive(None) == ""
