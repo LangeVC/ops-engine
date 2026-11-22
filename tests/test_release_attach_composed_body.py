@@ -52,12 +52,16 @@ ASSETS_LINE = (
 )
 RELEASE_ID = 77
 
-# The Forgejo instance address the release workflows export as
-# FORGEJO_BASE_URL (``github.server_url`` on the Forgejo runner). The layover
-# builds its CHANGELOG link from the repository's canonical URL on the same
-# host, so the derivation RB-002 adds must reproduce this URL.
-FORGEJO_BASE_URL = "https://git.langevc.com"
-CHANGELOG_URL = f"{FORGEJO_BASE_URL}/{REPO}/src/tag/{TAG}/{CHANGELOG_PATH}"
+# The organisation's canonical forge host, as declared in ``.ops.yaml``. RB-002b
+# derives the CHANGELOG link from it (``forge_hosts[0]``) rather than from
+# ``FORGEJO_BASE_URL``, which on a runner is the internal container address.
+FORGE_HOST = "git.langevc.com"
+# The address the release workflows export as FORGEJO_BASE_URL
+# (``github.server_url``). On the runner this is ``http://forgejo:3000``; here
+# it matches the public host so a reader sees no unrelated difference. The
+# derivation must never read it.
+FORGEJO_BASE_URL = f"https://{FORGE_HOST}"
+CHANGELOG_URL = f"https://{FORGE_HOST}/{REPO}/src/tag/{TAG}/{CHANGELOG_PATH}"
 
 FILES = [
     "ops_engine-3.5.1-py3-none-any.whl",
@@ -168,8 +172,15 @@ def _adapter(dest: FakeDestination) -> ForgejoAdapter:
 def _ops_yaml(
     tmp_path, *, install_block: str = "", assets_line: str = ""
 ) -> None:
-    """The repository's Layer-3 declaration: destinations and body parts."""
+    """The repository's Layer-3 declaration: destinations and body parts.
+
+    ``forge_hosts`` is declared because RB-002b derives the CHANGELOG link
+    from it, not from ``FORGEJO_BASE_URL``; without it the CLI composes no
+    link and the layover body (which carries one) could not be reproduced.
+    """
     lines = [
+        "forge_hosts:",
+        f"  - {FORGE_HOST}",
         "destinations:",
         "  - forge: forgejo",
         f"    repo: {REPO}",

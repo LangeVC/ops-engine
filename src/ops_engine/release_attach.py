@@ -94,12 +94,13 @@ class AttachRequest:
     credentials: dict[str, Credential]
     # The Forgejo instance address, read from FORGEJO_BASE_URL (the variable the
     # release workflows export). Empty means "not supplied": a Forgejo
-    # destination then has no host to call, which the run reports by name.
+    # destination then has no host to call, which the run reports by name. This
+    # is the API address only; it is never used to derive the CHANGELOG link.
     base_url: str = ""
-    # The CHANGELOG link the engine composes into the body. Derived from
-    # FORGEJO_BASE_URL by the CLI (``--changelog-url`` overrides), so an attach
-    # run composes the same body a layover did. Empty composes no link, as
-    # 3.7.1 did.
+    # The CHANGELOG link the engine composes into the body. Derived by the CLI
+    # from the repository's declared ``forge_hosts`` (``--changelog-url``
+    # overrides), so an attach run composes the same body a layover did. Empty
+    # composes no link, as 3.7.1 did.
     changelog_url: str = ""
 
 
@@ -200,53 +201,64 @@ def _resolve_changelog_url(
     """The CHANGELOG link the CLI passes to the engine, or "" for none.
 
     The layover derives the link from its declared canonical host (the same
-    ``<host>/<repo>/src/tag/<tag>/<path>`` shape ``_release_tag`` builds); the
-    attach CLI only sees ``FORGEJO_BASE_URL``, the variable the release
-    workflows export as ``github.server_url``. Deriving the same link here is
-    what makes a release the layover created and one this command creates the
-    same body.
+    ``<host>/<repo>/src/tag/<tag>/<path>`` shape ``_release_tag`` builds). The
+    attach CLI derives the same link from the repository's declared
+    ``forge_hosts[0]`` — the organisation's public forge, which the release
+    gate already reads from ``.ops.yaml``. It is deliberately NOT derived from
+    ``FORGEJO_BASE_URL``: on a runner that variable is the internal container
+    address (``http://forgejo:3000``), never the organisation's forge, so a
+    link built from it would embed an address the world cannot reach and the
+    body would not match the layover's.
 
-    ``--changelog-url`` wins when passed. Absent both the flag and the
-    variable, the result is "" — and the engine then composes no link, exactly
-    as 3.7.1 did. ``--body-file`` is unaffected: a supplied body is published
-    verbatim and never composed.
+    Precedence: ``--body-file`` (published verbatim, so no link is composed),
+    then ``--changelog-url``, then ``forge_hosts[0]``, then no link. ``env`` is
+    accepted for the signature the caller uses but never read for the link.
     """
-    if getattr(args, "changelog_url", ""):
-        return args.changelog_url
     if getattr(args, "body_file", ""):
         # A supplied body is published verbatim and the engine never composes
         # one, so no link is needed and the config is not read for one.
         return ""
-    base_url = (env.get("FORGEJO_BASE_URL") or "").strip()
-    if not base_url or not args.tag:
+    if getattr(args, "changelog_url", ""):
+        return args.changelog_url
+    if not args.tag:
         return ""
     try:
-        changelog_path = _declared_changelog_path(config, args.repo, repo_dir)
+        host, changelog_path = _declared_forge_host_and_changelog(
+            config, args.repo, repo_dir
+        )
     except Exception as exc:  # noqa: BLE001 (a usage error, reported by name)
         # Deriving the link reads the same config the run will. A bad config is
         # the documented exit-2 usage error named by its type, exactly as the
         # run itself would report it — never a traceback out of the command.
         raise AttachUsageError(f"{type(exc).__name__}: {exc}") from exc
+    if not host:
+        return ""
     link_path = (changelog_path or "CHANGELOG.md").strip("/")
-    return f"{base_url.rstrip('/')}/{args.repo}/src/tag/{args.tag}/{link_path}"
+    return f"https://{host}/{args.repo}/src/tag/{args.tag}/{link_path}"
 
 
-def _declared_changelog_path(config: OpsEngineConfig, repo: str, repo_dir: Path) -> str:
-    """The repository's declared CHANGELOG path, Layer 2 merged with ``.ops.yaml``.
+def _declared_forge_host_and_changelog(
+    config: OpsEngineConfig, repo: str, repo_dir: Path
+) -> tuple[str, str]:
+    """The declared forge host and CHANGELOG path, Layer 2 merged with ``.ops.yaml``.
 
-    The link the CLI passes names the same file the engine's own composition
-    would: the declared path from the same merge, or the engine default when
-    nothing is declared.
+    The link the CLI passes names the same host and file the layover's own
+    composition would: ``forge_hosts[0]`` (the organisation's canonical forge)
+    and the declared CHANGELOG path from the same merge. An absent or empty
+    ``forge_hosts`` yields ``""`` for the host, and the engine then composes no
+    link, exactly as 3.7.1 did.
     """
     org, _, name = repo.partition("/")
     layer2 = config.get_repo_config(org, name)
     layer3 = load_ops_yaml(repo_dir)
     if layer3 is not None:
         layer2 = layer2.merge_layer3(layer3)
+    host = layer2.forge_hosts[0].strip() if layer2.forge_hosts else ""
     release_config = layer2.release
-    if release_config is None:
-        return "CHANGELOG.md"
-    return release_config.changelog_path
+    changelog_path = (
+        release_config.changelog_path if release_config is not None else "CHANGELOG.md"
+    )
+    return host, changelog_path
 
 
 def _all_destinations(config: OpsEngineConfig) -> Iterable:
@@ -355,8 +367,7 @@ async def run_attach(
         changelog_url=changelog_url,
     )
     _name_body_mismatch_remedies(
-        report, base_url=base_url, changelog_url=changelog_url,
-        release_body=release_body,
+        report, changelog_url=changelog_url, release_body=release_body,
     )
     return report
 
@@ -364,27 +375,27 @@ async def run_attach(
 def _name_body_mismatch_remedies(
     report: PublicationReport,
     *,
-    base_url: str,
     changelog_url: str,
     release_body: Optional[str],
 ) -> None:
     """Name the remedy when a body mismatch could not be decided (RB-004).
 
-    When no body was composed — no ``FORGEJO_BASE_URL``, no ``--changelog-url``
-    and no ``--body-file`` — the CLI had nothing to compare an existing
-    release's body against, so the engine reports ``notes differ`` without
-    saying why or what would settle it. This appends the two inputs that make
-    the same body: ``FORGEJO_BASE_URL`` (which the release workflows export)
-    or ``--changelog-url`` (which overrides the derivation). With a URL
+    When no body was composed — no ``forge_hosts`` in ``.ops.yaml``, no
+    ``--changelog-url`` and no ``--body-file`` — the CLI had nothing to
+    compare an existing release's body against, so the engine reports
+    ``notes differ`` without saying why or what would settle it. This appends
+    the two inputs that make the same body: a declared ``forge_hosts`` in
+    ``.ops.yaml`` (from which the CHANGELOG link is derived) or
+    ``--changelog-url`` (which overrides the derivation). With a URL
     available or a supplied body, a genuine difference stands on its own and
     no remedy is added; the engine still refuses and never writes.
     """
-    if base_url or changelog_url or release_body is not None:
+    if changelog_url or release_body is not None:
         return
     remedy = (
         "the CLI composed no body to compare because no CHANGELOG link was "
-        "available: set FORGEJO_BASE_URL or pass --changelog-url so the "
-        "layover's composed body is reproduced"
+        "available: declare forge_hosts in .ops.yaml or pass --changelog-url "
+        "so the layover's composed body is reproduced"
     )
     for label, detail in report.failure_details.items():
         if "notes differ" in detail:
@@ -573,7 +584,7 @@ def _parser() -> argparse.ArgumentParser:
         default="",
         help=(
             "the CHANGELOG link the composed body carries; absent it is derived "
-            "from FORGEJO_BASE_URL, and absent both no link is composed"
+            "from forge_hosts in .ops.yaml, and absent both no link is composed"
         ),
     )
     parser.add_argument(
