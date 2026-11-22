@@ -1,5 +1,12 @@
 # Changelog
 
+## 3.7.2
+
+`ops-engine-release-attach` now composes the release body itself when a workflow passes only the tag's notes. A release the layover created first carries the composed body — heading, CHANGELOG section, an optional install block and assets line, and a CHANGELOG link — while the command sent raw notes, so the existing release was refused with "notes differ" and a workflow-shaped release could not supplement it on either forge.
+
+- The CHANGELOG link is derived from the forge host the repository declares in `.ops.yaml` (`forge_hosts`), never from `FORGEJO_BASE_URL`: on a runner that variable is the internal container address, and a link built from it would not match the body the layover wrote. `--changelog-url` overrides the derived link, and `--body-file` is still published verbatim. With neither a declared host nor a flag the command composes no link, and a body mismatch names both inputs that would settle it.
+- The release gate reads the end-to-end verdict for the candidate commit from the default branch (PR 52), so a verdict committed after the tag still gates the release.
+
 ## 3.7.1
 
 `ops-engine-release-attach` never told the engine which Forgejo instance to call. A destination on Forgejo was built with an empty address, and every request ended with "Request URL is missing an 'http://' or 'https://' protocol", so a repository whose release workflow calls the command could not publish to Forgejo. The command now reads the address from `FORGEJO_BASE_URL`, the variable the release workflows already export, and hands it to the engine.

@@ -1,0 +1,91 @@
+# Source: elementeer/elementeer (branch main, commit 8b066051dd1d5d08519490539d48c2b1797460c6)
+# Verbatim copy of the repository default-branch .ops.yaml taken
+# read-only for the RB-003 parity fixture; nothing was fetched from a
+# forge during the run. The body below the header is byte-for-byte.
+# Layer-3 repository override (DST-002): the release destinations for elementeer.
+# The forge is a value, not a key name (DST-001). The engine reads this file via
+# config_loader.load_ops_yaml and resolves BOTH destinations from it; no
+# destination, forge repository, host or credential name is restated as a
+# literal in .forgejo/.
+#
+# Visibilities are the MEASURED state of each forge on 2026-11-16, not an
+# inference from the mirror declaration in elementeer-ops/config.yml:
+#   - canonical Forgejo elementeer/elementeer: PRIVATE.
+#     GET /api/v1/repos/elementeer/elementeer (authenticated) answers
+#     {"private": true, "internal": false}; an anonymous request answers 403,
+#     as it does for the known-private fusionaize/faigrid.
+#   - GitHub mirror elementeer/elementeer: PUBLIC.
+#     GET https://api.github.com/repos/elementeer/elementeer answers
+#     {"private": false, "visibility": "public"}.
+#
+# This file restores the public distribution that D37 (owner decision
+# 2026-11-04, LVC-303) switched off in elementeer-ops/config.yml and that
+# RFL-014 re-declares there with its candidate globs and the accepted
+# (path, blob) exception. The two declarations have different roles and are not
+# duplicates: the Layer-2 entry is the `mirror` destination the visibility gate
+# judges and the layover pushes; these entries are the `release` destinations
+# publish_release writes, the only role _release_tag resolves with.
+destinations:
+  - forge: forgejo
+    repo: elementeer/elementeer
+    role: release
+    visibility: private
+    credential_variable: FORGEJO_TOKEN
+  - forge: github
+    repo: elementeer/elementeer
+    role: release
+    visibility: public
+    credential_variable: GH_MIRROR_TOKEN
+
+# The organisation's canonical forge host (REL-023). The release gate reads it
+# from here and hands it to the destination/host boundary gate, so a hardcoded
+# canonical host in a workflow is refused rather than a runner-internal
+# container address (github.server_url resolves to http://forgejo:3000 on the
+# runner, which is not the organisation's forge). A dotless entry is refused by
+# name. Keep the declaration on exactly one line: the extractor reads a single
+# `forge_hosts:` line.
+forge_hosts: [git.langevc.com]
+
+# The release block (REA-041): the ZIP this repository builds, declared where the
+# engine reads it. A Layer-3 `release:` key REPLACES the layering release block
+# wholesale (config_loader.merge_layer3 copies whole model fields), so the block
+# is declared whole, not just its assets. `release.assets` is the declaration
+# REA-014 verifies: after publishing, the handler reads the release back and
+# records `"<name> sha256:<hex>"` per asset, and fails the destination by name if
+# a declared asset is absent. type github_release_zip is the only type
+# _RELEASE_ASSET_TYPES verifies on read-back.
+#
+# The name form is the file name MEASURED on both forges for v2.4.1
+# (elementeer.2.4.1.zip, 168408 B) on 2026-11-18. `_render_asset_name`
+# substitutes <version> with the tag minus its leading "v" and <tag> with the tag
+# verbatim; scripts/create-plugin-zip.sh names the file with the bare version, so
+# the declaration uses <version>. The .github workflow's differently named
+# elementeer.<tag>.zip stays a CI artifact and is never the release asset,
+# because that workflow does not publish (REA-041 criterion 2).
+#
+# name_template matches the title the engine has already published on both
+# forges ("Elementeer v2.4.1"); the CLI passes it to render_release_name
+# verbatim, so it is the release title and not a gate.
+release:
+  enabled: true
+  trigger: tag_push
+  tag_pattern: "v*"
+  name_template: "Elementeer {tag_name}"
+  assets:
+    - type: github_release_zip
+      name: "elementeer.<version>.zip"
+
+# Deliberately NOT declared here:
+#   - tracker_prefixes: the engine's audience gate refuses nothing when the
+#     list is empty, which is the documented default. This repository's history
+#     names ELM-<KIND> ids, but the release body is sliced from CHANGELOG.md, so
+#     the vocabulary that gate should refuse is a business decision for the
+#     owner, not a value to copy from elementeer-ops' layover-level
+#     `ticket_prefixes` (a different gate, read by src/config_parser.py).
+#   - release_body_install_block / release_body_assets_line: per-repository
+#     business data (P36-017). Empty means the body carries no Install section
+#     and no assets line rather than an engine default.
+#   - visibility_candidate_globs / visibility_exceptions: the Layer-2 entry in
+#     elementeer-ops/config.yml owns them; a Layer-3 list would REPLACE that
+#     list on merge, and the globs must cover the mirror destination the gate
+#     judges.

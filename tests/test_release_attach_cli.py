@@ -35,7 +35,8 @@ import pytest
 
 from ops_engine.adapters.forgejo_adapter import ForgejoAdapter
 from ops_engine.adapters.github_adapter import GithubAdapter
-from ops_engine.config_loader import OpsEngineConfig
+from ops_engine.config_loader import OpsEngineConfig, OpsYamlError, load_ops_yaml
+from ops_engine.modules.release import compose_release_body
 from ops_engine.release_attach import main, render_report, run_attach
 
 REPO = "langevc/ops-engine"
@@ -74,6 +75,7 @@ def _config(
     manifest=None,
     forgejo_assets=None,
     free_space_url=None,
+    forge_hosts=None,
 ) -> OpsEngineConfig:
     destinations = [
         {
@@ -106,6 +108,8 @@ def _config(
         repository["tracker_prefixes"] = tracker_prefixes
     if install_block is not None:
         repository["release_body_install_block"] = install_block
+    if forge_hosts is not None:
+        repository["forge_hosts"] = forge_hosts
     return OpsEngineConfig.load(
         {
             "orgs": {
@@ -338,6 +342,7 @@ def _config_file(
     manifest=None,
     forgejo_assets=None,
     free_space_url=None,
+    forge_hosts=None,
 ) -> "object":
     path = tmp_path / "config.yml"
     lines = [
@@ -391,6 +396,10 @@ def _config_file(
             lines.append(f"          - {prefix}")
     if install_block:
         lines.append(f"        release_body_install_block: '{install_block}'")
+    if forge_hosts:
+        lines.append("        forge_hosts:")
+        for host in forge_hosts:
+            lines.append(f"          - {host}")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
 
@@ -673,6 +682,173 @@ async def test_a_superseded_skipped_line_does_not_survive_a_verify_failure(tmp_p
     assert "not-built-3.5.1.zip" in label_lines[0]
 
 
+# --- RB-002: the CLI composes the body the layover composes -----------------
+
+# RB-002b: the link comes from the declared forge host, never the API base URL.
+# On the runner ``FORGEJO_BASE_URL`` is the internal container address; the
+# layover's link uses the organisation's public forge host, which is declared
+# as ``forge_hosts`` in ``.ops.yaml``.
+FORGE_HOST = "git.langevc.com"
+FORGEJO_BASE_URL = f"https://{FORGE_HOST}"
+RUNNER_BASE_URL = "http://forgejo:3000"
+DERIVED_CHANGELOG_URL = f"https://{FORGE_HOST}/{REPO}/src/tag/{TAG}/CHANGELOG.md"
+INTERNAL_CHANGELOG_URL = (
+    f"{RUNNER_BASE_URL}/{REPO}/src/tag/{TAG}/CHANGELOG.md"
+)
+INSTALL_BLOCK = "pip install ops-engine"
+
+
+def _composed(*, url: str = "", install_block: str = "") -> str:
+    return compose_release_body(
+        REPO,
+        TAG,
+        NOTES,
+        name_template=TEMPLATE,
+        install_block=install_block,
+        changelog_url=url,
+    )
+
+
+def test_the_cli_derives_the_changelog_link_from_the_declared_forge_host(
+    tmp_path, monkeypatch, capsys
+):
+    """RB-002b criterion 1+2: with ``forge_hosts`` declared and no flag, the
+    command composes the layover's body — the link built from the declared
+    public host, byte for byte. ``FORGEJO_BASE_URL`` is the runner's internal
+    container address here; it must NOT reach the link.
+
+    Against 56dfad4 the same run embeds ``http://forgejo:3000`` (the RUNNER value
+    is what RB-002 derived from), so the body differs from the layover's; this
+    asserts the intended end state, so that run is the RED proof.
+    """
+    monkeypatch.setenv("OPS_TOKEN", "rw-token")
+    monkeypatch.setenv("FORGEJO_BASE_URL", RUNNER_BASE_URL)
+    dest = FakeDestination(forge="forgejo")
+    _artifacts(tmp_path)
+
+    code = main(
+        _argv(
+            tmp_path,
+            _config_file(
+                tmp_path, "forgejo", assets=DECLARED, forge_hosts=[FORGE_HOST]
+            ),
+            body_file=False,
+        ),
+        adapters=[_make(dest)],
+    )
+
+    assert code == 0, capsys.readouterr().out
+    assert dest.release["body"] == _composed(url=DERIVED_CHANGELOG_URL)
+    assert RUNNER_BASE_URL not in dest.release["body"]
+
+
+def test_an_explicit_changelog_url_overrides_the_derivation(
+    tmp_path, monkeypatch, capsys
+):
+    """RB-002b criterion 1: ``--changelog-url`` wins over the derived link, so
+    a host the derivation would not name is still composed as declared."""
+    monkeypatch.setenv("OPS_TOKEN", "rw-token")
+    monkeypatch.setenv("FORGEJO_BASE_URL", RUNNER_BASE_URL)
+    override = "https://elsewhere.invalid/notes.md"
+    dest = FakeDestination(forge="forgejo")
+    _artifacts(tmp_path)
+
+    argv = _argv(
+        tmp_path,
+        _config_file(tmp_path, "forgejo", assets=DECLARED, forge_hosts=[FORGE_HOST]),
+        body_file=False,
+    )
+    argv += ["--changelog-url", override]
+    code = main(argv, adapters=[_make(dest)])
+
+    assert code == 0, capsys.readouterr().out
+    assert dest.release["body"] == _composed(url=override)
+    assert DERIVED_CHANGELOG_URL not in dest.release["body"]
+
+
+def test_a_body_file_wins_over_the_derivation(tmp_path, monkeypatch, capsys):
+    """RB-002b criterion 1 precedence: a supplied ``--body-file`` is published
+    verbatim, so neither ``forge_hosts`` nor the derived link reaches the
+    release."""
+    monkeypatch.setenv("OPS_TOKEN", "rw-token")
+    monkeypatch.setenv("FORGEJO_BASE_URL", RUNNER_BASE_URL)
+    dest = FakeDestination(forge="forgejo")
+    _artifacts(tmp_path)
+
+    code = main(
+        _argv(
+            tmp_path,
+            _config_file(tmp_path, "forgejo", assets=DECLARED, forge_hosts=[FORGE_HOST]),
+            body_file=True,
+        ),
+        adapters=[_make(dest)],
+    )
+
+    assert code == 0, capsys.readouterr().out
+    assert dest.release["body"] == BODY
+    assert DERIVED_CHANGELOG_URL not in dest.release["body"]
+
+
+def test_without_a_forge_host_no_link_is_invented(tmp_path, monkeypatch, capsys):
+    """RB-002b criterion 1+3: with no ``forge_hosts`` and no flag, no link is
+    invented even when ``FORGEJO_BASE_URL`` is set — the behaviour is exactly
+    3.7.1. The composer still writes the declared parts, omits the link, and
+    ``FORGEJO_BASE_URL`` never becomes a link."""
+    monkeypatch.setenv("OPS_TOKEN", "rw-token")
+    monkeypatch.setenv("FORGEJO_BASE_URL", RUNNER_BASE_URL)
+    dest = FakeDestination(forge="forgejo")
+    _artifacts(tmp_path)
+
+    code = main(
+        _argv(
+            tmp_path,
+            _config_file(
+                tmp_path, "forgejo", assets=DECLARED, install_block=INSTALL_BLOCK
+            ),
+            body_file=False,
+        ),
+        adapters=[_make(dest)],
+    )
+
+    assert code == 0, capsys.readouterr().out
+    assert dest.release["body"] == _composed(url="", install_block=INSTALL_BLOCK)
+    assert "CHANGELOG.md" not in dest.release["body"]
+    assert RUNNER_BASE_URL not in dest.release["body"]
+    assert "### Install" in dest.release["body"]
+
+
+# --- RB-002b: the loader reads forge_hosts, refusing a malformed value -------
+
+
+def test_the_loader_reads_forge_hosts_from_ops_yaml(tmp_path):
+    """RB-002b criterion 1: ``load_ops_yaml`` reads the declared ``forge_hosts``
+    so the CLI can derive the link from ``forge_hosts[0]``."""
+    (tmp_path / ".ops.yaml").write_text(
+        "forge_hosts: [git.langevc.com]\n", encoding="utf-8"
+    )
+
+    layer3 = load_ops_yaml(tmp_path)
+
+    assert layer3 is not None
+    assert layer3.forge_hosts == ["git.langevc.com"]
+
+
+def test_a_dotless_forge_host_is_refused_naming_key_and_file(tmp_path):
+    """RB-002b criterion 1: a malformed ``forge_hosts`` value is refused naming
+    the key (``forge_hosts``) and the file (``.ops.yaml``)."""
+    (tmp_path / ".ops.yaml").write_text(
+        "forge_hosts: [forgejo]\n", encoding="utf-8"
+    )
+
+    with pytest.raises(OpsYamlError) as exc_info:
+        load_ops_yaml(tmp_path)
+
+    message = str(exc_info.value)
+    assert "forge_hosts" in message
+    assert ".ops.yaml" in message
+    assert str(tmp_path / ".ops.yaml") in message
+
+
 # --- Named input errors are the usage exit code, never a traceback ----------
 
 
@@ -704,6 +880,27 @@ def test_an_unreadable_config_is_a_named_usage_error(tmp_path, capsys):
 
     assert code == 2
     assert payload["error"].startswith("cannot load config")
+
+
+def test_an_undeclared_org_is_a_named_usage_error_not_a_traceback(
+    tmp_path, monkeypatch, capsys
+):
+    """Exit 2: deriving the CHANGELOG link reads the config before the run
+    does; a config that does not declare the requested org is still reported
+    as the documented named usage error, never a traceback."""
+    monkeypatch.setenv("OPS_TOKEN", "rw-token")
+    monkeypatch.setenv("FORGEJO_BASE_URL", FORGEJO_BASE_URL)
+    _artifacts(tmp_path)
+    argv = _argv(tmp_path, _config_file(tmp_path, "forgejo"), body_file=False)
+    argv[argv.index("--repo") + 1] = "other/thing"
+
+    code = main(argv, adapters=[])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 2
+    assert payload["ok"] is False and payload["exit_code"] == 2
+    assert payload["error"].startswith("ConfigSectionError:")
+    assert "no org named 'other'" in payload["error"]
 
 
 # --- REA-017: the pull, the free space and the pending pieces in the report -
@@ -926,3 +1123,91 @@ def test_the_base_url_is_empty_when_the_environment_names_none(
     capsys.readouterr()
 
     assert seen.get("base_url") == ""
+
+
+# --- RB-004: an undecidable body mismatch names its cause and the remedy ----
+
+
+def _populate_different_body(dest: FakeDestination, body: str) -> None:
+    """An existing release whose body is genuinely not this build's, with the
+    title and assets that do match."""
+    dest.release = {
+        "id": RELEASE_ID,
+        "tag_name": TAG,
+        "name": f"Ops Engine {TAG}",
+        "body": body,
+        "draft": False,
+        "prerelease": False,
+        "assets": [
+            {
+                "id": 900,
+                "name": name,
+                "size": len(CONTENT[name]),
+                "digest": _sha256(CONTENT[name]) if dest.forge == "github" else None,
+            }
+            for name in FILES
+        ],
+    }
+
+
+def test_rb004_notes_differ_names_forge_hosts_and_changelog_url(
+    tmp_path, monkeypatch, capsys
+):
+    """RB-004 criterion 1 (as amended by RB-002b): with no link available —
+    no ``forge_hosts`` and no flag — the CLI could not compose a body, so a
+    differing existing body is ``notes differ``; the failure detail must name
+    the two inputs that make the layover's body: ``forge_hosts`` and
+    ``--changelog-url``. ``FORGEJO_BASE_URL`` is no longer a remedy, so it is
+    absent from the message even when set."""
+    monkeypatch.setenv("OPS_TOKEN", "rw-token")
+    monkeypatch.setenv("FORGEJO_BASE_URL", RUNNER_BASE_URL)
+    dest = FakeDestination(forge="forgejo")
+    _populate_different_body(dest, "A body this build cannot reproduce.\n")
+    _artifacts(tmp_path)
+
+    code = main(
+        _argv(
+            tmp_path, _config_file(tmp_path, "forgejo", assets=DECLARED), body_file=False
+        ),
+        adapters=[_make(dest)],
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code != 0
+    entry = payload["destinations"][0]
+    assert entry["outcome"] == "failed"
+    assert "notes differ" in entry["failure"]
+    assert "forge_hosts" in entry["failure"]
+    assert "--changelog-url" in entry["failure"]
+    assert "FORGEJO_BASE_URL" not in entry["failure"]
+    assert dest.writes() == [], "a differing body is never overwritten (D1)"
+
+
+def test_rb004_a_genuinely_different_body_still_refuses_with_a_url_available(
+    tmp_path, monkeypatch, capsys
+):
+    """RB-004 criterion 2: with a link available (``forge_hosts`` declared) the
+    CLI composes; a body that is genuinely not this build's is still refused
+    and nothing is written. The remedy sentence is only for the undecidable
+    case."""
+    monkeypatch.setenv("OPS_TOKEN", "rw-token")
+    monkeypatch.setenv("FORGEJO_BASE_URL", RUNNER_BASE_URL)
+    dest = FakeDestination(forge="forgejo")
+    _populate_different_body(dest, "An entirely different body.\n")
+    _artifacts(tmp_path)
+
+    code = main(
+        _argv(
+            tmp_path,
+            _config_file(tmp_path, "forgejo", assets=DECLARED, forge_hosts=[FORGE_HOST]),
+            body_file=False,
+        ),
+        adapters=[_make(dest)],
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code != 0
+    entry = payload["destinations"][0]
+    assert entry["outcome"] == "failed"
+    assert "the CLI composed no body to compare" not in entry["failure"]
+    assert dest.writes() == [], "a differing body is never overwritten (D1)"

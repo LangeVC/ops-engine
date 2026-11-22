@@ -826,6 +826,44 @@ class RepoConfig(BaseModel):
     # the per-repository declaration (Layer 3 .ops.yaml), never from engine
     # defaults. Empty by default: the gate refuses nothing.
     tracker_prefixes: list[str] = Field(default_factory=list)
+    # REL-023 (RB-002b): the organisation's canonical forge host(s) — the same
+    # vocabulary the release gate reads from ``.ops.yaml``. The attach CLI
+    # derives the CHANGELOG link from ``forge_hosts[0]`` rather than
+    # ``FORGEJO_BASE_URL``, which on a runner is the internal container address
+    # (``http://forgejo:3000``) and never the organisation's public forge. Empty
+    # by default: no host is declared, so no link is derived.
+    forge_hosts: list[str] = Field(default_factory=list)
+
+    @field_validator("forge_hosts")
+    @classmethod
+    def _forge_hosts_are_hostnames(cls, value: list[str]) -> list[str]:
+        """Refuse a malformed ``forge_hosts`` entry, naming the key (REL-023).
+
+        A host is a bare name: it carries no scheme or path (no ``/``) and has
+        a dot. A dotless label is a forge type, a header prefix or a package
+        name before it is anybody's hostname, exactly as the release gate's
+        destination register refuses it. The loader wraps this message in
+        ``OpsYamlError``, which names the file, so the refusal names both the
+        key and the file.
+        """
+        for entry in value:
+            if not isinstance(entry, str) or not entry.strip():
+                raise ValueError(
+                    "forge_hosts entries must be non-empty hostnames, "
+                    f"got {entry!r}"
+                )
+            host = entry.strip()
+            if "/" in host:
+                raise ValueError(
+                    f"forge_hosts entry {entry!r} is not a hostname; declare a "
+                    "bare host such as 'git.example.com' (no scheme or path)"
+                )
+            if "." not in host:
+                raise ValueError(
+                    f"forge_hosts entry {entry!r} carries no dot; a dotless "
+                    "label is a forge type or package name, not a hostname"
+                )
+        return value
 
     @field_validator("mirror")
     @classmethod
@@ -1200,6 +1238,7 @@ class OpsEngineConfig(BaseModel):
             release_body_install_block=repo_specific.release_body_install_block,
             release_body_assets_line=repo_specific.release_body_assets_line,
             tracker_prefixes=repo_specific.tracker_prefixes,
+            forge_hosts=repo_specific.forge_hosts,
         )
         _assert_typed_sections(resolved, org_name, repo_name)
         return resolved

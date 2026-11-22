@@ -1,0 +1,54 @@
+# Source: skillweave/skillweave-sdk (branch main, commit 9aeddf6ede84bdc68869cf86e6f5c4318469295c)
+# Verbatim copy of the repository default-branch .ops.yaml taken
+# read-only for the RB-003 parity fixture; nothing was fetched from a
+# forge during the run. The body below the header is byte-for-byte.
+# Layer-3 repository override: the mirror destinations for this repository.
+# The mirror workflow reads this file; no forge repository is restated as a
+# literal in .forgejo/. The forge is a value, not a key name.
+#
+# credential_variable names the environment variable the release workflow
+# exports for that destination. The entry point reads the token by exactly this
+# name, so the declaration and the runner's env cannot drift apart: without it
+# the destination would look for a variable named after the forge.
+destinations:
+  - forge: forgejo
+    repo: skillweave/skillweave-sdk
+    role: release
+    visibility: public
+    credential_variable: FORGEJO_TOKEN
+  - forge: github
+    repo: SkillWeave-AI/skillweave-sdk
+    role: release
+    visibility: public
+    credential_variable: GH_MIRROR_TOKEN
+
+# REA-040: the files this repository's release must carry. The build step in
+# .forgejo/workflows/forgejo-release.yml produces exactly these three names into
+# release-assets/, and ops-engine-release-attach verifies them by reading the
+# release back on every destination.
+#
+# The release block is declared whole, not field by field: Layer 3 replaces the
+# Layer-2 release section whole, so `enabled`/`trigger`/`tag_pattern` are
+# restated deliberately. A block carrying only `assets:` would have disabled
+# the release path it exists to describe.
+#
+# type is the form of the file, not its extension: github_release_zip for the
+# wheel (a ZIP container) and the sdist (a gzipped tar, attached as a
+# release-object file), github_release_tarball for SHA256SUMS, which is a plain
+# text file the release carries. The engine's declared types are the four
+# release-object forms; there is no checksum-specific type, so a checksum file
+# is declared by the form it travels in.
+release:
+  enabled: true
+  trigger: tag_push
+  tag_pattern: "v*"
+  # Matches .version.yaml's product_name and the title gate's rendered
+  # "SkillWeave SDK v0.3.2".
+  name_template: "SkillWeave SDK {tag_name}"
+  assets:
+    - type: github_release_zip
+      name: "skillweave_sdk-<version>-py3-none-any.whl"
+    - type: github_release_zip
+      name: "skillweave_sdk-<version>.tar.gz"
+    - type: github_release_tarball
+      name: "SHA256SUMS"
