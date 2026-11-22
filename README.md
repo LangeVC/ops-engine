@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-3.7.1-blue.svg" alt="Version 3.7.1">
+  <img src="https://img.shields.io/badge/version-3.7.2-blue.svg" alt="Version 3.7.2">
   <img src="https://img.shields.io/badge/python-3.10+-blue.svg" alt="Python 3.10+">
   <img src="https://img.shields.io/badge/License-Apache%202.0-green.svg" alt="License: Apache 2.0">
   <img src="https://img.shields.io/badge/architecture-config--driven-orange.svg" alt="Architecture: Config-Driven">
@@ -15,7 +15,7 @@
 
 > **Repository provenance.** The canonical home of this repository is Forgejo
 > at `git.langevc.com/langevc/ops-engine`. The GitHub repository is a mirror.
-> Release 3.7.1 is published on the canonical Forgejo and on its public mirror,
+> Release 3.7.2 is published on the canonical Forgejo and on its public mirror,
 > the GitHub repository, with the body written on each destination.
 
 ## The Problem
@@ -151,6 +151,34 @@ release:
   changelog_path: "CHANGELOG.md"
   draft: false
 ```
+
+### Release Attach CLI
+
+`ops-engine-release-attach` is the one command a repository workflow calls after
+its build. It finds or creates the release, converges it on every destination,
+attaches the built files and verifies the declared asset set:
+
+```bash
+ops-engine-release-attach --repo org/name --tag vX.Y.Z --artifacts dist/ \
+  --notes-file notes.md
+```
+
+The composed release body carries a CHANGELOG link. That link is derived from
+the forge host the repository declares in its `.ops.yaml` (`forge_hosts[0]`),
+never from `FORGEJO_BASE_URL` — on a runner that variable is the internal
+container address (for example `http://forgejo:3000`) and a link built from it
+would not match the body the layover wrote. Two flags take precedence over the
+derived link:
+
+- `--changelog-url` names the CHANGELOG link explicitly and overrides the value
+  derived from `forge_hosts`.
+- `--body-file` publishes a composed body verbatim, so neither the derived link
+  nor `--changelog-url` reaches it.
+
+With neither a declared `forge_hosts` entry nor `--changelog-url`, the command
+composes no link. If a release already exists with a different body, the
+command refuses and names both inputs that would settle the mismatch:
+`forge_hosts` in `.ops.yaml` and `--changelog-url`.
 
 ### Auto-Merge
 
