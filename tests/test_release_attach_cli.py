@@ -1056,3 +1056,84 @@ def test_the_base_url_is_empty_when_the_environment_names_none(
     capsys.readouterr()
 
     assert seen.get("base_url") == ""
+
+
+# --- RB-004: an undecidable body mismatch names its cause and the remedy ----
+
+
+def _populate_different_body(dest: FakeDestination, body: str) -> None:
+    """An existing release whose body is genuinely not this build's, with the
+    title and assets that do match."""
+    dest.release = {
+        "id": RELEASE_ID,
+        "tag_name": TAG,
+        "name": f"Ops Engine {TAG}",
+        "body": body,
+        "draft": False,
+        "prerelease": False,
+        "assets": [
+            {
+                "id": 900,
+                "name": name,
+                "size": len(CONTENT[name]),
+                "digest": _sha256(CONTENT[name]) if dest.forge == "github" else None,
+            }
+            for name in FILES
+        ],
+    }
+
+
+def test_rb004_notes_differ_names_forgejo_base_url_and_changelog_url(
+    tmp_path, monkeypatch, capsys
+):
+    """RB-004 criterion 1: with no URL available the CLI could not compose a
+    body, so a differing existing body is ``notes differ``; the failure detail
+    must name both inputs that make the layover's body."""
+    monkeypatch.setenv("OPS_TOKEN", "rw-token")
+    monkeypatch.delenv("FORGEJO_BASE_URL", raising=False)
+    dest = FakeDestination(forge="forgejo")
+    _populate_different_body(dest, "A body this build cannot reproduce.\n")
+    _artifacts(tmp_path)
+
+    code = main(
+        _argv(
+            tmp_path, _config_file(tmp_path, "forgejo", assets=DECLARED), body_file=False
+        ),
+        adapters=[_make(dest)],
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code != 0
+    entry = payload["destinations"][0]
+    assert entry["outcome"] == "failed"
+    assert "notes differ" in entry["failure"]
+    assert "FORGEJO_BASE_URL" in entry["failure"]
+    assert "--changelog-url" in entry["failure"]
+    assert dest.writes() == [], "a differing body is never overwritten (D1)"
+
+
+def test_rb004_a_genuinely_different_body_still_refuses_with_a_url_available(
+    tmp_path, monkeypatch, capsys
+):
+    """RB-004 criterion 2: with ``FORGEJO_BASE_URL`` available the CLI can
+    compose; a body that is genuinely not this build's is still refused and
+    nothing is written. The remedy sentence is only for the undecidable case."""
+    monkeypatch.setenv("OPS_TOKEN", "rw-token")
+    monkeypatch.setenv("FORGEJO_BASE_URL", FORGEJO_BASE_URL)
+    dest = FakeDestination(forge="forgejo")
+    _populate_different_body(dest, "An entirely different body.\n")
+    _artifacts(tmp_path)
+
+    code = main(
+        _argv(
+            tmp_path, _config_file(tmp_path, "forgejo", assets=DECLARED), body_file=False
+        ),
+        adapters=[_make(dest)],
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code != 0
+    entry = payload["destinations"][0]
+    assert entry["outcome"] == "failed"
+    assert "the CLI composed no body to compare" not in entry["failure"]
+    assert dest.writes() == [], "a differing body is never overwritten (D1)"

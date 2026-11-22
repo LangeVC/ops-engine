@@ -335,7 +335,7 @@ async def run_attach(
     engine build the shipped HTTP collaborators. ``changelog_url`` is the link
     the engine composes into the body when the caller supplied no body file.
     """
-    return await ReleaseHandler.publish_release(
+    report = await ReleaseHandler.publish_release(
         config,
         repo,
         tag_name,
@@ -354,6 +354,41 @@ async def run_attach(
         base_url=base_url,
         changelog_url=changelog_url,
     )
+    _name_body_mismatch_remedies(
+        report, base_url=base_url, changelog_url=changelog_url,
+        release_body=release_body,
+    )
+    return report
+
+
+def _name_body_mismatch_remedies(
+    report: PublicationReport,
+    *,
+    base_url: str,
+    changelog_url: str,
+    release_body: Optional[str],
+) -> None:
+    """Name the remedy when a body mismatch could not be decided (RB-004).
+
+    When no body was composed — no ``FORGEJO_BASE_URL``, no ``--changelog-url``
+    and no ``--body-file`` — the CLI had nothing to compare an existing
+    release's body against, so the engine reports ``notes differ`` without
+    saying why or what would settle it. This appends the two inputs that make
+    the same body: ``FORGEJO_BASE_URL`` (which the release workflows export)
+    or ``--changelog-url`` (which overrides the derivation). With a URL
+    available or a supplied body, a genuine difference stands on its own and
+    no remedy is added; the engine still refuses and never writes.
+    """
+    if base_url or changelog_url or release_body is not None:
+        return
+    remedy = (
+        "the CLI composed no body to compare because no CHANGELOG link was "
+        "available: set FORGEJO_BASE_URL or pass --changelog-url so the "
+        "layover's composed body is reproduced"
+    )
+    for label, detail in report.failure_details.items():
+        if "notes differ" in detail:
+            report.failure_details[label] = f"{detail} ({remedy})"
 
 
 def _outcome(report: PublicationReport, label: str) -> str:
