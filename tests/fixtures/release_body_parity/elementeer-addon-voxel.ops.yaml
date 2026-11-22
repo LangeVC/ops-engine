@@ -1,0 +1,96 @@
+# Source: elementeer/elementeer-addon-voxel (branch main, commit d0a0d908ff287716e07808b7202dcf472f54cd1d)
+# Verbatim copy of the repository default-branch .ops.yaml taken
+# read-only for the RB-003 parity fixture; nothing was fetched from a
+# forge during the run. The body below the header is byte-for-byte.
+# Layer-3 repository override (DST-002) for elementeer-addon-voxel: the release
+# destinations. The forge is a value, not a key name (DST-001). The engine reads
+# this file through config_loader.load_ops_yaml and resolves BOTH destinations
+# from it; the release object is published by the ops-engine ReleaseHandler, so
+# no destination, forge repository, API host or credential name is restated as
+# a literal in .forgejo/.
+#
+# Visibilities are the MEASURED state of each forge on 2026-11-17, not an
+# inference from the Layer-2 mirror declaration in elementeer-ops/config.yml:
+#   - canonical Forgejo elementeer/elementeer-addon-voxel: PRIVATE.
+#     GET /api/v1/repos/elementeer/elementeer-addon-voxel (authenticated) answers
+#     {"private": true, "internal": false, "default_branch": "main"}; an
+#     anonymous request answers 403.
+#   - GitHub mirror elementeer/elementeer-addon-voxel: PRIVATE.
+#     gh api repos/elementeer/elementeer-addon-voxel answers
+#     {"private": true, "visibility": "private"}.
+#
+# role is release on both entries because the engine publishes release objects
+# only to role: release destinations, and its mirror workflow resolves exactly
+# ONE github destination from this file — a second github entry would be
+# refused as ambiguous.
+#
+# credential_variable is MEASURED on ops-engine 3.6.2, the PRD baseline: each
+# release destination is resolved by this name and falls back to the forge
+# value, and the release workflow supplies the keys FORGEJO_TOKEN and
+# GH_MIRROR_TOKEN. Declaring the names therefore selects the same token the
+# workflow exports; the field is a named no-op validator since P36-020.
+destinations:
+  - forge: forgejo
+    repo: elementeer/elementeer-addon-voxel
+    role: release
+    visibility: private
+    credential_variable: FORGEJO_TOKEN
+  - forge: github
+    repo: elementeer/elementeer-addon-voxel
+    role: release
+    visibility: private
+    credential_variable: GH_MIRROR_TOKEN
+
+# This repository's tracker prefixes, MEASURED in its own history on 2026-11-17
+# rather than copied from another repository:
+#   git log --all --format='%s%n%b' | grep -oE '\b[A-Z]{2,5}-[0-9]+\b' | sort | uniq -c
+#     -> ERF-011 (4), ERF-004 (4), VX-006, OPS-002, INFRA-003, INFRA-002, FILL-001, ADR-0001
+# The release workflow reads them from here and hands them to the audience
+# gate, so no workflow carries a vocabulary as a literal. Only prefixes
+# measured in this repository's own history are declared; an empty list would
+# refuse nothing, and an invented one would refuse notes that name none of it.
+# Must stay on ONE line — the extractor reads a single `tracker_prefixes:` line.
+tracker_prefixes: [ADR, ERF, FILL, INFRA, OPS, VX]
+
+# The organisation's canonical forge host (REL-023). The release gate reads it
+# from here and hands it to the destination/host boundary gate, so a hardcoded
+# canonical host in a workflow is refused rather than a runner-internal
+# container address. A dotless entry is refused by name. Keep the declaration
+# on exactly ONE line: the extractor reads a single `forge_hosts:` line.
+forge_hosts: [git.langevc.com]
+
+# The release block (REA-041): the ZIP this repository builds, declared where the
+# engine reads it. A Layer-3 `release:` key REPLACES the layering release block
+# wholesale (config_loader.merge_layer3 copies whole model fields), so the block
+# is declared whole, not just its assets. `release.assets` is the declaration
+# REA-014 verifies: after publishing, the handler reads the release back and
+# records `"<name> sha256:<hex>"` per asset, and fails the destination by name if
+# a declared asset is absent. type github_release_zip is the only type
+# _RELEASE_ASSET_TYPES verifies on read-back.
+#
+# The name form is the file name MEASURED on both forges for v1.1.3
+# (elementeer-addon-voxel.1.1.3.zip, 19175 B) on 2026-11-18. `_render_asset_name`
+# substitutes <version> with the tag minus its leading "v" and <tag> with the tag
+# verbatim; scripts/create-plugin-zip.sh names the file with the bare version, so
+# the declaration uses <version>.
+#
+# name_template matches the title the engine has already published on both
+# forges ("Elementeer Voxel Addon v1.1.3"); the CLI passes it to
+# render_release_name verbatim, so it is the release title and not a gate.
+release:
+  enabled: true
+  trigger: tag_push
+  tag_pattern: "v*"
+  name_template: "Elementeer Voxel Addon {tag_name}"
+  assets:
+    - type: github_release_zip
+      name: "elementeer-addon-voxel.<version>.zip"
+
+# Deliberately NOT declared here:
+#   - release_body_install_block / release_body_assets_line: per-repository
+#     business data (P36-017). Empty means the body carries no Install section
+#     and no assets line rather than an engine default.
+#   - visibility_candidate_globs / visibility_exceptions: the Layer-2 entry in
+#     elementeer-ops/config.yml owns them; a Layer-3 list would REPLACE that
+#     list on merge. Both measured destinations are private, so the D14 check
+#     has no public destination to refuse.
