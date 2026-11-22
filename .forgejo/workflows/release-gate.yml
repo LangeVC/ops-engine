@@ -174,12 +174,19 @@ jobs:
           fi
           candidate="$(git rev-parse "refs/tags/${TAG_NAME}^{}")"
           echo "e2e-verdict-gate: candidate ${TAG_NAME} peels to ${candidate}"
-          if [[ ! -f "$VERDICT_PATH" ]] \
-             && git remote get-url origin >/dev/null 2>&1; then
+          # The default branch is where the verdict lives. A file in the tag's
+          # own tree is an older verdict that was committed with an earlier
+          # release, so it is only used when the default branch has none that
+          # names this candidate.
+          if git remote get-url origin >/dev/null 2>&1; then
             git fetch --quiet --no-tags origin "$DEFAULT_BRANCH" || true
             if git cat-file -e "FETCH_HEAD:${VERDICT_PATH}" 2>/dev/null; then
-              git show "FETCH_HEAD:${VERDICT_PATH}" > "$VERDICT_PATH"
-              echo "e2e-verdict-gate: read ${VERDICT_PATH} from origin/${DEFAULT_BRANCH}"
+              if [[ ! -f "$VERDICT_PATH" ]] \
+                 || git show "FETCH_HEAD:${VERDICT_PATH}" \
+                      | grep -q "\"candidate_sha\": \"${candidate}\""; then
+                git show "FETCH_HEAD:${VERDICT_PATH}" > "$VERDICT_PATH"
+                echo "e2e-verdict-gate: read ${VERDICT_PATH} from origin/${DEFAULT_BRANCH}"
+              fi
             fi
           fi
           python3 scripts/e2e_verdict_gate.py \
