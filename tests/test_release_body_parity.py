@@ -50,12 +50,18 @@ layover's canonical link — the same body the workflow reproduces. Both cases
 are proven below; ``test_the_derivation_uses_the_declared_forge_host_not_the_base_url``
 shows the derivation reads ``forge_hosts`` and ignores ``FORGEJO_BASE_URL``.
 
-RED proof (RB-003 criterion 3): against the RB-001 base (90dc06d) the attach
-path has no CHANGELOG link derivation at all, so its effective body stays
-``None`` and the existing release is refused as ``notes differ from the notes of
-this build``. Since no fixture declares an install block or assets line, the
+RED proof (RB-003 criterion 3): against the RB-001 base (90dc06d) all eight
+tests fail with exit 1. The base attach path has no ``--changelog-url`` flag and
+reads no ``forge_hosts``, so it composes no body (``effective_body`` stays
+``None``). The three shapes whose fixtures declare no ``forge_hosts`` are driven
+with ``--changelog-url``, which the base parser does not define, so argparse
+exits 2 (``unrecognized arguments``). The three elementeer shapes need no flag:
+the command parses and creates each release with the raw notes as its body
+(``- A feature.\\n\\n- A fix.``) instead of the layover's composed body
+(``## <title>\\n\\n<notes>\\n\\nSee [CHANGELOG.md](...)``), so the byte-equality
+assertion fails. Since no fixture declares an install block or assets line, the
 criterion's named subset is empty; the failure is proven for all six on the
-missing-CHANGELOG-link reason instead — the reason is recorded, not forced.
+missing-composed-body reason instead — the reason is recorded, not forced.
 
 The fakes are real adapters over ``httpx.MockTransport``, the idiom
 ``test_release_attach_cli.py`` and ``test_release_attach_composed_body.py``
@@ -498,7 +504,6 @@ def test_under_the_runner_base_url_the_two_paths_agree(
     RB-002b derives the link from the declared host and ignores the base URL.
     """
     shape = "elementeer-bridge"
-    repo = SHAPES[shape]["repo"]
     repo_dir = tmp_path / "repo"
     repo_dir.mkdir()
     (repo_dir / ".ops.yaml").write_text(_fixture_text(shape), encoding="utf-8")
