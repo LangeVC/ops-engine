@@ -36,6 +36,7 @@ import pytest
 from ops_engine.adapters.forgejo_adapter import ForgejoAdapter
 from ops_engine.adapters.github_adapter import GithubAdapter
 from ops_engine.config_loader import OpsEngineConfig
+from ops_engine.modules.release import compose_release_body
 from ops_engine.release_attach import main, render_report, run_attach
 
 REPO = "langevc/ops-engine"
@@ -673,6 +674,114 @@ async def test_a_superseded_skipped_line_does_not_survive_a_verify_failure(tmp_p
     assert "not-built-3.5.1.zip" in label_lines[0]
 
 
+# --- RB-002: the CLI composes the body the layover composes -----------------
+
+FORGEJO_BASE_URL = "https://git.langevc.com"
+DERIVED_CHANGELOG_URL = f"{FORGEJO_BASE_URL}/{REPO}/src/tag/{TAG}/CHANGELOG.md"
+INSTALL_BLOCK = "pip install ops-engine"
+
+
+def _composed(*, url: str = "", install_block: str = "") -> str:
+    return compose_release_body(
+        REPO,
+        TAG,
+        NOTES,
+        name_template=TEMPLATE,
+        install_block=install_block,
+        changelog_url=url,
+    )
+
+
+def test_the_cli_derives_the_changelog_link_from_the_base_url(
+    tmp_path, monkeypatch, capsys
+):
+    """RB-002 criterion: with ``FORGEJO_BASE_URL`` set and no body file, the
+    command composes the body the layover would have composed — including the
+    CHANGELOG link derived the way the layover derives it."""
+    monkeypatch.setenv("OPS_TOKEN", "rw-token")
+    monkeypatch.setenv("FORGEJO_BASE_URL", FORGEJO_BASE_URL)
+    dest = FakeDestination(forge="forgejo")
+    _artifacts(tmp_path)
+
+    code = main(
+        _argv(
+            tmp_path, _config_file(tmp_path, "forgejo", assets=DECLARED), body_file=False
+        ),
+        adapters=[_make(dest)],
+    )
+
+    assert code == 0, capsys.readouterr().out
+    assert dest.release["body"] == _composed(url=DERIVED_CHANGELOG_URL)
+
+
+def test_an_explicit_changelog_url_overrides_the_derivation(
+    tmp_path, monkeypatch, capsys
+):
+    """RB-002 criterion: ``--changelog-url`` wins over the derived link, so a
+    host the derivation would not name is still composed as declared."""
+    monkeypatch.setenv("OPS_TOKEN", "rw-token")
+    monkeypatch.setenv("FORGEJO_BASE_URL", FORGEJO_BASE_URL)
+    override = "https://elsewhere.invalid/notes.md"
+    dest = FakeDestination(forge="forgejo")
+    _artifacts(tmp_path)
+
+    argv = _argv(
+        tmp_path, _config_file(tmp_path, "forgejo", assets=DECLARED), body_file=False
+    )
+    argv += ["--changelog-url", override]
+    code = main(argv, adapters=[_make(dest)])
+
+    assert code == 0, capsys.readouterr().out
+    assert dest.release["body"] == _composed(url=override)
+    assert DERIVED_CHANGELOG_URL not in dest.release["body"]
+
+
+def test_a_body_file_wins_over_the_derivation(tmp_path, monkeypatch, capsys):
+    """RB-002 criterion: a supplied ``--body-file`` is published verbatim, so
+    neither ``FORGEJO_BASE_URL`` nor the derived link reaches the release."""
+    monkeypatch.setenv("OPS_TOKEN", "rw-token")
+    monkeypatch.setenv("FORGEJO_BASE_URL", FORGEJO_BASE_URL)
+    dest = FakeDestination(forge="forgejo")
+    _artifacts(tmp_path)
+
+    code = main(
+        _argv(
+            tmp_path, _config_file(tmp_path, "forgejo", assets=DECLARED), body_file=True
+        ),
+        adapters=[_make(dest)],
+    )
+
+    assert code == 0, capsys.readouterr().out
+    assert dest.release["body"] == BODY
+    assert DERIVED_CHANGELOG_URL not in dest.release["body"]
+
+
+def test_an_empty_base_url_invents_no_link(tmp_path, monkeypatch, capsys):
+    """RB-002 criterion: with ``FORGEJO_BASE_URL`` absent and no flag, the
+    behaviour is exactly 3.7.1 — the composer still writes the declared parts
+    but omits the link, and no URL is invented."""
+    monkeypatch.setenv("OPS_TOKEN", "rw-token")
+    monkeypatch.delenv("FORGEJO_BASE_URL", raising=False)
+    dest = FakeDestination(forge="forgejo")
+    _artifacts(tmp_path)
+
+    code = main(
+        _argv(
+            tmp_path,
+            _config_file(
+                tmp_path, "forgejo", assets=DECLARED, install_block=INSTALL_BLOCK
+            ),
+            body_file=False,
+        ),
+        adapters=[_make(dest)],
+    )
+
+    assert code == 0, capsys.readouterr().out
+    assert dest.release["body"] == _composed(url="", install_block=INSTALL_BLOCK)
+    assert "CHANGELOG.md" not in dest.release["body"]
+    assert "### Install" in dest.release["body"]
+
+
 # --- Named input errors are the usage exit code, never a traceback ----------
 
 
@@ -704,6 +813,27 @@ def test_an_unreadable_config_is_a_named_usage_error(tmp_path, capsys):
 
     assert code == 2
     assert payload["error"].startswith("cannot load config")
+
+
+def test_an_undeclared_org_is_a_named_usage_error_not_a_traceback(
+    tmp_path, monkeypatch, capsys
+):
+    """Exit 2: deriving the CHANGELOG link reads the config before the run
+    does; a config that does not declare the requested org is still reported
+    as the documented named usage error, never a traceback."""
+    monkeypatch.setenv("OPS_TOKEN", "rw-token")
+    monkeypatch.setenv("FORGEJO_BASE_URL", FORGEJO_BASE_URL)
+    _artifacts(tmp_path)
+    argv = _argv(tmp_path, _config_file(tmp_path, "forgejo"), body_file=False)
+    argv[argv.index("--repo") + 1] = "other/thing"
+
+    code = main(argv, adapters=[])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 2
+    assert payload["ok"] is False and payload["exit_code"] == 2
+    assert payload["error"].startswith("ConfigSectionError:")
+    assert "no org named 'other'" in payload["error"]
 
 
 # --- REA-017: the pull, the free space and the pending pieces in the report -
