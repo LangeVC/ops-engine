@@ -1,0 +1,66 @@
+# Source: elementeer/elementeer-bridge (branch main, commit 73af4a07b1888f3c65c76ed5f0a7d39c2aa5c350)
+# Verbatim copy of the repository default-branch .ops.yaml taken
+# read-only for the RB-003 parity fixture; nothing was fetched from a
+# forge during the run. The body below the header is byte-for-byte.
+# Layer-3 repository override (DST-002): the release destinations for elementeer-bridge.
+# The forge is a value, not a key name (DST-001). The engine reads this file via
+# config_loader.load_ops_yaml and resolves BOTH destinations from it; no
+# destination, forge repository, host or credential name is restated as a
+# literal in .forgejo/.
+#
+# Before this file existed, tagging v0.3.1 (2026-11-15) raised MissingOpsYamlError
+# three times and the event was dead-lettered: the engine reads .ops.yaml at the
+# tag before it resolves any destination, so the tag exists on Forgejo and there
+# is no release object.
+#
+# Visibilities are the MEASURED state of each forge on 2026-11-17, not an
+# inference from the mirror declaration in elementeer-ops/config.yml:
+#   - canonical Forgejo elementeer/elementeer-bridge: PRIVATE.
+#     GET /api/v1/repos/elementeer/elementeer-bridge (authenticated) answers
+#     {"private": true, "internal": false}; an anonymous request answers 403,
+#     as it does for the known-private fusionaize/faigrid.
+#   - GitHub mirror elementeer/elementeer-bridge: PRIVATE.
+#     The anonymous GitHub API answers 404 (a public repository would answer
+#     200), and the layover elementeer-ops/config.yml declares this mirror
+#     `visibility: private`; the header of that file lists bridge among the
+#     PRIVATE GitHub repos. The mirror workflow's fixed secret is GH_MIRROR_TOKEN.
+#
+# The two layers keep different roles and are not duplicates: the Layer-2 entry
+# in elementeer-ops/config.yml is the `mirror` destination the visibility gate
+# judges and the layover pushes; these entries are the `release` destinations
+# publish_release writes, the only role _release_tag resolves with.
+destinations:
+  - forge: forgejo
+    repo: elementeer/elementeer-bridge
+    role: release
+    visibility: private
+    credential_variable: FORGEJO_TOKEN
+  - forge: github
+    repo: elementeer/elementeer-bridge
+    role: release
+    visibility: private
+    credential_variable: GH_MIRROR_TOKEN
+
+# The organisation's canonical forge host (REL-023). The release gate reads it
+# from here and hands it to the destination/host boundary gate, so a hardcoded
+# canonical host in a workflow is refused rather than a runner-internal
+# container address (github.server_url resolves to http://forgejo:3000 on the
+# runner, which is not the organisation's forge). A dotless entry is refused by
+# name. Keep the declaration on exactly one line: the extractor reads a single
+# `forge_hosts:` line.
+forge_hosts: [git.langevc.com]
+
+# Deliberately NOT declared here:
+#   - tracker_prefixes: the engine's audience gate refuses nothing when the
+#     list is empty, which is the documented default. The release body is
+#     sliced from CHANGELOG.md, so the vocabulary that gate should refuse is a
+#     business decision for the owner, not a value to copy from elementeer-ops'
+#     layover-level `ticket_prefixes` (a different gate, read by
+#     src/config_parser.py).
+#   - release_body_install_block / release_body_assets_line: per-repository
+#     business data (P36-017). Empty means the body carries no Install section
+#     and no assets line rather than an engine default.
+#   - visibility_candidate_globs / visibility_exceptions: the Layer-2 entry in
+#     elementeer-ops/config.yml owns them; a Layer-3 list would REPLACE that
+#     list on merge, and the globs must cover the mirror destination the gate
+#     judges.
