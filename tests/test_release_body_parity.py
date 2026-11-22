@@ -48,9 +48,10 @@ host and FORGEJO_BASE_URL name the same host in the deployed config? **No.**
     for exactly this reason).
 
 They differ. RB-002's derivation does not read the declared canonical host:
-``_resolve_changelog_url`` builds the link from ``FORGEJO_BASE_URL`` alone, and
-the config loader ignores the ``forge_hosts`` key (it is not a
-``RepoConfig``/``OpsEngineConfig`` field). With the deployed
+``_resolve_changelog_url`` builds the link from ``FORGEJO_BASE_URL`` alone;
+``forge_hosts`` appears nowhere in ``src/`` (grep: 0 matches) and the config
+loader parses no such field, so a repository's declaration cannot reach the
+derivation. With the deployed
 ``FORGEJO_BASE_URL`` (``http://forgejo:3000``) the attach path therefore
 composes a different CHANGELOG link than the layover, and the bodies disagree.
 
