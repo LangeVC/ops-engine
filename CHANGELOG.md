@@ -1,5 +1,12 @@
 # Changelog
 
+## 3.7.3
+
+`ops-engine-release-attach` retitled an existing release when a workflow called it without `--name-template`, even when the repository declares its own `release.name_template`. The command passed the derived default `{repo_name} {tag_name}` in place of an absent flag, so an attach that should keep a declared title rewrote it to the default — measured on the first elementeer-pro backfill, where both release titles were replaced and had to be restored by hand.
+
+- An absent `--name-template` now follows the declared template, resolved in the order the layover uses: the flag, then the Layer-3 `release.name_template` from the repository's `.ops.yaml`, then the Layer-2 `release.name_template`, then the default. The two `release` blocks are read separately, never merged: a Layer-3 `release:` block that omits `name_template` leaves the Layer-2 template in force. A caller that passes the flag is unchanged; a caller that omits it and declares a template keeps the declared title instead of the derived default.
+- A declaration that cannot be read is a usage error naming the failure, never a silent default, so a broken `.ops.yaml` cannot leave the author believing the declared template is in force.
+
 ## 3.7.2
 
 `ops-engine-release-attach` now composes the release body itself when a workflow passes only the tag's notes. A release the layover created first carries the composed body — heading, CHANGELOG section, an optional install block and assets line, and a CHANGELOG link — while the command sent raw notes, so the existing release was refused with "notes differ" and a workflow-shaped release could not supplement it on either forge.
