@@ -4,7 +4,7 @@
 
 `ops-engine-release-attach` retitled an existing release when a workflow called it without `--name-template`, even when the repository declares its own `release.name_template`. The command passed the derived default `{repo_name} {tag_name}` in place of an absent flag, so an attach that should keep a declared title rewrote it to the default — measured on the first elementeer-pro backfill, where both release titles were replaced and had to be restored by hand.
 
-- An absent `--name-template` now follows the declared template, resolved in the order the layover uses: the flag, then the merged Layer-3 `release.name_template` from the repository's `.ops.yaml`, then the Layer-2 `release.name_template`, then the default. A caller that passes the flag is unchanged; a caller that omits it and declares a template keeps the declared title instead of the derived default.
+- An absent `--name-template` now follows the declared template, resolved in the order the layover uses: the flag, then the Layer-3 `release.name_template` from the repository's `.ops.yaml`, then the Layer-2 `release.name_template`, then the default. The two `release` blocks are read separately, never merged: a Layer-3 `release:` block that omits `name_template` leaves the Layer-2 template in force. A caller that passes the flag is unchanged; a caller that omits it and declares a template keeps the declared title instead of the derived default.
 - A declaration that cannot be read is a usage error naming the failure, never a silent default, so a broken `.ops.yaml` cannot leave the author believing the declared template is in force.
 
 ## 3.7.2
