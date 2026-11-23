@@ -42,6 +42,10 @@ DECLARED_TEMPLATE = "Declared Title {tag_name}"
 DECLARED_TITLE = "Declared Title v1.2.3"
 EXPLICIT_TEMPLATE = "Explicit Title {tag_name}"
 EXPLICIT_TITLE = "Explicit Title v1.2.3"
+# A Layover (Layer-2) config declares the product title; the repository's
+# .ops.yaml enables releases but declares no template of its own.
+LAYER2_TEMPLATE = "Layer2 Title {tag_name}"
+LAYER2_TITLE = "Layer2 Title v1.2.3"
 # ``DEFAULT_NAME_TEMPLATE`` renders this for the repo below: no product prefix.
 DEFAULT_TITLE = "ops-engine v1.2.3"
 NOTES = "- A feature.\n\n- A fix.\n"
@@ -300,6 +304,61 @@ def test_without_a_declaration_and_a_flag_the_default_is_used(
     assert payload["ok"] is True
     assert dest.release["name"] == DEFAULT_TITLE
     assert dest.writes() == [], "the default title is already in place"
+
+
+def test_the_layer2_template_survives_a_layer3_release_block_without_one(
+    tmp_path, monkeypatch, capsys
+):
+    """A Layer-3 ``release:`` block that omits ``name_template`` must not drop
+    the Layer-2 template.
+
+    ``merge_layer3`` merges field by field at whole-block granularity: a
+    Layer-3 ``release:`` mapping replaces the Layer-2 one outright, so merging
+    and then reading ``release.name_template`` loses a Layer-2 template. The
+    layover does not merge for the title (``release.py``): it reads the Layer-3
+    block's ``name_template`` and, only when that is absent, the Layer-2
+    release block's. The attach command must resolve the same order, so a
+    repository whose ``.ops.yaml`` merely enables releases keeps the title its
+    Layover config declares.
+    """
+    monkeypatch.setenv("OPS_TOKEN", "rw-token")
+    # Layer 3 declares a release block but no name_template.
+    (tmp_path / ".ops.yaml").write_text(
+        "\n".join(["release:", "  enabled: true"]) + "\n", encoding="utf-8"
+    )
+    config = tmp_path / "config.yml"
+    config.write_text(
+        "\n".join(
+            [
+                "orgs:",
+                "  langevc:",
+                "    repositories:",
+                "      ops-engine:",
+                "        destinations:",
+                "          - forge: forgejo",
+                f"            repo: {REPO}",
+                "            role: release",
+                "            credential_variable: OPS_TOKEN",
+                "        release:",
+                "          enabled: true",
+                f"          name_template: '{LAYER2_TEMPLATE}'",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _artifacts(tmp_path)
+    dest = FakeDestination(title=LAYER2_TITLE)
+
+    code = main(
+        ["--config", str(config), *_argv(tmp_path)], adapters=[_adapter(dest)]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 0, payload
+    assert payload["ok"] is True
+    assert dest.release["name"] == LAYER2_TITLE
+    assert dest.writes() == [], "the Layer-2 title must be left untouched"
 
 
 def test_an_unreadable_declaration_is_a_named_usage_error(
