@@ -182,7 +182,7 @@ def request_from_args(
         tag_name=args.tag,
         artifact_dir=artifact_dir,
         repo_dir=repo_dir,
-        name_template=args.name_template or DEFAULT_NAME_TEMPLATE,
+        name_template=_resolve_name_template(args, config, repo_dir),
         notes=notes,
         release_body=release_body,
         ticket_prefixes=list(args.ticket_prefix) if args.ticket_prefix else None,
@@ -190,6 +190,45 @@ def request_from_args(
         base_url=(env.get("FORGEJO_BASE_URL") or "").strip(),
         changelog_url=_resolve_changelog_url(args, config, env, repo_dir),
     )
+
+
+def _resolve_name_template(
+    args: argparse.Namespace, config: OpsEngineConfig, repo_dir: Path
+) -> str:
+    """The release title template, in the order the layover resolves it (OE-101).
+
+    Precedence (D2): ``--name-template``, then the ``.ops.yaml``
+    ``release.name_template``, then the layer the layover config declares
+    (Layer 2 ``release.name_template``), then :data:`DEFAULT_NAME_TEMPLATE`.
+    This is exactly ``_release_tag``'s order (``release.py``): it reads
+    ``context.name_template``, then the Layer-3 release block, then the
+    ``ReleaseConfig`` it was called with, then the default.
+
+    The three are read SEPARATELY, never merged: ``merge_layer3`` replaces a
+    top-level field the Layer-3 file sets, so a ``release:`` block in the
+    ``.ops.yaml`` that omits ``name_template`` would replace the whole Layer-2
+    release block and drop its template. The layover reads the two blocks side
+    by side for the title, and so does this command.
+
+    A declaration that cannot be read is a named usage error, never a silent
+    default: an ignored broken ``.ops.yaml`` would leave the author believing
+    the declared template is in force.
+    """
+    if args.name_template:
+        return args.name_template
+    org, _, name = args.repo.partition("/")
+    try:
+        layer2 = config.get_repo_config(org, name)
+        layer3 = load_ops_yaml(repo_dir)
+    except Exception as exc:  # noqa: BLE001 (a usage error, reported by name)
+        raise AttachUsageError(f"{type(exc).__name__}: {exc}") from exc
+    layer3_release = layer3.release if layer3 is not None else None
+    layer2_release = layer2.release
+    declared = (
+        (layer3_release.name_template if layer3_release is not None else None)
+        or (layer2_release.name_template if layer2_release is not None else None)
+    )
+    return declared or DEFAULT_NAME_TEMPLATE
 
 
 def _resolve_changelog_url(
