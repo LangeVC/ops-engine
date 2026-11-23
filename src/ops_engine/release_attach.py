@@ -197,11 +197,18 @@ def _resolve_name_template(
 ) -> str:
     """The release title template, in the order the layover resolves it (OE-101).
 
-    Precedence (D2): ``--name-template``, then the merged declaration
-    (Layer 2 ``release.name_template`` unless the ``.ops.yaml`` in ``repo_dir``
-    sets it), then :data:`DEFAULT_NAME_TEMPLATE`. The layover resolves the same
-    three in the same order (``release.py``); a run without the flag therefore
-    keeps the title the repository declared instead of the derived default.
+    Precedence (D2): ``--name-template``, then the ``.ops.yaml``
+    ``release.name_template``, then the layer the layover config declares
+    (Layer 2 ``release.name_template``), then :data:`DEFAULT_NAME_TEMPLATE`.
+    This is exactly ``_release_tag``'s order (``release.py``): it reads
+    ``context.name_template``, then the Layer-3 release block, then the
+    ``ReleaseConfig`` it was called with, then the default.
+
+    The three are read SEPARATELY, never merged: ``merge_layer3`` replaces a
+    top-level field the Layer-3 file sets, so a ``release:`` block in the
+    ``.ops.yaml`` that omits ``name_template`` would replace the whole Layer-2
+    release block and drop its template. The layover reads the two blocks side
+    by side for the title, and so does this command.
 
     A declaration that cannot be read is a named usage error, never a silent
     default: an ignored broken ``.ops.yaml`` would leave the author believing
@@ -215,11 +222,11 @@ def _resolve_name_template(
         layer3 = load_ops_yaml(repo_dir)
     except Exception as exc:  # noqa: BLE001 (a usage error, reported by name)
         raise AttachUsageError(f"{type(exc).__name__}: {exc}") from exc
-    if layer3 is not None:
-        layer2 = layer2.merge_layer3(layer3)
-    release_config = layer2.release
+    layer3_release = layer3.release if layer3 is not None else None
+    layer2_release = layer2.release
     declared = (
-        release_config.name_template if release_config is not None else None
+        (layer3_release.name_template if layer3_release is not None else None)
+        or (layer2_release.name_template if layer2_release is not None else None)
     )
     return declared or DEFAULT_NAME_TEMPLATE
 
