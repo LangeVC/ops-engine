@@ -306,14 +306,41 @@ def test_an_unreadable_declaration_is_a_named_usage_error(
     tmp_path, monkeypatch, capsys
 ):
     """A malformed ``.ops.yaml`` is a usage error naming the file, not a silent
-    default. ``--body-file`` keeps the changelog derivation from reading the
-    config first, so the title resolution is the reader under test."""
+    default.
+
+    The run takes a Layer-2 ``--config`` (so ``request_from_args`` does not read
+    ``.ops.yaml`` to resolve destinations) and no ``--name-template``: the only
+    reader of ``.ops.yaml`` is the title resolution, which must refuse by name
+    instead of falling back to the default.
+    """
     monkeypatch.setenv("OPS_TOKEN", "rw-token")
     (tmp_path / ".ops.yaml").write_text("release: [\n", encoding="utf-8")
+    config = tmp_path / "config.yml"
+    config.write_text(
+        "\n".join(
+            [
+                "orgs:",
+                "  langevc:",
+                "    repositories:",
+                "      ops-engine:",
+                "        destinations:",
+                "          - forge: forgejo",
+                f"            repo: {REPO}",
+                "            role: release",
+                "            credential_variable: OPS_TOKEN",
+                "        release:",
+                "          enabled: true",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     _artifacts(tmp_path)
     dest = FakeDestination(title=DECLARED_TITLE)
 
-    code = main(_argv(tmp_path), adapters=[_adapter(dest)])
+    code = main(
+        ["--config", str(config), *_argv(tmp_path)], adapters=[_adapter(dest)]
+    )
     payload = json.loads(capsys.readouterr().out)
 
     assert code == 2, payload
