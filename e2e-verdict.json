@@ -1,33 +1,33 @@
 {
-  "candidate_sha": "d4d18a37f7754723a1d4ff66aabc9bd407fa84d2",
-  "result": "green",
-  "runs": [
-    {
-      "name": "run1",
-      "ok": true
-    },
-    {
-      "name": "run2",
-      "ok": true
-    },
-    {
-      "name": "run3",
-      "ok": true
-    },
-    {
-      "name": "negative-control",
-      "ok": false,
-      "expected": "red",
-      "names_file": "release-e2e-0.1.6.zip"
-    },
-    {
-      "name": "base-3.7.1",
-      "ok": false,
-      "expected": "red",
-      "names": "notes differ from the notes of this build"
-    }
-  ],
-  "engine": "ops-engine 3.7.2 wheel built from d4d18a3 (sha256 d69661bd14fde967b4e5dd6aea6b85a0d473963b3f63f2e0b49a0f4d86c74bb5)",
-  "harness": "release-e2e main 4923dc55c835064464f6dfc3ff68f640501955aa, ordering runner-attach (the sixth), live on both forges",
-  "produced_at": "2026-11-22T19:51:45Z"
+ "candidate_sha": "10e7348721c754f984802c7bb5a4172267efc875",
+ "result": "green",
+ "runs": [
+  {
+   "name": "run1",
+   "ok": true
+  },
+  {
+   "name": "run2",
+   "ok": true
+  },
+  {
+   "name": "run3",
+   "ok": true
+  },
+  {
+   "name": "negative-control",
+   "ok": false,
+   "expected": "red",
+   "names_title": "release-e2e v0.1.7 instead of the declared Release E2E v0.1.7"
+  },
+  {
+   "name": "base-3.7.2",
+   "ok": false,
+   "expected": "red",
+   "names": "the attach without --name-template resolved the derived default and retitled the release"
+  }
+ ],
+ "engine": "ops-engine 3.7.3 wheel built from 10e7348 (sha256 865fdd6f15b525123b3b5fc7f40193afd959be50244be8c4dab8c15668798959)",
+ "harness": "release-e2e main 5da8b2d2, ordering declared-template (the seventh), live on both forges",
+ "produced_at": "2026-11-23T16:08:00Z"
 }
