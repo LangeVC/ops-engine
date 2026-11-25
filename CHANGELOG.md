@@ -1,5 +1,12 @@
 # Changelog
 
+## 3.7.4
+
+The Forgejo pull skipped a GitHub destination whose repository name differed from the Forgejo one only in letter case. The pull paired the two destinations by an exact string comparison, so `capacium/capacium` on Forgejo never matched `Capacium/capacium` on GitHub, and it then asked GitHub for the Forgejo spelling. A repository spelled differently on the two forges therefore mirrored nothing, silently.
+
+- Destinations that differ only in case are now paired by the Forgejo pull. `capacium/capacium` pairs with `Capacium/capacium`, and `langevc/release-e2e` pairs with `LangeVC/release-e2e`; the comparison is on the repository path alone, ignoring case. Names that differ beyond case still do not pair, so an unrelated destination is never selected.
+- The GitHub adapter is called with the GitHub destination's own repository spelling for the release lookup, the asset listing and the download, instead of the Forgejo spelling it was given.
+
 ## 3.7.3
 
 `ops-engine-release-attach` retitled an existing release when a workflow called it without `--name-template`, even when the repository declares its own `release.name_template`. The command passed the derived default `{repo_name} {tag_name}` in place of an absent flag, so an attach that should keep a declared title rewrote it to the default — measured on the first elementeer-pro backfill, where both release titles were replaced and had to be restored by hand.
