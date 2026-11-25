@@ -2062,23 +2062,29 @@ async def _pull_github_assets(
             pair
             for pair in paired
             if pair[0].forge == "github"
-            and pair[0].repo == destination.repo
+            and pair[0].repo.casefold() == destination.repo.casefold()
         ),
         None,
     )
     if github is None:
         return
-    github_adapter = github[1]
+    github_destination, github_adapter = github
+    # One repository path, two spellings: the Forgejo destination may carry
+    # ``capacium/capacium`` where GitHub carries ``Capacium/capacium``. The
+    # pairing ignores case, and every GitHub call then uses the GitHub
+    # destination's OWN ``repo`` — the path the GitHub API knows, never the
+    # string the Forgejo destination happens to carry.
+    github_repo = github_destination.repo
     try:
         found = await adapter.find_release(destination.repo, tag_name)
         if not isinstance(found, dict) or found.get("id") is None:
             return
         target_id = found["id"]
-        gh_found = await github_adapter.find_release(destination.repo, tag_name)
+        gh_found = await github_adapter.find_release(github_repo, tag_name)
         if not isinstance(gh_found, dict) or gh_found.get("id") is None:
             return
         gh_assets = await github_adapter.list_release_assets(
-            destination.repo, gh_found["id"]
+            github_repo, gh_found["id"]
         )
         target_assets = await adapter.list_release_assets(
             destination.repo, target_id
@@ -2112,7 +2118,7 @@ async def _pull_github_assets(
             # Not on GitHub yet: the manifest's pending judgement owns it.
             continue
         try:
-            data = await downloader.download(github_adapter, destination.repo, source)
+            data = await downloader.download(github_adapter, github_repo, source)
         except Exception as exc:  # noqa: BLE001 (record — the report, not abort)
             problems.append(f"{name} download failed ({exc})")
             continue
