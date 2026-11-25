@@ -22,25 +22,47 @@ import httpx
 
 
 class HttpxAssetDownloader:
-    """Download one release asset by its API ``url``.
+    """Download one release asset by its API ``url`` or ``browser_download_url``.
 
-    The request carries the source adapter's own credential, so the engine
-    reads GitHub with its GitHub token and nothing else. ``GET`` only: the
-    source forge is never written. Redirects are followed (GitHub serves the
-    download itself through one).
+    A GitHub asset carries an API ``url`` (``/releases/assets/<id>``), which is
+    read with the octet-stream header. A Forgejo asset carries only a
+    ``browser_download_url`` and no ``url`` (measured on the OE-204 live probe,
+    ``upload failed ('url')``), so the downloader reads that instead. The
+    request carries the source adapter's own credential either way, so the
+    engine reads each forge with its own token and nothing else.
+
+    ``GET`` only: the source forge is never written. Redirects are followed
+    (GitHub serves the download itself through one); ``httpx`` drops the
+    ``Authorization`` header when a redirect crosses to another host, so the
+    credential never travels to a host it was not issued for.
     """
 
     def __init__(self, client: Optional[httpx.AsyncClient] = None) -> None:
         self._client = client
 
     async def download(self, adapter, repo: str, asset: dict) -> bytes:
-        url = asset["url"]
+        url = asset.get("url") or asset.get("browser_download_url")
+        if not url:
+            name = asset.get("name") or "<unnamed asset>"
+            raise ValueError(
+                f"cannot download {name}: the asset carries neither a url nor "
+                f"a browser_download_url"
+            )
+        # A relative browser_download_url (Forgejo may serve one) resolves
+        # against the adapter's own base URL, never against a host the engine
+        # guesses.
+        if not url.startswith(("http://", "https://")):
+            base_url = getattr(adapter, "base_url", "")
+            if base_url:
+                url = str(httpx.URL(base_url).join(url))
         headers = {
             "Authorization": f"token {getattr(adapter, 'token', '')}",
             "Accept": "application/octet-stream",
         }
         if self._client is not None:
-            response = await self._client.get(url, headers=headers)
+            response = await self._client.get(
+                url, headers=headers, follow_redirects=True
+            )
         else:
             async with httpx.AsyncClient(
                 timeout=120.0, follow_redirects=True

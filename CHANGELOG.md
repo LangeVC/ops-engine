@@ -6,6 +6,7 @@ The Forgejo pull skipped a GitHub destination whose repository name differed fro
 
 - Destinations that differ only in case are now paired by the Forgejo pull. `capacium/capacium` pairs with `Capacium/capacium`, and `langevc/release-e2e` pairs with `LangeVC/release-e2e`; the comparison is on the repository path alone, ignoring case. Names that differ beyond case still do not pair, so an unrelated destination is never selected.
 - The GitHub adapter is called with the GitHub destination's own repository spelling for the release lookup, the asset listing and the download, instead of the Forgejo spelling it was given.
+- The pull reads a Forgejo asset back through its `browser_download_url`. A Forgejo asset carries no `url`, so the post-upload read-back failed with `KeyError: 'url'` and the destination ended failed although the file was there. The downloader now reads an asset without a `url` from its `browser_download_url` with the adapter's own credential, resolving relative URLs against the adapter's host and never sending the credential to a different host after a redirect; a GitHub asset keeps using its API `url` with the octet-stream header, and an asset with neither URL fails naming the asset.
 
 ## 3.7.3
 
