@@ -82,14 +82,17 @@ def _config(
     forge: str,
     *,
     second: str | None = None,
+    second_repo: str | None = None,
+    repo_path: str = REPO,
     manifest=None,
     forgejo_assets=None,
     free_space_url=None,
 ) -> OpsEngineConfig:
+    org, _, name = repo_path.partition("/")
     destinations = [
         {
             "forge": forge,
-            "repo": REPO,
+            "repo": repo_path,
             "role": "release",
             "credential_variable": "OPS_TOKEN",
         }
@@ -98,7 +101,7 @@ def _config(
         destinations.append(
             {
                 "forge": second,
-                "repo": REPO,
+                "repo": second_repo or REPO,
                 "role": "release",
                 "credential_variable": "SECOND_TOKEN",
             }
@@ -113,9 +116,9 @@ def _config(
     return OpsEngineConfig.load(
         {
             "orgs": {
-                "langevc": {
+                org: {
                     "repositories": {
-                        "ops-engine": {
+                        name: {
                             "destinations": destinations,
                             "release": release,
                         }
@@ -126,8 +129,9 @@ def _config(
     )
 
 
-def _release_config(config):
-    return config.get_repo_config("langevc", "ops-engine").release
+def _release_config(config, repo: str = REPO):
+    org, _, name = repo.partition("/")
+    return config.get_repo_config(org, name).release
 
 
 class FakeDestination:
@@ -150,8 +154,10 @@ class FakeDestination:
         hidden=(),
         create_status=409,
         digest_override=None,
+        repo: str = REPO,
     ):
         self.forge = forge
+        self.repo = repo
         self.timeline = timeline
         self.created_at = created_at
         self.hidden = set(hidden)
@@ -160,6 +166,9 @@ class FakeDestination:
         self.asset_bytes: dict[str, bytes] = {}
         self.next_id = 900
         self.calls: list[tuple[str, str]] = []
+        # Every repository path this forge was asked for, in call order, so a
+        # test can assert the exact spelling the adapter was called with.
+        self.requested_repos: list[str] = []
         self.uploaded: list[str] = []
         self.release = None
         if preloaded is not None:
@@ -185,7 +194,7 @@ class FakeDestination:
             "name": name,
             "size": len(data),
             "url": (
-                f"https://{self.forge}.invalid/repos/{REPO}"
+                f"https://{self.forge}.invalid/repos/{self.repo}"
                 f"/releases/assets/{self.next_id}"
             ),
         }
@@ -199,6 +208,19 @@ class FakeDestination:
         path = request.url.path
         self.calls.append((request.method, path))
         self.timeline.append((self.forge, request.method, path))
+        # One forge knows one spelling of its repository: a request for any
+        # other path is a 404, so a call made with the wrong spelling shows up
+        # as a missing release instead of a silent success.
+        parts = path.strip("/").split("/")
+        if "repos" in parts:
+            index = parts.index("repos")
+            asked = "/".join(parts[index + 1:index + 3])
+            self.requested_repos.append(asked)
+            if asked != self.repo:
+                return httpx.Response(
+                    404,
+                    json={"message": f"no repository {asked!r} on {self.forge}"},
+                )
         if request.method == "GET" and "/releases/tags/" in path:
             if self.release is None:
                 return httpx.Response(404, json={"message": "not found"})
@@ -269,12 +291,14 @@ class FakeDownloader:
         self.timeline = timeline
         self.reads: list[tuple[str, str]] = []
         self.tokens: list[tuple[str, str]] = []
+        self.repos: list[tuple[str, str]] = []
 
     async def download(self, adapter, repo: str, asset: dict) -> bytes:
         fake = adapter._fake
         name = asset["name"]
         self.reads.append((fake.forge, name))
         self.tokens.append((fake.forge, getattr(adapter, "token", "")))
+        self.repos.append((fake.forge, repo))
         self.timeline.append((fake.forge, "DOWNLOAD", name))
         return fake.asset_bytes[name]
 
@@ -332,12 +356,13 @@ async def _publish(
     downloader=None,
     free_space_reader=None,
     repo_dir=None,
+    repo: str = REPO,
 ):
     _artifacts(tmp_path)
     audit: list[str] = []
     report = await ReleaseHandler.publish_release(
         config,
-        REPO,
+        repo,
         TAG,
         NOTES,
         tmp_path / "dist",
@@ -468,6 +493,134 @@ async def test_a_digest_mismatch_fails_by_name_and_attaches_nothing(tmp_path):
     assert sorted(forgejo.uploaded) == sorted(FILES), (
         "the mismatched bytes are never uploaded: only the build's own files are"
     )
+
+
+# --- OE-201: the pairing follows the repository path, not its spelling -----
+#
+# One repository has one path but two spellings: Forgejo lower-cases the org
+# (``capacium/capacium``) while GitHub keeps its display case
+# (``Capacium/capacium``). The pairing ignores case and then calls GitHub with
+# the GitHub destination's OWN spelling; names that differ beyond case still
+# do not pair.
+
+SPELLING_FORGEJO_REPO = "capacium/capacium"
+SPELLING_GITHUB_REPO = "Capacium/capacium"
+
+SPELLING_MANIFEST = {
+    "assets": [
+        {
+            "type": "github_release_tarball",
+            "name": "ops-engine-tool-<version>-linux-amd64.tar.gz",
+            "producer": "github",
+            "destinations": [
+                f"forgejo:{SPELLING_FORGEJO_REPO}",
+                f"github:{SPELLING_GITHUB_REPO}",
+            ],
+        }
+    ]
+}
+
+
+@pytest.mark.asyncio
+async def test_the_github_adapter_is_called_with_the_github_destinations_own_spelling(
+    tmp_path,
+):
+    """The two spellings pair, and GitHub is asked under its own spelling.
+
+    A Forgejo destination ``capacium/capacium`` and a GitHub destination
+    ``Capacium/capacium`` name the same repository. The piece is read from the
+    GitHub release — whose fake answers 404 for any other path — with the
+    GitHub destination's ``repo``, downloaded under that spelling too, and
+    attached to the Forgejo release. The Forgejo side keeps its own spelling
+    for its own calls.
+    """
+    timeline: list = []
+    forgejo = FakeDestination(
+        forge="forgejo", timeline=timeline, repo=SPELLING_FORGEJO_REPO
+    )
+    github = FakeDestination(
+        forge="github",
+        timeline=timeline,
+        repo=SPELLING_GITHUB_REPO,
+        preloaded={**CONTENT, GITHUB_BINARY: GITHUB_BYTES},
+    )
+    downloader = FakeDownloader(timeline)
+    config = _config(
+        "forgejo",
+        second="github",
+        repo_path=SPELLING_FORGEJO_REPO,
+        second_repo=SPELLING_GITHUB_REPO,
+        manifest=SPELLING_MANIFEST,
+        forgejo_assets="pull",
+    )
+
+    report, _ = await _publish(
+        [forgejo, github],
+        tmp_path,
+        config=config,
+        downloader=downloader,
+        repo=SPELLING_FORGEJO_REPO,
+    )
+
+    label = f"forgejo:{SPELLING_FORGEJO_REPO}"
+    assert report.failed == [], report.failure_details
+    assert GITHUB_BINARY in forgejo.asset_names()
+    assert report.pulled[label] == [f"{GITHUB_BINARY} {_sha256(GITHUB_BYTES)}"]
+
+    # Every GitHub call carried the GitHub destination's own spelling — and
+    # the fake would have answered 404 for the Forgejo one.
+    assert github.requested_repos
+    assert set(github.requested_repos) == {SPELLING_GITHUB_REPO}
+    assert SPELLING_FORGEJO_REPO not in github.requested_repos
+    assert ("github", SPELLING_GITHUB_REPO) in downloader.repos
+
+    # The Forgejo calls keep the Forgejo spelling.
+    assert set(forgejo.requested_repos) == {SPELLING_FORGEJO_REPO}
+
+
+@pytest.mark.asyncio
+async def test_names_that_differ_beyond_case_still_do_not_pair(tmp_path):
+    """A different repository name is a different repository, whatever its case.
+
+    The Forgejo destination is ``capacium/capacium``; the GitHub destination is
+    ``Capacium/capacium-tools`` — the same org, a different repository. Nothing
+    is pulled: no piece is downloaded, nothing is attached to the Forgejo
+    release, and the github-produced piece stays pending as before.
+    """
+    timeline: list = []
+    forgejo = FakeDestination(
+        forge="forgejo", timeline=timeline, repo=SPELLING_FORGEJO_REPO
+    )
+    github = FakeDestination(
+        forge="github",
+        timeline=timeline,
+        repo="Capacium/capacium-tools",
+        preloaded={**CONTENT, GITHUB_BINARY: GITHUB_BYTES},
+    )
+    downloader = FakeDownloader(timeline)
+    config = _config(
+        "forgejo",
+        second="github",
+        repo_path=SPELLING_FORGEJO_REPO,
+        second_repo="Capacium/capacium-tools",
+        manifest=SPELLING_MANIFEST,
+        forgejo_assets="pull",
+    )
+
+    report, _ = await _publish(
+        [forgejo, github],
+        tmp_path,
+        config=config,
+        downloader=downloader,
+        repo=SPELLING_FORGEJO_REPO,
+    )
+
+    label = f"forgejo:{SPELLING_FORGEJO_REPO}"
+    assert downloader.reads == [], "a different repository is never read"
+    assert sorted(forgejo.asset_names()) == sorted(FILES)
+    assert not report.pulled.get(label)
+    assert report.pending.get(label), "the piece stays pending, never pulled"
+    assert report.failed == [], report.failure_details
 
 
 # --- Criterion 3: pull only after GitHub presence; free-space in report ----
