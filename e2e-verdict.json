@@ -1,5 +1,5 @@
 {
- "candidate_sha": "10e7348721c754f984802c7bb5a4172267efc875",
+ "candidate_sha": "f1a7539ef32f68254ac5e9e92213a6458197894c",
  "result": "green",
  "runs": [
   {
@@ -15,19 +15,41 @@
    "ok": true
   },
   {
-   "name": "negative-control",
-   "ok": false,
-   "expected": "red",
-   "names_title": "release-e2e v0.1.7 instead of the declared Release E2E v0.1.7"
+   "name": "layover-first",
+   "ok": true
   },
   {
-   "name": "base-3.7.2",
+   "name": "workflow-first",
+   "ok": true
+  },
+  {
+   "name": "concurrent",
+   "ok": true
+  },
+  {
+   "name": "webhook-redelivery",
+   "ok": true
+  },
+  {
+   "name": "softprops-precreated",
+   "ok": true
+  },
+  {
+   "name": "runner-attach",
+   "ok": true
+  },
+  {
+   "name": "declared-template",
+   "ok": true
+  },
+  {
+   "name": "base-3.7.3",
    "ok": false,
    "expected": "red",
-   "names": "the attach without --name-template resolved the derived default and retitled the release"
+   "names": "release_e2e-0.1.8-py3-none-any.whl missing on forgejo:langevc/release-e2e"
   }
  ],
- "engine": "ops-engine 3.7.3 wheel built from 10e7348 (sha256 865fdd6f15b525123b3b5fc7f40193afd959be50244be8c4dab8c15668798959)",
- "harness": "release-e2e main 5da8b2d2, ordering declared-template (the seventh), live on both forges",
- "produced_at": "2026-11-23T16:08:00Z"
+ "engine": "ops-engine 3.7.4 wheel built from f1a7539 (sha256 bd8aef500bd61a5cc8325b0997cbb4147822c296e7fabe5a1d62da779076ddc2)",
+ "harness": "release-e2e main 5039451, orderings pull-spelling (run1 to run3), the six REA-021 orderings run one at a time, declared-template; live on both forges",
+ "produced_at": "2026-11-25T22:53:12Z"
 }
