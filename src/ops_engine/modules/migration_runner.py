@@ -31,6 +31,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
+from urllib.parse import unquote
 
 from ops_engine.modules import git_process
 
@@ -161,25 +162,61 @@ def _run_clone(cmd: list) -> None:
 
 #: Userinfo of a URL found somewhere in free text.
 _URL_USERINFO = re.compile(r"(?<=://)[^/\s]*@")
-#: Userinfo of a string known to be one URL: everything up to its last "@",
-#: whatever characters a password put there.
-_CONFIGURED_USERINFO = re.compile(r"(?<=://)(.*)@", re.DOTALL)
-_BLANK_OR_CONTROL = re.compile(r"[\s\x00-\x1f\x7f]")
+#: Scheme, authority and the rest of a ``scheme://`` URL.
+_URL_PARTS = re.compile(r"([^/]*)://([^/?#]*)(.*)", re.DOTALL)
+#: What a token, and the userinfo of a URL, may consist of. Any other character
+#: lets git or curl cut, rewrite or re-read the value, so that it could no longer
+#: be recognised in their output.
+_CREDENTIAL = re.compile(r"[A-Za-z0-9._~+=%:-]*")
+#: The schemes under which git authenticates with what stands before the "@".
+_CREDENTIAL_SCHEMES = {"http", "https", "ssh", "git+ssh", "ssh+git", "ftp", "ftps"}
+#: A shorter secret is replaced only where it stands as a word of its own.
+_SHORT_SECRET = 8
 
 
-def _secrets_in(url: str) -> list:
-    """The userinfo (with its "@") and the password written into ``url``."""
-    found = _CONFIGURED_USERINFO.search(url)
-    if not found:
-        return []
-    userinfo = found.group(1)
-    return [s for s in (userinfo + "@", userinfo.partition(":")[2]) if s]
+def _check_url(url: str) -> None:
+    """Raise ``RuntimeError``, naming no part of ``url``, if a credential in it
+    could not be recognised reliably. Paths and ``file://`` URLs carry none.
+    """
+    parts = _URL_PARTS.fullmatch(url)
+    if not parts or parts[1] == "file":
+        return
+    scheme, authority, rest = parts.groups()
+    userinfo, at, _ = authority.rpartition("@")
+    # An "@" further on usually means that a "/", "?" or "#" cut a credential.
+    if (
+        "@" in rest
+        or (at and scheme.lower() not in _CREDENTIAL_SCHEMES)
+        or not _CREDENTIAL.fullmatch(userinfo.replace("${TOKEN}", ""))
+    ):
+        raise RuntimeError(
+            "GitRepoSource: percent-encode the source URL: user name and password "
+            "may contain only letters, digits and . _ ~ + = % : - unencoded, an "
+            '"@" may stand only before the host (%40 elsewhere), and only http, '
+            "ssh and ftp URLs take a user name"
+        )
 
 
-def _without_credentials(text: str, secrets: tuple = ()) -> str:
+def _secrets(url: str, token: str) -> set:
+    """The values that must not be repeated for a clone of ``url``."""
+    values = [token]
+    parts = _URL_PARTS.fullmatch(url)
+    if parts and parts[1] != "file":
+        user, _, password = parts[2].rpartition("@")[0].partition(":")
+        values.append(password)
+        # Over HTTP a token may stand as the user name; an SSH user name may not.
+        if parts[1] in ("http", "https"):
+            values.append(user)
+    return {form for value in values if value for form in (value, unquote(value))}
+
+
+def _without_credentials(text: str, secrets: set) -> str:
     """``text`` without any of ``secrets`` and without the userinfo of any URL."""
-    for secret in sorted(filter(None, secrets), key=len, reverse=True):
-        text = text.replace(secret, "" if secret.endswith("@") else "***")
+    for secret in sorted(secrets, key=len, reverse=True):
+        pattern = re.escape(secret)
+        if len(secret) < _SHORT_SECRET:
+            pattern = f"(?<![A-Za-z0-9]){pattern}(?![A-Za-z0-9])"
+        text = re.sub(pattern, "***", text)
     return _URL_USERINFO.sub("", text)
 
 
@@ -190,6 +227,12 @@ class GitRepoSource(MigrationSource):
     ``https://github.com/…`` URL, the runner rewrites it to
     ``https://x-access-token:<token>@github.com/…`` for the clone. Falls back to
     anonymous clone if the env var is unset (with a WARNING log).
+
+    A token put into the URL, and the userinfo written into a URL, may contain
+    only ``A-Z a-z 0-9 . _ ~ + = % : -``; anything else is refused before git
+    runs and has to be percent-encoded. The same holds for an ``@`` after the
+    host of a URL other than ``file://``. Only http, ssh and ftp URLs may name a
+    user at all.
     """
 
     def __init__(
@@ -237,22 +280,15 @@ class GitRepoSource(MigrationSource):
         tmpdir = Path(tempfile.mkdtemp(prefix="ops-engine-migrations-"))
         try:
             token = self._token()
-            shown = _without_credentials(
-                _CONFIGURED_USERINFO.sub("", self.url), (token,)
-            )
-            # git rewrites such characters when it repeats a URL, so the value
-            # could not be recognised in its output: refuse it before git runs.
-            if _BLANK_OR_CONTROL.search(token):
-                raise RuntimeError(
-                    f"GitRepoSource: {self.token_env_var} contains whitespace or "
-                    "control characters"
-                )
-            if any(_BLANK_OR_CONTROL.search(s) for s in _secrets_in(self.url)):
-                raise RuntimeError(
-                    f"GitRepoSource: the credential in the URL for {shown} contains "
-                    "whitespace or control characters"
-                )
+            _check_url(self.url)
+            shown = _without_credentials(self.url, {token} if token else set())
             url = self._authenticated_url()
+            # Only a token that goes into the URL is judged.
+            if url != self.url and not _CREDENTIAL.fullmatch(token):
+                raise RuntimeError(
+                    f"GitRepoSource: {self.token_env_var} may contain only letters, "
+                    "digits and . _ ~ + = % : - (percent-encode anything else)"
+                )
             cmd = [
                 "git", "clone", "--depth", "1",
                 "--branch", self.ref,
@@ -272,10 +308,9 @@ class GitRepoSource(MigrationSource):
                 )
             except subprocess.CalledProcessError as e:
                 stderr = e.stderr.decode("utf-8", errors="replace") if e.stderr else ""
-                secrets = (token, *_secrets_in(url), *_secrets_in(self.url))
                 failure = (
                     f"git clone failed for {shown}@{self.ref} (exit {e.returncode}): "
-                    f"{_without_credentials(stderr.strip(), secrets)}"
+                    f"{_without_credentials(stderr.strip(), _secrets(url, token))}"
                 )
             if failure:
                 raise RuntimeError(failure) from None
