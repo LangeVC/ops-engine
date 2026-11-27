@@ -113,13 +113,12 @@ async def _run_git(argv: list, cwd: str, env: Optional[dict] = None) -> tuple:
     """Run git for real; return ``(exit_code, output)`` (stdout and stderr merged).
     ``env`` is added to the process environment. ``ls-remote`` and ``clone`` end
     after their limit with exit code 124."""
-    proc = await asyncio.create_subprocess_exec(
-        *argv,
+    proc = await git_process.start(
+        argv,
         cwd=cwd,
         env={**os.environ, **env} if env else None,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
-        **git_process.spawn_options(argv),
     )
     out, _, timed_out = await git_process.communicate(proc, argv)
     if timed_out:

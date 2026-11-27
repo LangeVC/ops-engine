@@ -142,19 +142,28 @@ class LocalDirSource(MigrationSource):
         yield self.path
 
 
+#: How long the output of a killed clone is still read.
+_DRAIN_SECONDS = 5
+
+
 def _run_clone(cmd: list) -> None:
-    """``subprocess.run(check=True)`` for a clone, bounded like every clone: the
-    whole process group is killed at the limit or when the caller is interrupted.
+    """``subprocess.run(check=True)`` for a clone, bounded like every clone: git
+    and its helpers are killed at the limit or when the caller is interrupted.
     """
-    proc = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        **git_process.spawn_options(cmd),
-    )
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
         out, err = proc.communicate(timeout=git_process.time_limit(cmd))
     except BaseException:
-        git_process.kill_group(proc.pid)
-        proc.communicate()
+        # An exited git is not reaped yet only while ``returncode`` is unset.
+        if proc.poll() is None:
+            git_process.kill_tree(proc.pid)
+        try:
+            proc.communicate(timeout=_DRAIN_SECONDS)
+        except subprocess.TimeoutExpired:
+            # A child that outlived git still holds the pipes: stop reading.
+            proc.stdout.close()
+            proc.stderr.close()
+            proc.wait()
         raise
     if proc.returncode != 0:
         raise subprocess.CalledProcessError(proc.returncode, cmd, out, err)

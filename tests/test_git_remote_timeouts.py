@@ -3,13 +3,19 @@
 The remote is a local TCP server that accepts the connection and sends nothing,
 so real git (and its ``git-remote-http`` child) waits for ever. The server sees
 EOF only when every process holding the connection is gone: that is the proof
-that nothing survives a timeout or a cancel.
+that nothing survives a timeout, a cancel or a signal to the caller's group.
 """
 
 import asyncio
 import importlib
+import os
+import signal
 import socket
+import subprocess
+import sys
+import textwrap
 import threading
+import time
 
 import pytest
 
@@ -149,3 +155,104 @@ def test_migration_clone_times_out_without_naming_the_token(remote, monkeypatch)
     assert "s3cr3t-value" not in chain
     assert seen[0].__suppress_context__, "the traceback would print the argv with the token"
     assert remote.hung_up.wait(5), "a git process still holds the connection"
+
+
+CALLS = {
+    "mirror": "asyncio.run(mirror._run_git(['git', 'ls-remote', url], '.'))",
+    "tag_identity": "asyncio.run(tag_identity._run_git(['git', 'ls-remote', url], '.'))",
+    "repo_exists": "asyncio.run(mirror.MirrorHandler._repo_exists(url))",
+    "migration": "migration_runner.GitRepoSource(url).materialize().__enter__()",
+}
+
+
+@pytest.mark.parametrize("call", sorted(CALLS))
+def test_a_signal_to_the_callers_group_reaches_git(remote, tmp_path, call):
+    program = textwrap.dedent(
+        f"""
+        import asyncio, sys
+        from ops_engine.modules import migration_runner, mirror, tag_identity
+        url = sys.argv[1]
+        {CALLS[call]}
+        """
+    )
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(p for p in sys.path if p)}
+    caller = subprocess.Popen(
+        [sys.executable, "-c", program, remote.url],
+        cwd=tmp_path, env=env, start_new_session=True,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        assert remote.connected.wait(GUARD), "git never reached the remote"
+        os.killpg(caller.pid, signal.SIGTERM)
+        caller.wait(GUARD)
+        assert remote.hung_up.wait(5), "git survived the signal to the caller's group"
+    finally:
+        if caller.poll() is None:
+            os.killpg(caller.pid, signal.SIGKILL)
+
+
+@pytest.mark.parametrize("call", ["mirror", "tag_identity", "repo_exists"])
+def test_a_cancel_during_process_start_takes_the_helpers_along(
+    remote, tmp_path, monkeypatch, call
+):
+    _set_limit(monkeypatch, "LS_REMOTE_TIMEOUT_SECONDS", 600)
+    argv = ["git", "ls-remote", remote.url]
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        connect = loop.connect_read_pipe
+        started = asyncio.Event()
+
+        async def slow_connect(*args, **kwargs):
+            # The child runs already; keep the start unfinished until its helper
+            # holds the connection and the cancel has arrived.
+            await asyncio.to_thread(remote.connected.wait, GUARD)
+            started.set()
+            await asyncio.sleep(0.5)
+            return await connect(*args, **kwargs)
+
+        monkeypatch.setattr(loop, "connect_read_pipe", slow_connect)
+        if call == "repo_exists":
+            # It pipes nothing; hold the start at the transport instead.
+            make = loop._make_subprocess_transport
+
+            async def slow_transport(*args, **kwargs):
+                transport = await make(*args, **kwargs)
+                try:
+                    await slow_connect_gate()
+                except BaseException:
+                    transport.close()
+                    raise
+                return transport
+
+            async def slow_connect_gate():
+                await asyncio.to_thread(remote.connected.wait, GUARD)
+                started.set()
+                await asyncio.sleep(0.5)
+
+            monkeypatch.setattr(loop, "_make_subprocess_transport", slow_transport)
+        coro = {
+            "mirror": lambda: mirror._run_git(argv, str(tmp_path)),
+            "tag_identity": lambda: tag_identity._run_git(argv, str(tmp_path)),
+            "repo_exists": lambda: mirror.MirrorHandler._repo_exists(remote.url),
+        }[call]()
+        task = asyncio.ensure_future(coro)
+        await asyncio.wait_for(started.wait(), GUARD)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, GUARD)
+        assert await asyncio.to_thread(remote.hung_up.wait, 5), "a helper survived the cancel"
+
+    asyncio.run(scenario())
+
+
+def test_a_timed_out_clone_ends_even_if_a_stray_child_holds_the_pipes(tmp_path, monkeypatch):
+    """git is gone, a child of it keeps stdout open: the caller must not wait for it."""
+    _set_limit(monkeypatch, "CLONE_TIMEOUT_SECONDS", 1.0)
+    fake = tmp_path / "git"
+    fake.write_text("#!/bin/sh\nsleep 30 &\nexit 0\n")
+    fake.chmod(0o755)
+    begun = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired):
+        migration_runner._run_clone([str(fake), "clone"])
+    assert time.monotonic() - begun < GUARD

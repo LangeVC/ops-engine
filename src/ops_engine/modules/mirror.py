@@ -1538,9 +1538,7 @@ class MirrorHandler:
         if env is not None:
             kwargs["env"] = {**os.environ, **env}
         argv = ["git", "ls-remote", remote, "HEAD"]
-        proc = await asyncio.create_subprocess_exec(
-            *argv, **kwargs, **git_process.spawn_options(argv),
-        )
+        proc = await git_process.start(argv, **kwargs)
         _out, _err, timed_out = await git_process.communicate(proc, argv)
         return not timed_out and proc.returncode == 0
 
@@ -1642,8 +1640,7 @@ async def _run_git(
     if env is not None:
         merged_env.update(env)
     kwargs["env"] = merged_env
-    kwargs.update(git_process.spawn_options(clean_argv))
-    proc = await asyncio.create_subprocess_exec(*clean_argv, **kwargs)
+    proc = await git_process.start(clean_argv, **kwargs)
     out, err, timed_out = await git_process.communicate(proc, clean_argv)
     if timed_out:
         logger.error(f"git {clean_argv[1]} timed out and was killed")
