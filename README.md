@@ -237,6 +237,12 @@ migrations:
     mode: manual_apply       # manual_apply (safe) | auto_apply (ephemeral only)
 ```
 
+The token put into a git source URL, and a user name or password written into
+the URL, may contain only `A-Z a-z 0-9 . _ ~ + = % : -`. Percent-encode any
+other character, and write an `@` after the host as `%40`; otherwise the clone is
+refused before git runs. Only HTTP, SSH and FTP URLs may name a user.
+`file://` URLs and local paths are not checked.
+
 The runner stores `(version, applied_at, checksum, applied_by)` in the
 configured table, detects file drift via sha256 checksums, retries on
 `lock_timeout` with backoff `[2, 5, 10, 20, 30]s`, and automatically pulls
