@@ -45,6 +45,8 @@ import re
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional
 
+from ops_engine.modules import git_process
+
 __all__ = [
     "push_canonical_tag",
     "MirrorTagIdentity",
@@ -109,15 +111,19 @@ class MirrorTagIdentity:
 
 async def _run_git(argv: list, cwd: str, env: Optional[dict] = None) -> tuple:
     """Run git for real; return ``(exit_code, output)`` (stdout and stderr merged).
-    ``env`` is added to the process environment."""
+    ``env`` is added to the process environment. ``ls-remote`` and ``clone`` end
+    after their limit with exit code 124."""
     proc = await asyncio.create_subprocess_exec(
         *argv,
         cwd=cwd,
         env={**os.environ, **env} if env else None,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
+        **git_process.spawn_options(argv),
     )
-    out, _ = await proc.communicate()
+    out, _, timed_out = await git_process.communicate(proc, argv)
+    if timed_out:
+        return git_process.TIMEOUT_EXIT_CODE, "git %s timed out" % argv[1]
     return proc.returncode or 0, (out or b"").decode(errors="replace")
 
 
