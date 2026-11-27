@@ -159,6 +159,16 @@ def _run_clone(cmd: list) -> None:
         raise subprocess.CalledProcessError(proc.returncode, cmd, out, err)
 
 
+_URL_USERINFO = re.compile(r"(?<=://)[^/\s'\"]*@")
+
+
+def _without_credentials(text: str, token: str = "") -> str:
+    """``text`` without the token and without the userinfo of any URL in it."""
+    if token:
+        text = text.replace(token, "***")
+    return _URL_USERINFO.sub("", text)
+
+
 class GitRepoSource(MigrationSource):
     """Shallow ``git clone --depth 1`` into a temp dir.
 
@@ -211,25 +221,29 @@ class GitRepoSource(MigrationSource):
                 self._authenticated_url(),
                 str(tmpdir / "repo"),
             ]
-            logger.info("GitRepoSource: cloning %s @ %s", self.url, self.ref)
+            token = os.environ.get(self.token_env_var, "") if self.token_env_var else ""
+            shown = _without_credentials(self.url, token)
+            logger.info("GitRepoSource: cloning %s @ %s", shown, self.ref)
             try:
                 _run_clone(cmd)
             except subprocess.TimeoutExpired:
                 # ``from None``: the exception carries argv, and argv the token.
                 raise RuntimeError(
-                    f"git clone timed out for {self.url}@{self.ref} after "
+                    f"git clone timed out for {shown}@{self.ref} after "
                     f"{git_process.CLONE_TIMEOUT_SECONDS:g} seconds"
                 ) from None
             except subprocess.CalledProcessError as e:
                 stderr = e.stderr.decode("utf-8", errors="replace") if e.stderr else ""
+                # ``from None`` for the same reason as above.
                 raise RuntimeError(
-                    f"git clone failed for {self.url}@{self.ref}: {stderr.strip()}"
-                ) from e
+                    f"git clone failed for {shown}@{self.ref} (exit {e.returncode}): "
+                    f"{_without_credentials(stderr.strip(), token)}"
+                ) from None
             sub = tmpdir / "repo" / self.subpath
             if not sub.is_dir():
                 raise RuntimeError(
                     f"GitRepoSource: subpath {self.subpath!r} does not exist in "
-                    f"{self.url}@{self.ref}"
+                    f"{shown}@{self.ref}"
                 )
             yield sub
         finally:
