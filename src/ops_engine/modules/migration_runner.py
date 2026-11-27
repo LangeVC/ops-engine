@@ -159,13 +159,27 @@ def _run_clone(cmd: list) -> None:
         raise subprocess.CalledProcessError(proc.returncode, cmd, out, err)
 
 
-_URL_USERINFO = re.compile(r"(?<=://)[^/\s'\"]*@")
+#: Userinfo of a URL found somewhere in free text.
+_URL_USERINFO = re.compile(r"(?<=://)[^/\s]*@")
+#: Userinfo of a string known to be one URL: everything up to its last "@",
+#: whatever characters a password put there.
+_CONFIGURED_USERINFO = re.compile(r"(?<=://)(.*)@", re.DOTALL)
+_BLANK_OR_CONTROL = re.compile(r"[\s\x00-\x1f\x7f]")
 
 
-def _without_credentials(text: str, token: str = "") -> str:
-    """``text`` without the token and without the userinfo of any URL in it."""
-    if token:
-        text = text.replace(token, "***")
+def _secrets_in(url: str) -> list:
+    """The userinfo (with its "@") and the password written into ``url``."""
+    found = _CONFIGURED_USERINFO.search(url)
+    if not found:
+        return []
+    userinfo = found.group(1)
+    return [s for s in (userinfo + "@", userinfo.partition(":")[2]) if s]
+
+
+def _without_credentials(text: str, secrets: tuple = ()) -> str:
+    """``text`` without any of ``secrets`` and without the userinfo of any URL."""
+    for secret in sorted(filter(None, secrets), key=len, reverse=True):
+        text = text.replace(secret, "" if secret.endswith("@") else "***")
     return _URL_USERINFO.sub("", text)
 
 
@@ -191,10 +205,17 @@ class GitRepoSource(MigrationSource):
         self.subpath = subpath
         self.token_env_var = token_env_var
 
+    def _token(self) -> str:
+        """The token without surrounding whitespace (a trailing newline or CR
+        from a secrets file), or ``""``."""
+        if not self.token_env_var:
+            return ""
+        return os.environ.get(self.token_env_var, "").strip()
+
     def _authenticated_url(self) -> str:
         if not self.token_env_var:
             return self.url
-        token = os.environ.get(self.token_env_var)
+        token = self._token()
         if not token:
             logger.warning(
                 "GitRepoSource: %s is not set; cloning anonymously",
@@ -215,30 +236,49 @@ class GitRepoSource(MigrationSource):
     def materialize(self) -> Iterator[Path]:
         tmpdir = Path(tempfile.mkdtemp(prefix="ops-engine-migrations-"))
         try:
+            token = self._token()
+            shown = _without_credentials(
+                _CONFIGURED_USERINFO.sub("", self.url), (token,)
+            )
+            # git rewrites such characters when it repeats a URL, so the value
+            # could not be recognised in its output: refuse it before git runs.
+            if _BLANK_OR_CONTROL.search(token):
+                raise RuntimeError(
+                    f"GitRepoSource: {self.token_env_var} contains whitespace or "
+                    "control characters"
+                )
+            if any(_BLANK_OR_CONTROL.search(s) for s in _secrets_in(self.url)):
+                raise RuntimeError(
+                    f"GitRepoSource: the credential in the URL for {shown} contains "
+                    "whitespace or control characters"
+                )
+            url = self._authenticated_url()
             cmd = [
                 "git", "clone", "--depth", "1",
                 "--branch", self.ref,
-                self._authenticated_url(),
+                url,
                 str(tmpdir / "repo"),
             ]
-            token = os.environ.get(self.token_env_var, "") if self.token_env_var else ""
-            shown = _without_credentials(self.url, token)
             logger.info("GitRepoSource: cloning %s @ %s", shown, self.ref)
+            # The error is raised outside the ``except`` blocks: the caught
+            # exception carries argv, argv the token, and nothing may keep it.
+            failure = None
             try:
                 _run_clone(cmd)
             except subprocess.TimeoutExpired:
-                # ``from None``: the exception carries argv, and argv the token.
-                raise RuntimeError(
+                failure = (
                     f"git clone timed out for {shown}@{self.ref} after "
                     f"{git_process.CLONE_TIMEOUT_SECONDS:g} seconds"
-                ) from None
+                )
             except subprocess.CalledProcessError as e:
                 stderr = e.stderr.decode("utf-8", errors="replace") if e.stderr else ""
-                # ``from None`` for the same reason as above.
-                raise RuntimeError(
+                secrets = (token, *_secrets_in(url), *_secrets_in(self.url))
+                failure = (
                     f"git clone failed for {shown}@{self.ref} (exit {e.returncode}): "
-                    f"{_without_credentials(stderr.strip(), token)}"
-                ) from None
+                    f"{_without_credentials(stderr.strip(), secrets)}"
+                )
+            if failure:
+                raise RuntimeError(failure) from None
             sub = tmpdir / "repo" / self.subpath
             if not sub.is_dir():
                 raise RuntimeError(

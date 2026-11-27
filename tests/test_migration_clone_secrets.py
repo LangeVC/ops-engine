@@ -58,3 +58,83 @@ def test_a_credential_written_into_the_url_is_not_printed(caplog):
     text = _failure(source, caplog)
     assert "127.0.0.1:1/org/repo.git" in text, "the repository must stay identifiable"
     assert LITERAL not in text
+
+
+@pytest.mark.parametrize("ending", ["\r\n", "\r", "\n", " "], ids=["crlf", "cr", "lf", "space"])
+@pytest.mark.parametrize(
+    "url",
+    ["http://u:${TOKEN}@127.0.0.1:1/org/repo.git", "http://127.0.0.1:1/org/repo.git?t=${TOKEN}"],
+    ids=["userinfo", "query"],
+)
+def test_whitespace_around_the_token_is_dropped(monkeypatch, caplog, url, ending):
+    monkeypatch.setenv("LVC312_TOKEN", TOKEN + ending)
+    seen = []
+
+    def failing(cmd):
+        seen.append(cmd[-2])
+        raise subprocess.CalledProcessError(128, cmd, b"", b"fatal: refused")
+
+    monkeypatch.setattr(migration_runner, "_run_clone", failing)
+    text = _failure(migration_runner.GitRepoSource(url, token_env_var="LVC312_TOKEN"), caplog)
+    assert seen == [url.replace("${TOKEN}", TOKEN)]
+    assert TOKEN not in text
+
+
+@pytest.mark.parametrize("gap", ["\r\n", "\n", " ", "\t", "\x01"], ids=["crlf", "lf", "space", "tab", "ctrl"])
+def test_a_token_with_whitespace_inside_is_refused_unprinted(monkeypatch, caplog, gap):
+    monkeypatch.setenv("LVC312_TOKEN", "dummy-head" + gap + "dummy-tail")
+    monkeypatch.setattr(migration_runner, "_run_clone", lambda cmd: pytest.fail("git was started"))
+    source = migration_runner.GitRepoSource(
+        "http://u:${TOKEN}@127.0.0.1:1/org/repo.git", token_env_var="LVC312_TOKEN"
+    )
+    text = _failure(source, caplog)
+    assert "LVC312_TOKEN" in text, "the operator must learn which value is broken"
+    assert "dummy-head" not in text and "dummy-tail" not in text
+
+
+@pytest.mark.parametrize(
+    "mark", ["'", '"', "/", "@", "?", "#", " ", "\n", "\r"],
+    ids=["quote", "dquote", "slash", "at", "question", "hash", "space", "lf", "cr"],
+)
+def test_a_literal_password_with_any_character_is_not_printed(caplog, mark):
+    """Real git against a closed port: neither half of the password may appear."""
+    password = "dumhead" + mark + "dumtail"
+    source = migration_runner.GitRepoSource(f"http://u:{password}@127.0.0.1:1/org/repo.git")
+    text = _failure(source, caplog)
+    assert "127.0.0.1:1/org/repo.git" in text, "the repository must stay identifiable"
+    assert "dumhead" not in text and "dumtail" not in text
+
+
+def test_stderr_that_repeats_a_literal_password_is_scrubbed(monkeypatch, caplog):
+    def echoing(cmd):
+        stderr = f"fatal: bad url {cmd[-2]} (password {LITERAL}'x/y)".encode()
+        raise subprocess.CalledProcessError(128, cmd, b"", stderr)
+
+    monkeypatch.setattr(migration_runner, "_run_clone", echoing)
+    source = migration_runner.GitRepoSource(f"http://u:{LITERAL}'x/y@127.0.0.1:1/org/repo.git")
+    text = _failure(source, caplog)
+    assert "bad url" in text
+    assert LITERAL not in text
+
+
+def test_the_missing_subpath_message_names_no_credential(monkeypatch, caplog):
+    monkeypatch.setattr(migration_runner, "_run_clone", lambda cmd: None)
+    source = migration_runner.GitRepoSource(f"http://u:{LITERAL}@127.0.0.1:1/org/repo.git")
+    text = _failure(source, caplog)
+    assert "does not exist" in text
+    assert LITERAL not in text
+
+
+@pytest.mark.parametrize("kind", ["failed", "timeout"])
+def test_the_raised_error_keeps_no_handle_on_argv(monkeypatch, kind):
+    def failing(cmd):
+        if kind == "timeout":
+            raise subprocess.TimeoutExpired(cmd, 1)
+        raise subprocess.CalledProcessError(128, cmd, b"", b"")
+
+    monkeypatch.setattr(migration_runner, "_run_clone", failing)
+    source = migration_runner.GitRepoSource(f"http://u:{LITERAL}@127.0.0.1:1/org/repo.git")
+    with pytest.raises(RuntimeError) as caught:
+        with source.materialize():
+            pass
+    assert caught.value.__context__ is None and caught.value.__cause__ is None
