@@ -32,6 +32,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
+from ops_engine.modules import git_process
+
 logger = logging.getLogger(__name__)
 
 # ── Lazy optional dep ────────────────────────────────────────────────────────
@@ -139,6 +141,24 @@ class LocalDirSource(MigrationSource):
         yield self.path
 
 
+def _run_clone(cmd: list) -> None:
+    """``subprocess.run(check=True)`` for a clone, bounded like every clone: the
+    whole process group is killed at the limit or when the caller is interrupted.
+    """
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        **git_process.spawn_options(cmd),
+    )
+    try:
+        out, err = proc.communicate(timeout=git_process.time_limit(cmd))
+    except BaseException:
+        git_process.kill_group(proc.pid)
+        proc.communicate()
+        raise
+    if proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, cmd, out, err)
+
+
 class GitRepoSource(MigrationSource):
     """Shallow ``git clone --depth 1`` into a temp dir.
 
@@ -193,7 +213,13 @@ class GitRepoSource(MigrationSource):
             ]
             logger.info("GitRepoSource: cloning %s @ %s", self.url, self.ref)
             try:
-                subprocess.run(cmd, check=True, capture_output=True)
+                _run_clone(cmd)
+            except subprocess.TimeoutExpired:
+                # ``from None``: the exception carries argv, and argv the token.
+                raise RuntimeError(
+                    f"git clone timed out for {self.url}@{self.ref} after "
+                    f"{git_process.CLONE_TIMEOUT_SECONDS:g} seconds"
+                ) from None
             except subprocess.CalledProcessError as e:
                 stderr = e.stderr.decode("utf-8", errors="replace") if e.stderr else ""
                 raise RuntimeError(

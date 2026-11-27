@@ -102,6 +102,7 @@ from ops_engine.config_loader import (
     OpsEngineConfig,
     VALID_DESTINATION_VISIBILITIES,
 )
+from ops_engine.modules import git_process
 from ops_engine.modules.tag_identity import credential_env
 
 logger = logging.getLogger(__name__)
@@ -1524,6 +1525,9 @@ class MirrorHandler:
     async def _repo_exists(remote: str, *, env: Optional[dict] = None) -> bool:
         """EXISTS proof: ``git ls-remote <url> HEAD`` exits 0 iff readable.
 
+        A remote that does not answer within the ``ls-remote`` limit counts as
+        not readable.
+
         When ``env`` is given, it is passed to the subprocess so the credential
         reaches git through the environment, never in the URL or argv (P36-002).
         """
@@ -1533,14 +1537,12 @@ class MirrorHandler:
         }
         if env is not None:
             kwargs["env"] = {**os.environ, **env}
+        argv = ["git", "ls-remote", remote, "HEAD"]
         proc = await asyncio.create_subprocess_exec(
-            "git",
-            "ls-remote",
-            remote,
-            "HEAD",
-            **kwargs,
+            *argv, **kwargs, **git_process.spawn_options(argv),
         )
-        return await proc.wait() == 0
+        _out, _err, timed_out = await git_process.communicate(proc, argv)
+        return not timed_out and proc.returncode == 0
 
     @staticmethod
     async def _repo_is_ours(
@@ -1640,8 +1642,12 @@ async def _run_git(
     if env is not None:
         merged_env.update(env)
     kwargs["env"] = merged_env
+    kwargs.update(git_process.spawn_options(clean_argv))
     proc = await asyncio.create_subprocess_exec(*clean_argv, **kwargs)
-    out, err = await proc.communicate()
+    out, err, timed_out = await git_process.communicate(proc, clean_argv)
+    if timed_out:
+        logger.error(f"git {clean_argv[1]} timed out and was killed")
+        return git_process.TIMEOUT_EXIT_CODE, ""
     if err:
         logger.debug(f"git {argv[1:2]} stderr: {err.decode(errors='replace').strip()}")
     return proc.returncode or 0, (out or b"").decode(errors="replace")
