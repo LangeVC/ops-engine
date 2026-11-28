@@ -31,9 +31,6 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
-from urllib.parse import unquote
-
-from ops_engine.modules import git_process
 
 logger = logging.getLogger(__name__)
 
@@ -142,84 +139,6 @@ class LocalDirSource(MigrationSource):
         yield self.path
 
 
-def _run_clone(cmd: list) -> None:
-    """``subprocess.run(check=True)`` for a clone, bounded like every clone: the
-    whole process group is killed at the limit or when the caller is interrupted.
-    """
-    proc = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        **git_process.spawn_options(cmd),
-    )
-    try:
-        out, err = proc.communicate(timeout=git_process.time_limit(cmd))
-    except BaseException:
-        git_process.kill_group(proc.pid)
-        proc.communicate()
-        raise
-    if proc.returncode != 0:
-        raise subprocess.CalledProcessError(proc.returncode, cmd, out, err)
-
-
-#: Userinfo of a URL found somewhere in free text.
-_URL_USERINFO = re.compile(r"(?<=://)[^/\s]*@")
-#: Scheme, authority and the rest of a ``scheme://`` URL.
-_URL_PARTS = re.compile(r"([^/]*)://([^/?#]*)(.*)", re.DOTALL)
-#: What a token, and the userinfo of a URL, may consist of. Any other character
-#: lets git or curl cut, rewrite or re-read the value, so that it could no longer
-#: be recognised in their output.
-_CREDENTIAL = re.compile(r"[A-Za-z0-9._~+=%:-]*")
-#: The schemes under which git authenticates with what stands before the "@".
-_CREDENTIAL_SCHEMES = {"http", "https", "ssh", "git+ssh", "ssh+git", "ftp", "ftps"}
-#: A shorter secret is replaced only where it stands as a word of its own.
-_SHORT_SECRET = 8
-
-
-def _check_url(url: str) -> None:
-    """Raise ``RuntimeError``, naming no part of ``url``, if a credential in it
-    could not be recognised reliably. Paths and ``file://`` URLs carry none.
-    """
-    parts = _URL_PARTS.fullmatch(url)
-    if not parts or parts[1] == "file":
-        return
-    scheme, authority, rest = parts.groups()
-    userinfo, at, _ = authority.rpartition("@")
-    # An "@" further on usually means that a "/", "?" or "#" cut a credential.
-    if (
-        "@" in rest
-        or (at and scheme.lower() not in _CREDENTIAL_SCHEMES)
-        or not _CREDENTIAL.fullmatch(userinfo.replace("${TOKEN}", ""))
-    ):
-        raise RuntimeError(
-            "GitRepoSource: percent-encode the source URL: user name and password "
-            "may contain only letters, digits and . _ ~ + = % : - unencoded, an "
-            '"@" may stand only before the host (%40 elsewhere), and only http, '
-            "ssh and ftp URLs take a user name"
-        )
-
-
-def _secrets(url: str, token: str) -> set:
-    """The values that must not be repeated for a clone of ``url``."""
-    values = [token]
-    parts = _URL_PARTS.fullmatch(url)
-    if parts and parts[1] != "file":
-        user, _, password = parts[2].rpartition("@")[0].partition(":")
-        values.append(password)
-        # Over HTTP a token may stand as the user name; an SSH user name may not.
-        if parts[1] in ("http", "https"):
-            values.append(user)
-    return {form for value in values if value for form in (value, unquote(value))}
-
-
-def _without_credentials(text: str, secrets: set) -> str:
-    """``text`` without any of ``secrets`` and without the userinfo of any URL."""
-    for secret in sorted(secrets, key=len, reverse=True):
-        pattern = re.escape(secret)
-        if len(secret) < _SHORT_SECRET:
-            pattern = f"(?<![A-Za-z0-9]){pattern}(?![A-Za-z0-9])"
-        text = re.sub(pattern, "***", text)
-    return _URL_USERINFO.sub("", text)
-
-
 class GitRepoSource(MigrationSource):
     """Shallow ``git clone --depth 1`` into a temp dir.
 
@@ -227,12 +146,6 @@ class GitRepoSource(MigrationSource):
     ``https://github.com/…`` URL, the runner rewrites it to
     ``https://x-access-token:<token>@github.com/…`` for the clone. Falls back to
     anonymous clone if the env var is unset (with a WARNING log).
-
-    A token put into the URL, and the userinfo written into a URL, may contain
-    only ``A-Z a-z 0-9 . _ ~ + = % : -``; anything else is refused before git
-    runs and has to be percent-encoded. The same holds for an ``@`` after the
-    host of a URL other than ``file://``. Only http, ssh and ftp URLs may name a
-    user at all.
     """
 
     def __init__(
@@ -248,17 +161,10 @@ class GitRepoSource(MigrationSource):
         self.subpath = subpath
         self.token_env_var = token_env_var
 
-    def _token(self) -> str:
-        """The token without surrounding whitespace (a trailing newline or CR
-        from a secrets file), or ``""``."""
-        if not self.token_env_var:
-            return ""
-        return os.environ.get(self.token_env_var, "").strip()
-
     def _authenticated_url(self) -> str:
         if not self.token_env_var:
             return self.url
-        token = self._token()
+        token = os.environ.get(self.token_env_var)
         if not token:
             logger.warning(
                 "GitRepoSource: %s is not set; cloning anonymously",
@@ -279,46 +185,25 @@ class GitRepoSource(MigrationSource):
     def materialize(self) -> Iterator[Path]:
         tmpdir = Path(tempfile.mkdtemp(prefix="ops-engine-migrations-"))
         try:
-            token = self._token()
-            _check_url(self.url)
-            shown = _without_credentials(self.url, {token} if token else set())
-            url = self._authenticated_url()
-            # Only a token that goes into the URL is judged.
-            if url != self.url and not _CREDENTIAL.fullmatch(token):
-                raise RuntimeError(
-                    f"GitRepoSource: {self.token_env_var} may contain only letters, "
-                    "digits and . _ ~ + = % : - (percent-encode anything else)"
-                )
             cmd = [
                 "git", "clone", "--depth", "1",
                 "--branch", self.ref,
-                url,
+                self._authenticated_url(),
                 str(tmpdir / "repo"),
             ]
-            logger.info("GitRepoSource: cloning %s @ %s", shown, self.ref)
-            # The error is raised outside the ``except`` blocks: the caught
-            # exception carries argv, argv the token, and nothing may keep it.
-            failure = None
+            logger.info("GitRepoSource: cloning %s @ %s", self.url, self.ref)
             try:
-                _run_clone(cmd)
-            except subprocess.TimeoutExpired:
-                failure = (
-                    f"git clone timed out for {shown}@{self.ref} after "
-                    f"{git_process.CLONE_TIMEOUT_SECONDS:g} seconds"
-                )
+                subprocess.run(cmd, check=True, capture_output=True)
             except subprocess.CalledProcessError as e:
                 stderr = e.stderr.decode("utf-8", errors="replace") if e.stderr else ""
-                failure = (
-                    f"git clone failed for {shown}@{self.ref} (exit {e.returncode}): "
-                    f"{_without_credentials(stderr.strip(), _secrets(url, token))}"
-                )
-            if failure:
-                raise RuntimeError(failure) from None
+                raise RuntimeError(
+                    f"git clone failed for {self.url}@{self.ref}: {stderr.strip()}"
+                ) from e
             sub = tmpdir / "repo" / self.subpath
             if not sub.is_dir():
                 raise RuntimeError(
                     f"GitRepoSource: subpath {self.subpath!r} does not exist in "
-                    f"{shown}@{self.ref}"
+                    f"{self.url}@{self.ref}"
                 )
             yield sub
         finally:
